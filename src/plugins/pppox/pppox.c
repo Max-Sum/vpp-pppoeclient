@@ -166,14 +166,6 @@ format_pppox_name (u8 * s, va_list * args)
   return format (s, "pppox%d", dev_instance);
 }
 
-static uword
-dummy_interface_tx (vlib_main_t * vm,
-                    vlib_node_runtime_t * node, vlib_frame_t * frame)
-{
-  clib_warning ("you shouldn't be here, leaking buffers...");
-  return frame->n_vectors;
-}
-
 static clib_error_t *
 pppox_interface_admin_up_down (vnet_main_t * vnm, u32 hw_if_index, u32 flags)
 {
@@ -214,7 +206,6 @@ pppox_build_rewrite (vnet_main_t * vnm,
 VNET_DEVICE_CLASS (pppox_device_class,static) = {
   .name = "PPPPOX",
   .format_device_name = format_pppox_name,
-  .tx_function = dummy_interface_tx,
   .admin_up_down_function = pppox_interface_admin_up_down,
 };
 /* *INDENT-ON* */
@@ -276,7 +267,7 @@ pppox_allocate_interface (u32 pppoe_client_index)
         (vnm, pppox_device_class.index, t - pom->virtual_interfaces,
          pppox_hw_class.index,  t - pom->virtual_interfaces);
       hi = vnet_get_hw_interface (vnm, hw_if_index);
-      hi->output_node_index = pppox_output_node.index;
+      vnet_set_interface_output_node(vnm, hw_if_index, pppox_output_node.index);
     }
 
   t->hw_if_index = hw_if_index;
@@ -522,7 +513,7 @@ VLIB_PLUGIN_REGISTER () = {
 void output (int unit, u8 *p, int len)
 {
   pppox_main_t * pom = &pppox_main;
-  vlib_main_t * vm = vlib_get_main();
+  vlib_main_t * vm = pom->vlib_main;
   vnet_main_t * vnm = pom->vnet_main;
   vlib_buffer_t * b;
   u32 bi;
@@ -536,7 +527,7 @@ void output (int unit, u8 *p, int len)
     // PPPoE client might be deleted, simple return.
     return;
   }
-
+  
   hw = vnet_get_hw_interface (vnm, t->hw_if_index);
   // TODO: should we should use packet template to prevent allocate buffer????
   if (vlib_buffer_alloc (vm, &bi, 1) != 1) {

@@ -649,11 +649,11 @@ log_write(level, buf)
     int level;
     char *buf;
 {
-    //syslog(level, "%s", buf);
+    syslog(level, "%s", buf);
     // ZDY: simplew write to console.
     // TODO: later we may add a cicylic log buffer for each pppox interface
     // and add a cli to dump them.
-    printf("%s\n", buf);
+    //printf("%s\n", buf);
 }
 
 /*

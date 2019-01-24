@@ -105,6 +105,9 @@ typedef struct
   /* pppox intf index */
   u32 pppox_sw_if_index;
   u32 pppox_hw_if_index;
+  
+  /* Required for pool_get_aligned */
+  CLIB_CACHE_LINE_ALIGN_MARK(cacheline0);
 } pppoe_client_t;
 
 typedef enum

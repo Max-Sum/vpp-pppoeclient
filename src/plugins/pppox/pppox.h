@@ -67,6 +67,9 @@ typedef struct
   /* record allocated address. */
   u32 our_addr;
   u32 his_addr;
+  
+  /* Required for pool_get_aligned */
+  CLIB_CACHE_LINE_ALIGN_MARK(cacheline0);
 } pppox_virtual_interface_t;
 
 typedef struct
