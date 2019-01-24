@@ -25,7 +25,7 @@
 
 #include <vlibapi/api.h>
 #include <vlibmemory/api.h>
-#include <vlibsocket/api.h>
+
 
 /* define message IDs */
 #include <ioam/lib-vxlan-gpe/vxlan_gpe_msg_enum.h>
@@ -61,7 +61,7 @@
 
 #define VXLAN_GPE_REPLY_MACRO(t)                                \
 do {                                                            \
-    unix_shared_memory_queue_t * q =                            \
+    svm_queue_t * q =                            \
     vl_api_client_index_to_input_queue (mp->client_index);      \
     if (!q)                                                     \
         return;                                                 \
@@ -77,7 +77,7 @@ do {                                                            \
 /* *INDENT-OFF* */
 #define VXLAN_GPE_REPLY_MACRO2(t, body)                         \
 do {                                                            \
-    unix_shared_memory_queue_t * q;                             \
+    svm_queue_t * q;                             \
     rv = vl_msg_api_pd_handler (mp, rv);                        \
     q = vl_api_client_index_to_input_queue (mp->client_index);  \
     if (!q)                                                     \
@@ -249,7 +249,7 @@ static void vl_api_vxlan_gpe_ioam_transit_enable_t_handler
   vxlan_gpe_ioam_main_t *sm = &vxlan_gpe_ioam_main;
   ip46_address_t dst_addr;
 
-  memset (&dst_addr.ip4, 0, sizeof (dst_addr.ip4));
+  clib_memset (&dst_addr.ip4, 0, sizeof (dst_addr.ip4));
   if (!mp->is_ipv6)
     {
       clib_memcpy (&dst_addr.ip4, &mp->dst_addr, sizeof (dst_addr.ip4));
@@ -271,7 +271,7 @@ static void vl_api_vxlan_gpe_ioam_transit_disable_t_handler
   vxlan_gpe_ioam_main_t *sm = &vxlan_gpe_ioam_main;
   ip46_address_t dst_addr;
 
-  memset (&dst_addr.ip4, 0, sizeof (dst_addr.ip4));
+  clib_memset (&dst_addr.ip4, 0, sizeof (dst_addr.ip4));
   if (!mp->is_ipv6)
     {
       clib_memcpy (&dst_addr.ip4, &mp->dst_addr, sizeof (dst_addr.ip4));

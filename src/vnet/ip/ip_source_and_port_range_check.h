@@ -24,7 +24,7 @@ typedef struct
   vnet_main_t *vnet_main;
 } source_range_check_main_t;
 
-source_range_check_main_t source_range_check_main;
+extern source_range_check_main_t source_range_check_main;
 
 typedef enum
 {
@@ -101,6 +101,11 @@ typedef struct
  */
 typedef struct protocol_port_range_dpo_t_
 {
+  /**
+   * Required for pool_get_aligned
+   */
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+
   /**
    * The number of blocks from the 'block' array below
    * that have rnages configured. We keep this count so that in the data-path

@@ -1,8 +1,11 @@
 import signal
 import os
+import sys
 import traceback
 from log import RED, single_line_delim, double_line_delim
-from debug import spawn_gdb, gdb_path
+import ipaddress
+from subprocess import check_output, CalledProcessError
+from util import check_core_path, get_core_path
 
 
 class Hook(object):
@@ -21,8 +24,23 @@ class Hook(object):
         @param api_name: name of the API
         @param api_args: tuple containing the API arguments
         """
+
+        def _friendly_format(val):
+            if not isinstance(val, str):
+                return val
+            if len(val) == 6:
+                return '{!s} ({!s})'.format(val, ':'.join(['{:02x}'.format(
+                    ord(x)) for x in val]))
+            try:
+                return '{!s} ({!s})'.format(val, str(
+                    ipaddress.ip_address(val)))
+            except ipaddress.AddressValueError:
+                return val
+
+        _args = ', '.join("{!s}={!r}".format(key, _friendly_format(val)) for
+                          (key, val) in api_args.items())
         self.logger.debug("API: %s (%s)" %
-                          (api_name, api_args), extra={'color': RED})
+                          (api_name, _args), extra={'color': RED})
 
     def after_api(self, api_name, api_args):
         """
@@ -57,19 +75,21 @@ class PollHook(Hook):
     """ Hook which checks if the vpp subprocess is alive """
 
     def __init__(self, testcase):
+        super(PollHook, self).__init__(testcase.logger)
         self.testcase = testcase
-        self.logger = testcase.logger
 
     def on_crash(self, core_path):
-        if self.testcase.debug_core:
-            if not spawn_gdb(self.testcase.vpp_bin, core_path):
-                self.logger.error(
-                    "Debugger '%s' does not exist or is not an executable.." %
-                    gdb_path)
-            else:
-                return
-        self.logger.critical("Core file present, debug with: gdb %s %s" %
-                             (self.testcase.vpp_bin, core_path))
+        self.logger.error("Core file present, debug with: gdb %s %s" %
+                          (self.testcase.vpp_bin, core_path))
+        check_core_path(self.logger, core_path)
+        self.logger.error("Running `file %s':" % core_path)
+        try:
+            info = check_output(["file", core_path])
+            self.logger.error(info)
+        except CalledProcessError as e:
+            self.logger.error(
+                "Could not run `file' utility on core-file, "
+                "rc=%s" % e.returncode)
 
     def poll_vpp(self):
         """
@@ -90,10 +110,10 @@ class PollHook(Hook):
                 s = signaldict[abs(self.testcase.vpp.returncode)]
             else:
                 s = "unknown"
-            msg = "VPP subprocess died unexpectedly with returncode %d [%s]" %\
-                (self.testcase.vpp.returncode, s)
+            msg = "VPP subprocess died unexpectedly with returncode %d [%s]." \
+                  % (self.testcase.vpp.returncode, s)
             self.logger.critical(msg)
-            core_path = self.testcase.tempdir + '/core'
+            core_path = get_core_path(self.testcase.tempdir)
             if os.path.isfile(core_path):
                 self.on_crash(core_path)
             self.testcase.vpp_dead = True
@@ -165,18 +185,19 @@ class StepHook(PollHook):
             print('%02d.\t%s\t%s:%d\t[%s]' % (counter, e[2], e[0], e[1], e[3]))
             counter += 1
         print(single_line_delim)
-        print("You can enter a number of stack frame chosen from above")
+        print("You may enter a number of stack frame chosen from above")
         print("Calls in/below that stack frame will be not be stepped anymore")
         print(single_line_delim)
         while True:
-            choice = raw_input("Enter your choice, if any, and press ENTER to "
-                               "continue running the testcase...")
+            print("Enter your choice, if any, and press ENTER to continue "
+                  "running the testcase...")
+            choice = sys.stdin.readline().rstrip('\r\n')
             if choice == "":
                 choice = None
             try:
                 if choice is not None:
                     num = int(choice)
-            except:
+            except ValueError:
                 print("Invalid input")
                 continue
             if choice is not None and (num < 0 or num >= len(stack)):

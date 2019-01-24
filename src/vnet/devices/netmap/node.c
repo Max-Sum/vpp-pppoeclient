@@ -57,7 +57,7 @@ format_netmap_input_trace (u8 * s, va_list * args)
   CLIB_UNUSED (vlib_main_t * vm) = va_arg (*args, vlib_main_t *);
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
   netmap_input_trace_t *t = va_arg (*args, netmap_input_trace_t *);
-  uword indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
 
   s = format (s, "netmap: hw_if_index %d next-index %d",
 	      t->hw_if_index, t->next_index);
@@ -98,9 +98,8 @@ netmap_device_input_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
   u32 n_free_bufs;
   struct netmap_ring *ring;
   int cur_ring;
-  u32 thread_index = vlib_get_thread_index ();
-  u32 n_buffer_bytes = vlib_buffer_free_list_buffer_size (vm,
-							  VLIB_BUFFER_DEFAULT_FREE_LIST_INDEX);
+  u32 thread_index = vm->thread_index;
+  u32 n_buffer_bytes = VLIB_BUFFER_DATA_SIZE;
 
   if (nif->per_interface_next_index != ~0)
     next_index = nif->per_interface_next_index;
@@ -174,10 +173,9 @@ netmap_device_input_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 		  u32 bytes_to_copy =
 		    data_len > n_buffer_bytes ? n_buffer_bytes : data_len;
 		  b0->current_data = 0;
-		  clib_memcpy (vlib_buffer_get_current (b0),
-			       (u8 *) NETMAP_BUF (ring,
-						  slot->buf_idx) + offset,
-			       bytes_to_copy);
+		  clib_memcpy_fast (vlib_buffer_get_current (b0),
+				    (u8 *) NETMAP_BUF (ring, slot->buf_idx) +
+				    offset, bytes_to_copy);
 
 		  /* fill buffer header */
 		  b0->current_length = bytes_to_copy;
@@ -260,7 +258,7 @@ netmap_input_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 {
   int i;
   u32 n_rx_packets = 0;
-  u32 thread_index = vlib_get_thread_index ();
+  u32 thread_index = vm->thread_index;
   netmap_main_t *nm = &netmap_main;
   netmap_if_t *nmi;
 

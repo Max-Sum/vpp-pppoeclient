@@ -18,6 +18,8 @@
 #include <vnet/fib/fib_table.h>
 #include <vnet/fib/ip4_fib.h>
 
+source_range_check_main_t source_range_check_main;
+
 /**
  * @file
  * @brief IPv4 Source and Port Range Checking.
@@ -131,9 +133,8 @@ check_adj_port_range_x1 (const protocol_port_range_dpo_t * ppr_dpo,
 	u16x8_sub_saturate (ppr_dpo->blocks[i].low.as_u16x8, key.as_u16x8);
       diff2.as_u16x8 =
 	u16x8_sub_saturate (ppr_dpo->blocks[i].hi.as_u16x8, key.as_u16x8);
-      sum.as_u16x8 = u16x8_add (diff1.as_u16x8, diff2.as_u16x8);
-      sum_equal_diff2.as_u16x8 =
-	u16x8_is_equal (sum.as_u16x8, diff2.as_u16x8);
+      sum.as_u16x8 = diff1.as_u16x8 + diff2.as_u16x8;
+      sum_equal_diff2.as_u16x8 = (sum.as_u16x8 == diff2.as_u16x8);
       sum_nonzero = ~u16x8_zero_byte_mask (sum.as_u16x8);
       sum_equal = ~u16x8_zero_byte_mask (sum_equal_diff2.as_u16x8);
       winner_mask = sum_nonzero & sum_equal;
@@ -448,8 +449,7 @@ ip4_source_and_port_range_check_inline (vlib_main_t * vm,
 
 	  ip0 = vlib_buffer_get_current (b0);
 
-	  c0 = vnet_feature_next_with_data (sw_if_index0, &next0,
-					    b0, sizeof (c0[0]));
+	  c0 = vnet_feature_next_with_data (&next0, b0, sizeof (c0[0]));
 
 	  /* we can't use the default VRF here... */
 	  for (i = 0; i < IP_SOURCE_AND_PORT_RANGE_CHECK_N_PROTOCOLS; i++)
@@ -591,7 +591,7 @@ VLIB_REGISTER_NODE (ip4_source_port_and_range_check_rx) = {
 
   .n_next_nodes = IP4_SOURCE_AND_PORT_RANGE_CHECK_N_NEXT,
   .next_nodes = {
-    [IP4_SOURCE_AND_PORT_RANGE_CHECK_NEXT_DROP] = "error-drop",
+    [IP4_SOURCE_AND_PORT_RANGE_CHECK_NEXT_DROP] = "ip4-drop",
   },
 
   .format_buffer = format_ip4_header,
@@ -610,7 +610,7 @@ VLIB_REGISTER_NODE (ip4_source_port_and_range_check_tx) = {
 
   .n_next_nodes = IP4_SOURCE_AND_PORT_RANGE_CHECK_N_NEXT,
   .next_nodes = {
-    [IP4_SOURCE_AND_PORT_RANGE_CHECK_NEXT_DROP] = "error-drop",
+    [IP4_SOURCE_AND_PORT_RANGE_CHECK_NEXT_DROP] = "ip4-drop",
   },
 
   .format_buffer = format_ip4_header,
@@ -775,7 +775,7 @@ set_ip_source_and_port_range_check_fn (vlib_main_t * vm,
  * Example of graph node before range checking is enabled:
  * @cliexstart{show vlib graph ip4-source-and-port-range-check-tx}
  *            Name                      Next                    Previous
- * ip4-source-and-port-range-      error-drop [0]
+ * ip4-source-and-port-range-      ip4-drop [0]
  * @cliexend
  *
  * Example of how to enable range checking on TX:
@@ -784,7 +784,7 @@ set_ip_source_and_port_range_check_fn (vlib_main_t * vm,
  * Example of graph node after range checking is enabled:
  * @cliexstart{show vlib graph ip4-source-and-port-range-check-tx}
  *            Name                      Next                    Previous
- * ip4-source-and-port-range-      error-drop [0]              ip4-rewrite
+ * ip4-source-and-port-range-      ip4-drop [0]                ip4-rewrite
  *                              interface-output [1]
  * @cliexend
  *
@@ -903,7 +903,7 @@ protocol_port_range_dpo_alloc (void)
   protocol_port_range_dpo_t *ppr_dpo;
 
   pool_get_aligned (ppr_dpo_pool, ppr_dpo, CLIB_CACHE_LINE_BYTES);
-  memset (ppr_dpo, 0, sizeof (*ppr_dpo));
+  clib_memset (ppr_dpo, 0, sizeof (*ppr_dpo));
 
   ppr_dpo->n_free_ranges = N_PORT_RANGES_PER_DPO;
 

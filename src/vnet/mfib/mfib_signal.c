@@ -71,14 +71,14 @@ mfib_signal_module_init (void)
 static inline void
 mfib_signal_lock_aquire (void)
 {
-    while (__sync_lock_test_and_set (&mfib_signal_pending.mip_lock, 1))
+    while (clib_atomic_test_and_set (&mfib_signal_pending.mip_lock))
         ;
 }
 
 static inline void
 mfib_signal_lock_release (void)
 {
-    mfib_signal_pending.mip_lock = 0;
+  clib_atomic_release(&mfib_signal_pending.mip_lock);
 }
 
 #define MFIB_SIGNAL_CRITICAL_SECTION(_body) \
@@ -91,7 +91,7 @@ mfib_signal_lock_release (void)
 }
 
 int
-mfib_signal_send_one (struct _unix_shared_memory_queue *q,
+mfib_signal_send_one (struct vl_api_registration_ *reg,
                       u32 context)
 {
     u32 li, si;
@@ -117,11 +117,11 @@ mfib_signal_send_one (struct _unix_shared_memory_queue *q,
         mfs = pool_elt_at_index(mfib_signal_pool, si);
         mfi = mfib_itf_get(mfs->mfs_itf);
         mfi->mfi_si = INDEX_INVALID;
-        __sync_fetch_and_and(&mfi->mfi_flags,
-                             ~MFIB_ITF_FLAG_SIGNAL_PRESENT);
+        clib_atomic_fetch_and(&mfi->mfi_flags,
+			      ~MFIB_ITF_FLAG_SIGNAL_PRESENT);
 
 
-        vl_mfib_signal_send_one(q, context, mfs);
+        vl_mfib_signal_send_one(reg, context, mfs);
 
         /*
          * with the lock held, return the resoruces of the signals posted

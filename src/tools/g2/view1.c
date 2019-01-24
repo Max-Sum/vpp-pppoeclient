@@ -1636,7 +1636,7 @@ static void init_track_colors(void)
     if (s_color != NULL ) {
         gdk_colormap_free_colors(gtk_widget_get_colormap(da), 
                                  s_color, g_npids);
-        memset(s_color, 0, sizeof(GdkColor) * g_npids);
+        clib_memset(s_color, 0, sizeof(GdkColor) * g_npids);
     } else {
         /*
          * First time through: allocate the array to hold the GCs.
@@ -2128,6 +2128,10 @@ static void view1_button_click_callback(GtkButton *item, gpointer data)
             g_events[g_nevents-1].time * 9) {
             s_v1->minvistime = 0;
             s_v1->maxvistime = g_events[g_nevents-1].time * 9 / 8;
+            /* Single event? Make window 1s wide... */
+            if (g_nevents == 1)
+                s_v1->maxvistime = 1000000;                
+
         }
         recompute_hscrollbar();
         break;
@@ -2967,6 +2971,9 @@ void view1_read_events_callback(void)
     
     s_v1->minvistime = 0LL;
     s_v1->maxvistime = (g_events[g_nevents - 1].time * 9)/ 8;
+    /* Single event? Make the initial display 1s wide */
+    if (g_nevents == 1)
+        s_v1->maxvistime = 1000000;
     s_srchindex = 0;
     s_srchcode = 0;
     s_last_selected_event = 0;

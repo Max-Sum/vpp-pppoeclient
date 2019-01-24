@@ -17,33 +17,16 @@
  *------------------------------------------------------------------
  */
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <setjmp.h>
-#include <sys/types.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <netinet/in.h>
-#include <signal.h>
-#include <pthread.h>
-#include <unistd.h>
-#include <time.h>
-#include <fcntl.h>
-#include <string.h>
-#include <vppinfra/clib.h>
-#include <vppinfra/vec.h>
-#include <vppinfra/hash.h>
-#include <vppinfra/bitmap.h>
-#include <vppinfra/fifo.h>
-#include <vppinfra/time.h>
-#include <vppinfra/mheap.h>
-#include <vppinfra/heap.h>
-#include <vppinfra/pool.h>
-#include <vppinfra/format.h>
 
-#include <vlib/vlib.h>
-#include <vlib/unix/unix.h>
-#include <vlibmemory/api.h>
+#include <svm/svm.h>
+#include <svm/ssvm.h>
+#include <vppinfra/serialize.h>
+#include <vppinfra/hash.h>
+#include <vlibmemory/memory_client.h>
+
+/* A hack. vl_client_get_first_plugin_msg_id depends on it */
+#include <vlibmemory/socket_client.h>
 
 #include <vlibmemory/vl_memory_msg_enum.h>
 
@@ -77,7 +60,7 @@ memory_client_main_t memory_client_main;
 static void *
 rx_thread_fn (void *arg)
 {
-  unix_shared_memory_queue_t *q;
+  svm_queue_t *q;
   memory_client_main_t *mm = &memory_client_main;
   api_main_t *am = &api_main;
   int i;
@@ -122,6 +105,29 @@ vl_api_rx_thread_exit_t_handler (vl_api_rx_thread_exit_t * mp)
 }
 
 static void
+vl_api_name_and_crc_free (void)
+{
+  api_main_t *am = &api_main;
+  int i;
+  u8 **keys = 0;
+  hash_pair_t *hp;
+
+  if (!am->msg_index_by_name_and_crc)
+    return;
+
+  /* *INDENT-OFF* */
+  hash_foreach_pair (hp, am->msg_index_by_name_and_crc,
+      ({
+        vec_add1 (keys, (u8 *) hp->key);
+      }));
+  /* *INDENT-ON* */
+  for (i = 0; i < vec_len (keys); i++)
+    vec_free (keys[i]);
+  vec_free (keys);
+  hash_free (am->msg_index_by_name_and_crc);
+}
+
+static void
 vl_api_memclnt_create_reply_t_handler (vl_api_memclnt_create_reply_t * mp)
 {
   serialize_main_t _sm, *sm = &_sm;
@@ -136,21 +142,7 @@ vl_api_memclnt_create_reply_t_handler (vl_api_memclnt_create_reply_t * mp)
   am->my_registration = (vl_api_registration_t *) (uword) mp->handle;
 
   /* Clean out any previous hash table (unlikely) */
-  if (am->msg_index_by_name_and_crc)
-    {
-      int i;
-      u8 **keys = 0;
-      hash_pair_t *hp;
-      /* *INDENT-OFF* */
-      hash_foreach_pair (hp, am->msg_index_by_name_and_crc,
-      ({
-        vec_add1 (keys, (u8 *) hp->key);
-      }));
-      /* *INDENT-ON* */
-      for (i = 0; i < vec_len (keys); i++)
-	vec_free (keys[i]);
-      vec_free (keys);
-    }
+  vl_api_name_and_crc_free ();
 
   am->msg_index_by_name_and_crc = hash_create_string (0, sizeof (uword));
 
@@ -178,7 +170,7 @@ vl_client_connect (const char *name, int ctx_quota, int input_queue_size)
   svm_region_t *svm;
   vl_api_memclnt_create_t *mp;
   vl_api_memclnt_create_reply_t *rp;
-  unix_shared_memory_queue_t *vl_input_queue;
+  svm_queue_t *vl_input_queue;
   vl_shmem_hdr_t *shmem_hdr;
   int rv = 0;
   void *oldheap;
@@ -207,18 +199,17 @@ vl_client_connect (const char *name, int ctx_quota, int input_queue_size)
 
   pthread_mutex_lock (&svm->mutex);
   oldheap = svm_push_data_heap (svm);
-  vl_input_queue =
-    unix_shared_memory_queue_init (input_queue_size, sizeof (uword),
-				   getpid (), 0);
-  pthread_mutex_unlock (&svm->mutex);
+  vl_input_queue = svm_queue_alloc_and_init (input_queue_size, sizeof (uword),
+					     getpid ());
   svm_pop_heap (oldheap);
+  pthread_mutex_unlock (&svm->mutex);
 
   am->my_client_index = ~0;
   am->my_registration = 0;
   am->vl_input_queue = vl_input_queue;
 
   mp = vl_msg_api_alloc (sizeof (vl_api_memclnt_create_t));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_MEMCLNT_CREATE);
   mp->ctx_quota = ctx_quota;
   mp->input_queue = (uword) vl_input_queue;
@@ -235,8 +226,8 @@ vl_client_connect (const char *name, int ctx_quota, int input_queue_size)
       /* Wait up to 10 seconds */
       for (i = 0; i < 1000; i++)
 	{
-	  qstatus = unix_shared_memory_queue_sub (vl_input_queue, (u8 *) & rp,
-						  1 /* nowait */ );
+	  qstatus = svm_queue_sub (vl_input_queue, (u8 *) & rp,
+				   SVM_Q_NOWAIT, 0);
 	  if (qstatus == 0)
 	    goto read_one_msg;
 	  ts.tv_sec = 0;
@@ -270,7 +261,7 @@ vl_api_memclnt_delete_reply_t_handler (vl_api_memclnt_delete_reply_t * mp)
 
   pthread_mutex_lock (&am->vlib_rp->mutex);
   oldheap = svm_push_data_heap (am->vlib_rp);
-  unix_shared_memory_queue_free (am->vl_input_queue);
+  svm_queue_free (am->vl_input_queue);
   pthread_mutex_unlock (&am->vlib_rp->mutex);
   svm_pop_heap (oldheap);
 
@@ -280,34 +271,41 @@ vl_api_memclnt_delete_reply_t_handler (vl_api_memclnt_delete_reply_t * mp)
 }
 
 void
-vl_client_disconnect (void)
+vl_client_send_disconnect (u8 do_cleanup)
 {
   vl_api_memclnt_delete_t *mp;
-  vl_api_memclnt_delete_reply_t *rp;
-  unix_shared_memory_queue_t *vl_input_queue;
   vl_shmem_hdr_t *shmem_hdr;
-  time_t begin;
   api_main_t *am = &api_main;
 
   ASSERT (am->vlib_rp);
   shmem_hdr = am->shmem_hdr;
   ASSERT (shmem_hdr && shmem_hdr->vl_input_queue);
 
-  vl_input_queue = am->vl_input_queue;
-
   mp = vl_msg_api_alloc (sizeof (vl_api_memclnt_delete_t));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_MEMCLNT_DELETE);
   mp->index = am->my_client_index;
   mp->handle = (uword) am->my_registration;
+  mp->do_cleanup = do_cleanup;
 
   vl_msg_api_send_shmem (shmem_hdr->vl_input_queue, (u8 *) & mp);
+}
+
+int
+vl_client_disconnect (void)
+{
+  vl_api_memclnt_delete_reply_t *rp;
+  svm_queue_t *vl_input_queue;
+  api_main_t *am = &api_main;
+  time_t begin;
+
+  vl_input_queue = am->vl_input_queue;
+  vl_client_send_disconnect (0 /* wait for reply */ );
 
   /*
    * Have to be careful here, in case the client is disconnecting
    * because e.g. the vlib process died, or is unresponsive.
    */
-
   begin = time (0);
   while (1)
     {
@@ -321,9 +319,9 @@ vl_client_disconnect (void)
 	  am->my_client_index = ~0;
 	  am->my_registration = 0;
 	  am->shmem_hdr = 0;
-	  break;
+	  return -1;
 	}
-      if (unix_shared_memory_queue_sub (vl_input_queue, (u8 *) & rp, 1) < 0)
+      if (svm_queue_sub (vl_input_queue, (u8 *) & rp, SVM_Q_NOWAIT, 0) < 0)
 	continue;
 
       /* drain the queue */
@@ -336,23 +334,41 @@ vl_client_disconnect (void)
       vl_msg_api_handler ((void *) rp);
       break;
     }
+
+  vl_api_name_and_crc_free ();
+  return 0;
+}
+
+/**
+ * Stave off the binary API dead client reaper
+ * Only sent to inactive clients
+ */
+static void
+vl_api_memclnt_keepalive_t_handler (vl_api_memclnt_keepalive_t * mp)
+{
+  vl_api_memclnt_keepalive_reply_t *rmp;
+  api_main_t *am;
+  vl_shmem_hdr_t *shmem_hdr;
+
+  am = &api_main;
+  shmem_hdr = am->shmem_hdr;
+
+  rmp = vl_msg_api_alloc_as_if_client (sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
+  rmp->_vl_msg_id = ntohs (VL_API_MEMCLNT_KEEPALIVE_REPLY);
+  rmp->context = mp->context;
+  vl_msg_api_send_shmem (shmem_hdr->vl_input_queue, (u8 *) & rmp);
 }
 
 #define foreach_api_msg                         \
 _(RX_THREAD_EXIT, rx_thread_exit)               \
 _(MEMCLNT_CREATE_REPLY, memclnt_create_reply)   \
-_(MEMCLNT_DELETE_REPLY, memclnt_delete_reply)
+_(MEMCLNT_DELETE_REPLY, memclnt_delete_reply)	\
+_(MEMCLNT_KEEPALIVE, memclnt_keepalive)
 
-
-int
-vl_client_api_map (const char *region_name)
+void
+vl_client_install_client_message_handlers (void)
 {
-  int rv;
-
-  if ((rv = vl_map_shmem (region_name, 0 /* is_vlib */ )) < 0)
-    {
-      return rv;
-    }
 
 #define _(N,n)                                                  \
     vl_msg_api_set_handlers(VL_API_##N, #n,                     \
@@ -363,24 +379,41 @@ vl_client_api_map (const char *region_name)
                             sizeof(vl_api_##n##_t), 1);
   foreach_api_msg;
 #undef _
+}
+
+int
+vl_client_api_map (const char *region_name)
+{
+  int rv;
+
+  if ((rv = vl_map_shmem (region_name, 0 /* is_vlib */ )) < 0)
+    return rv;
+
+  vl_client_install_client_message_handlers ();
   return 0;
 }
 
 void
 vl_client_api_unmap (void)
 {
-  vl_unmap_shmem ();
+  vl_unmap_shmem_client ();
+}
+
+u8
+vl_mem_client_is_connected (void)
+{
+  return (memory_client_main.connected_to_vlib != 0);
 }
 
 static int
 connect_to_vlib_internal (const char *svm_name,
 			  const char *client_name,
-			  int rx_queue_size, int want_pthread)
+			  int rx_queue_size, int want_pthread, int do_map)
 {
   int rv = 0;
   memory_client_main_t *mm = &memory_client_main;
 
-  if ((rv = vl_client_api_map (svm_name)))
+  if (do_map && (rv = vl_client_api_map (svm_name)))
     {
       clib_warning ("vl_client_api map rv %d", rv);
       return rv;
@@ -412,7 +445,8 @@ vl_client_connect_to_vlib (const char *svm_name,
 			   const char *client_name, int rx_queue_size)
 {
   return connect_to_vlib_internal (svm_name, client_name, rx_queue_size,
-				   1 /* want pthread */ );
+				   1 /* want pthread */ ,
+				   1 /* do map */ );
 }
 
 int
@@ -421,11 +455,21 @@ vl_client_connect_to_vlib_no_rx_pthread (const char *svm_name,
 					 int rx_queue_size)
 {
   return connect_to_vlib_internal (svm_name, client_name, rx_queue_size,
-				   0 /* want pthread */ );
+				   0 /* want pthread */ ,
+				   1 /* do map */ );
 }
 
-void
-vl_client_disconnect_from_vlib (void)
+int
+vl_client_connect_to_vlib_no_map (const char *svm_name,
+				  const char *client_name, int rx_queue_size)
+{
+  return connect_to_vlib_internal (svm_name, client_name, rx_queue_size,
+				   1 /* want pthread */ ,
+				   0 /* dont map */ );
+}
+
+static void
+disconnect_from_vlib_internal (u8 do_unmap)
 {
   memory_client_main_t *mm = &memory_client_main;
   api_main_t *am = &api_main;
@@ -442,9 +486,22 @@ vl_client_disconnect_from_vlib (void)
   if (mm->connected_to_vlib)
     {
       vl_client_disconnect ();
-      vl_client_api_unmap ();
+      if (do_unmap)
+	vl_client_api_unmap ();
     }
-  memset (mm, 0, sizeof (*mm));
+  clib_memset (mm, 0, sizeof (*mm));
+}
+
+void
+vl_client_disconnect_from_vlib (void)
+{
+  disconnect_from_vlib_internal (1);
+}
+
+void
+vl_client_disconnect_from_vlib_no_unmap (void)
+{
+  disconnect_from_vlib_internal (0);
 }
 
 static void vl_api_get_first_msg_id_reply_t_handler
@@ -471,7 +528,7 @@ vl_client_get_first_plugin_msg_id (const char *plugin_name)
   if (strlen (plugin_name) + 1 > sizeof (mp->name))
     return (rv);
 
-  memset (&clib_time, 0, sizeof (clib_time));
+  clib_memset (&clib_time, 0, sizeof (clib_time));
   clib_time_init (&clib_time);
 
   /* Push this plugin's first_msg_id_reply handler */
@@ -482,19 +539,44 @@ vl_client_get_first_plugin_msg_id (const char *plugin_name)
   /* Ask the data-plane for the message-ID base of the indicated plugin */
   mm->first_msg_id_reply_ready = 0;
 
-  mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
-  mp->_vl_msg_id = ntohs (VL_API_GET_FIRST_MSG_ID);
-  mp->client_index = am->my_client_index;
-  strncpy ((char *) mp->name, plugin_name, sizeof (mp->name) - 1);
-
-  vl_msg_api_send_shmem (am->shmem_hdr->vl_input_queue, (u8 *) & mp);
-
-  /* Synchronously wait for the answer */
-  do
+  /* Not using shm client */
+  if (!am->my_registration)
     {
-      timeout = clib_time_now (&clib_time) + 1.0;
+      mp = vl_socket_client_msg_alloc (sizeof (*mp));
+      clib_memset (mp, 0, sizeof (*mp));
+      mp->_vl_msg_id = ntohs (VL_API_GET_FIRST_MSG_ID);
+      mp->client_index = am->my_client_index;
+      strncpy ((char *) mp->name, plugin_name, sizeof (mp->name) - 1);
 
+      if (vl_socket_client_write () <= 0)
+	goto sock_err;
+      if (vl_socket_client_read (1))
+	goto sock_err;
+
+      if (mm->first_msg_id_reply_ready == 1)
+	{
+	  rv = mm->first_msg_id_reply;
+	  goto result;
+	}
+
+    sock_err:
+      /* Restore old handler */
+      am->msg_handlers[VL_API_GET_FIRST_MSG_ID_REPLY] = old_handler;
+
+      return -1;
+    }
+  else
+    {
+      mp = vl_msg_api_alloc (sizeof (*mp));
+      clib_memset (mp, 0, sizeof (*mp));
+      mp->_vl_msg_id = ntohs (VL_API_GET_FIRST_MSG_ID);
+      mp->client_index = am->my_client_index;
+      strncpy ((char *) mp->name, plugin_name, sizeof (mp->name) - 1);
+
+      vl_msg_api_send_shmem (am->shmem_hdr->vl_input_queue, (u8 *) & mp);
+
+      /* Synchronously wait for the answer */
+      timeout = clib_time_now (&clib_time) + 1.0;
       while (clib_time_now (&clib_time) < timeout)
 	{
 	  if (mm->first_msg_id_reply_ready == 1)
@@ -508,7 +590,6 @@ vl_client_get_first_plugin_msg_id (const char *plugin_name)
 
       return rv;
     }
-  while (0);
 
 result:
 
@@ -519,12 +600,6 @@ result:
     clib_warning ("plugin '%s' not registered", plugin_name);
 
   return rv;
-}
-
-void
-vlib_node_sync_stats (vlib_main_t * vm, vlib_node_t * n)
-{
-  clib_warning ("STUB called...");
 }
 
 /*

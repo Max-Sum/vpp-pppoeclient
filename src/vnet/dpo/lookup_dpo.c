@@ -29,6 +29,12 @@ static const char *const lookup_input_names[] = LOOKUP_INPUTS;
 static const char *const lookup_cast_names[] = LOOKUP_CASTS;
 
 /**
+ * If a packet encounters a lookup DPO more than the many times
+ * then we assume there is a loop in the forward graph and drop the packet
+ */
+#define MAX_LUKPS_PER_PACKET 4
+
+/**
  * @brief Enumeration of the lookup subtypes
  */
 typedef enum lookup_sub_type_t_
@@ -471,6 +477,23 @@ lookup_dpo_ip4_inline (vlib_main_t * vm,
 		(cm, thread_index, lbi1, 1,
 		 vlib_buffer_length_in_chain (vm, b1));
 
+            if (!(b0->flags & VNET_BUFFER_F_LOOP_COUNTER_VALID)) {
+                vnet_buffer2(b0)->loop_counter = 0;
+                b0->flags |= VNET_BUFFER_F_LOOP_COUNTER_VALID;
+            }
+            if (!(b1->flags & VNET_BUFFER_F_LOOP_COUNTER_VALID)) {
+                vnet_buffer2(b1)->loop_counter = 0;
+                b1->flags |= VNET_BUFFER_F_LOOP_COUNTER_VALID;
+            }
+
+            vnet_buffer2(b0)->loop_counter++;
+            vnet_buffer2(b1)->loop_counter++;
+
+            if (PREDICT_FALSE(vnet_buffer2(b0)->loop_counter > MAX_LUKPS_PER_PACKET))
+                next0 = IP_LOOKUP_NEXT_DROP;
+            if (PREDICT_FALSE(vnet_buffer2(b1)->loop_counter > MAX_LUKPS_PER_PACKET))
+                next1 = IP_LOOKUP_NEXT_DROP;
+
 	    if (PREDICT_FALSE(b0->flags & VLIB_BUFFER_IS_TRACED))
 	    {
 		lookup_trace_t *tr = vlib_add_trace (vm, node,
@@ -572,6 +595,16 @@ lookup_dpo_ip4_inline (vlib_main_t * vm,
 		(cm, thread_index, lbi0, 1,
 		 vlib_buffer_length_in_chain (vm, b0));
 
+            if (!(b0->flags & VNET_BUFFER_F_LOOP_COUNTER_VALID)) {
+                vnet_buffer2(b0)->loop_counter = 0;
+                b0->flags |= VNET_BUFFER_F_LOOP_COUNTER_VALID;
+            }
+
+            vnet_buffer2(b0)->loop_counter++;
+
+            if (PREDICT_FALSE(vnet_buffer2(b0)->loop_counter > MAX_LUKPS_PER_PACKET))
+                next0 = IP_LOOKUP_NEXT_DROP;
+
 	    if (PREDICT_FALSE(b0->flags & VLIB_BUFFER_IS_TRACED))
 	    {
 		lookup_trace_t *tr = vlib_add_trace (vm, node,
@@ -595,7 +628,7 @@ format_lookup_trace (u8 * s, va_list * args)
     CLIB_UNUSED (vlib_main_t * vm) = va_arg (*args, vlib_main_t *);
     CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
     lookup_trace_t * t = va_arg (*args, lookup_trace_t *);
-    uword indent = format_get_indent (s);
+    u32 indent = format_get_indent (s);
     s = format (s, "%U fib-index:%d addr:%U load-balance:%d",
                 format_white_space, indent,
                 t->fib_index,
@@ -604,7 +637,7 @@ format_lookup_trace (u8 * s, va_list * args)
     return s;
 }
 
-always_inline uword
+static uword
 lookup_ip4_dst (vlib_main_t * vm,
                 vlib_node_runtime_t * node,
                 vlib_frame_t * from_frame)
@@ -621,7 +654,7 @@ VLIB_REGISTER_NODE (lookup_ip4_dst_node) = {
 };
 VLIB_NODE_FUNCTION_MULTIARCH (lookup_ip4_dst_node, lookup_ip4_dst)
 
-always_inline uword
+static uword
 lookup_ip4_dst_itf (vlib_main_t * vm,
                     vlib_node_runtime_t * node,
                     vlib_frame_t * from_frame)
@@ -638,7 +671,7 @@ VLIB_REGISTER_NODE (lookup_ip4_dst_itf_node) = {
 };
 VLIB_NODE_FUNCTION_MULTIARCH (lookup_ip4_dst_itf_node, lookup_ip4_dst_itf)
 
-always_inline uword
+static uword
 lookup_ip4_src (vlib_main_t * vm,
                 vlib_node_runtime_t * node,
                 vlib_frame_t * from_frame)
@@ -780,6 +813,23 @@ lookup_dpo_ip6_inline (vlib_main_t * vm,
 	    hash_c0 = vnet_buffer (b0)->ip.flow_hash = 0;
 	    hash_c1 = vnet_buffer (b1)->ip.flow_hash = 0;
 
+            if (!(b0->flags & VNET_BUFFER_F_LOOP_COUNTER_VALID)) {
+                vnet_buffer2(b0)->loop_counter = 0;
+                b0->flags |= VNET_BUFFER_F_LOOP_COUNTER_VALID;
+            }
+            if (!(b1->flags & VNET_BUFFER_F_LOOP_COUNTER_VALID)) {
+                vnet_buffer2(b1)->loop_counter = 0;
+                b1->flags |= VNET_BUFFER_F_LOOP_COUNTER_VALID;
+            }
+
+            vnet_buffer2(b0)->loop_counter++;
+            vnet_buffer2(b1)->loop_counter++;
+
+            if (PREDICT_FALSE(vnet_buffer2(b0)->loop_counter > MAX_LUKPS_PER_PACKET))
+                next0 = IP_LOOKUP_NEXT_DROP;
+            if (PREDICT_FALSE(vnet_buffer2(b1)->loop_counter > MAX_LUKPS_PER_PACKET))
+                next1 = IP_LOOKUP_NEXT_DROP;
+
 	    if (PREDICT_FALSE (lb0->lb_n_buckets > 1))
 	    {
 		flow_hash_config0 = lb0->lb_hash_config;
@@ -910,6 +960,16 @@ lookup_dpo_ip6_inline (vlib_main_t * vm,
 	    next0 = dpo0->dpoi_next_node;
 	    vnet_buffer(b0)->ip.adj_index[VLIB_TX] = dpo0->dpoi_index;
 
+            if (!(b0->flags & VNET_BUFFER_F_LOOP_COUNTER_VALID)) {
+                vnet_buffer2(b0)->loop_counter = 0;
+                b0->flags |= VNET_BUFFER_F_LOOP_COUNTER_VALID;
+            }
+
+            vnet_buffer2(b0)->loop_counter++;
+
+            if (PREDICT_FALSE(vnet_buffer2(b0)->loop_counter > MAX_LUKPS_PER_PACKET))
+                next0 = IP_LOOKUP_NEXT_DROP;
+
 	    vlib_increment_combined_counter
 		(cm, thread_index, lbi0, 1,
 		 vlib_buffer_length_in_chain (vm, b0));
@@ -930,7 +990,7 @@ lookup_dpo_ip6_inline (vlib_main_t * vm,
     return from_frame->n_vectors;
 }
 
-always_inline uword
+static uword
 lookup_ip6_dst (vlib_main_t * vm,
                 vlib_node_runtime_t * node,
                 vlib_frame_t * from_frame)
@@ -947,7 +1007,7 @@ VLIB_REGISTER_NODE (lookup_ip6_dst_node) = {
 };
 VLIB_NODE_FUNCTION_MULTIARCH (lookup_ip6_dst_node, lookup_ip6_dst)
 
-always_inline uword
+static uword
 lookup_ip6_dst_itf (vlib_main_t * vm,
 		    vlib_node_runtime_t * node,
 		    vlib_frame_t * from_frame)
@@ -964,7 +1024,7 @@ VLIB_REGISTER_NODE (lookup_ip6_dst_itf_node) = {
 };
 VLIB_NODE_FUNCTION_MULTIARCH (lookup_ip6_dst_itf_node, lookup_ip6_dst_itf)
 
-always_inline uword
+static uword
 lookup_ip6_src (vlib_main_t * vm,
                 vlib_node_runtime_t * node,
                 vlib_frame_t * from_frame)
@@ -1085,10 +1145,20 @@ lookup_dpo_mpls_inline (vlib_main_t * vm,
                      vlib_buffer_length_in_chain (vm, b0));
             }
 
-          vnet_buffer (b0)->mpls.ttl = ((char*)hdr0)[3];
+            vnet_buffer (b0)->mpls.ttl = ((char*)hdr0)[3];
             vnet_buffer (b0)->mpls.exp = (((char*)hdr0)[2] & 0xe) >> 1;
             vnet_buffer (b0)->mpls.first = 1;
             vlib_buffer_advance(b0, sizeof(*hdr0));
+
+            if (!(b0->flags & VNET_BUFFER_F_LOOP_COUNTER_VALID)) {
+                vnet_buffer2(b0)->loop_counter = 0;
+                b0->flags |= VNET_BUFFER_F_LOOP_COUNTER_VALID;
+            }
+
+            vnet_buffer2(b0)->loop_counter++;
+
+            if (PREDICT_FALSE(vnet_buffer2(b0)->loop_counter > MAX_LUKPS_PER_PACKET))
+                next0 = MPLS_LOOKUP_NEXT_DROP;
 
 	    if (PREDICT_FALSE(b0->flags & VLIB_BUFFER_IS_TRACED)) 
             {
@@ -1113,7 +1183,7 @@ format_lookup_mpls_trace (u8 * s, va_list * args)
     CLIB_UNUSED (vlib_main_t * vm) = va_arg (*args, vlib_main_t *);
     CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
     lookup_trace_t * t = va_arg (*args, lookup_trace_t *);
-    uword indent = format_get_indent (s);
+    u32 indent = format_get_indent (s);
     mpls_unicast_header_t hdr;
 
     hdr.label_exp_s_ttl = clib_net_to_host_u32(t->hdr.label_exp_s_ttl);
@@ -1126,7 +1196,7 @@ format_lookup_mpls_trace (u8 * s, va_list * args)
     return s;
 }
 
-always_inline uword
+static uword
 lookup_mpls_dst (vlib_main_t * vm,
                 vlib_node_runtime_t * node,
                 vlib_frame_t * from_frame)
@@ -1144,7 +1214,7 @@ VLIB_REGISTER_NODE (lookup_mpls_dst_node) = {
 };
 VLIB_NODE_FUNCTION_MULTIARCH (lookup_mpls_dst_node, lookup_mpls_dst)
 
-always_inline uword
+static uword
 lookup_mpls_dst_itf (vlib_main_t * vm,
                     vlib_node_runtime_t * node,
                     vlib_frame_t * from_frame)
@@ -1163,6 +1233,7 @@ VLIB_REGISTER_NODE (lookup_mpls_dst_itf_node) = {
 VLIB_NODE_FUNCTION_MULTIARCH (lookup_mpls_dst_itf_node, lookup_mpls_dst_itf)
 
 typedef enum lookup_ip_dst_mcast_next_t_ {
+    LOOKUP_IP_DST_MCAST_NEXT_DROP,
     LOOKUP_IP_DST_MCAST_NEXT_RPF,
     LOOKUP_IP_DST_MCAST_N_NEXT,
 } mfib_forward_lookup_next_t;
@@ -1234,9 +1305,9 @@ lookup_dpo_ip_dst_mcast_inline (vlib_main_t * vm,
                 ip6_header_t * ip0;
 
                 ip0 = vlib_buffer_get_current (b0);
-                mfei0 = ip6_mfib_table_lookup2(ip6_mfib_get(fib_index0),
-                                               &ip0->src_address,
-                                               &ip0->dst_address);
+                mfei0 = ip6_mfib_table_fwd_lookup(ip6_mfib_get(fib_index0),
+                                                  &ip0->src_address,
+                                                  &ip0->dst_address);
                 if (PREDICT_FALSE(b0->flags & VLIB_BUFFER_IS_TRACED))
                 {
                     lookup_trace_t *tr = vlib_add_trace (vm, node,
@@ -1249,6 +1320,16 @@ lookup_dpo_ip_dst_mcast_inline (vlib_main_t * vm,
 
             vnet_buffer (b0)->ip.adj_index[VLIB_TX] = mfei0;
 
+            if (!(b0->flags & VNET_BUFFER_F_LOOP_COUNTER_VALID)) {
+                vnet_buffer2(b0)->loop_counter = 0;
+                b0->flags |= VNET_BUFFER_F_LOOP_COUNTER_VALID;
+            }
+
+            vnet_buffer2(b0)->loop_counter++;
+
+            if (PREDICT_FALSE(vnet_buffer2(b0)->loop_counter > MAX_LUKPS_PER_PACKET))
+                next0 = LOOKUP_IP_DST_MCAST_NEXT_DROP;
+
             vlib_validate_buffer_enqueue_x1(vm, node, next_index, to_next,
                                             n_left_to_next, bi0, next0);
         }
@@ -1257,7 +1338,7 @@ lookup_dpo_ip_dst_mcast_inline (vlib_main_t * vm,
     return from_frame->n_vectors;
 }
 
-always_inline uword
+static uword
 lookup_ip4_dst_mcast (vlib_main_t * vm,
                       vlib_node_runtime_t * node,
                       vlib_frame_t * from_frame)
@@ -1273,13 +1354,14 @@ VLIB_REGISTER_NODE (lookup_ip4_dst_mcast_node) = {
     .format_trace = format_lookup_trace,
     .n_next_nodes = LOOKUP_IP_DST_MCAST_N_NEXT,
     .next_nodes = {
+        [LOOKUP_IP_DST_MCAST_NEXT_DROP] = "ip4-drop",
         [LOOKUP_IP_DST_MCAST_NEXT_RPF] = "ip4-mfib-forward-rpf",
     },
 };
 VLIB_NODE_FUNCTION_MULTIARCH (lookup_ip4_dst_mcast_node,
                               lookup_ip4_dst_mcast)
 
-always_inline uword
+static uword
 lookup_ip6_dst_mcast (vlib_main_t * vm,
                       vlib_node_runtime_t * node,
                       vlib_frame_t * from_frame)
@@ -1295,6 +1377,7 @@ VLIB_REGISTER_NODE (lookup_ip6_dst_mcast_node) = {
     .format_trace = format_lookup_trace,
     .n_next_nodes = LOOKUP_IP_DST_MCAST_N_NEXT,
     .next_nodes = {
+        [LOOKUP_IP_DST_MCAST_NEXT_DROP] = "ip6-drop",
         [LOOKUP_IP_DST_MCAST_NEXT_RPF] = "ip6-mfib-forward-rpf",
     },
 };
@@ -1399,6 +1482,46 @@ const static char* const * const lookup_dst_from_interface_nodes[DPO_PROTO_NUM] 
     [DPO_PROTO_MPLS] = lookup_dst_from_interface_mpls_nodes,
 };
 
+static clib_error_t *
+lookup_dpo_show (vlib_main_t * vm,
+                 unformat_input_t * input,
+                 vlib_cli_command_t * cmd)
+{
+    index_t lkdi = INDEX_INVALID;
+
+    while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+        if (unformat (input, "%d", &lkdi))
+            ;
+        else
+            break;
+    }
+
+    if (INDEX_INVALID != lkdi)
+    {
+        vlib_cli_output (vm, "%U", format_lookup_dpo, lkdi);
+    }
+    else
+    {
+        lookup_dpo_t *lkd;
+
+        pool_foreach(lkd, lookup_dpo_pool,
+        ({
+            vlib_cli_output (vm, "[@%d] %U",
+                             lookup_dpo_get_index(lkd),
+                             format_lookup_dpo,
+                             lookup_dpo_get_index(lkd));
+        }));
+    }
+
+    return 0;
+}
+
+VLIB_CLI_COMMAND (replicate_show_command, static) = {
+    .path = "show lookup-dpo",
+    .short_help = "show lookup-dpo [<index>]",
+    .function = lookup_dpo_show,
+};
 
 void
 lookup_dpo_module_init (void)

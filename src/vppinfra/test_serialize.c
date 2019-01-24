@@ -145,7 +145,7 @@ test_serialize_main (unformat_input_t * input)
   serialize_main_t *um = &tm->unserialize_main;
   uword i;
 
-  memset (tm, 0, sizeof (tm[0]));
+  clib_memset (tm, 0, sizeof (tm[0]));
   tm->n_iter = 100;
   tm->seed = 1;
   tm->max_len = 128;
@@ -184,7 +184,7 @@ test_serialize_main (unformat_input_t * input)
 
 #ifdef CLIB_UNIX
   if (tm->dump_file)
-    serialize_open_unix_file (sm, tm->dump_file);
+    serialize_open_clib_file (sm, tm->dump_file);
   else
 #endif
     serialize_open_vector (sm, 0);
@@ -217,7 +217,7 @@ test_serialize_main (unformat_input_t * input)
 #ifdef CLIB_UNIX
   if (tm->dump_file)
     {
-      if ((error = unserialize_open_unix_file (um, tm->dump_file)))
+      if ((error = unserialize_open_clib_file (um, tm->dump_file)))
 	goto done;
     }
   else
@@ -257,6 +257,8 @@ main (int argc, char *argv[])
 {
   unformat_input_t i;
   int r;
+
+  clib_mem_init (0, 64ULL << 20);
 
   unformat_init_command_line (&i, argv);
   r = test_serialize_main (&i);

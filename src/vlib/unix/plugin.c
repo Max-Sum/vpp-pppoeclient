@@ -94,6 +94,9 @@ load_one_plugin (plugin_main_t * pm, plugin_info_t * pi, int from_early_init)
       goto error;
     }
 
+  if (pm->plugins_default_disable)
+    reg->default_disabled = 1;
+
   p = hash_get_mem (pm->config_index_by_name, pi->name);
   if (p)
     {
@@ -141,7 +144,7 @@ load_one_plugin (plugin_main_t * pm, plugin_info_t * pi, int from_early_init)
     {
       clib_warning ("%s", dlerror ());
       clib_warning ("Failed to load plugin '%s'", pi->name);
-      os_exit (1);
+      goto error;
     }
 
   pi->handle = handle;
@@ -152,7 +155,8 @@ load_one_plugin (plugin_main_t * pm, plugin_info_t * pi, int from_early_init)
     {
       /* This should never happen unless somebody chagnes registration macro */
       clib_warning ("Missing plugin registration in plugin '%s'", pi->name);
-      os_exit (1);
+      dlclose (pi->handle);
+      goto error;
     }
 
   pi->reg = reg;
@@ -172,7 +176,8 @@ load_one_plugin (plugin_main_t * pm, plugin_info_t * pi, int from_early_init)
 	  if (error)
 	    {
 	      clib_error_report (error);
-	      os_exit (1);
+	      dlclose (pi->handle);
+	      goto error;
 	    }
 	}
       else
@@ -361,6 +366,20 @@ vlib_plugin_early_init (vlib_main_t * vm)
   return vlib_load_new_plugins (pm, 1 /* from_early_init */ );
 }
 
+u8 *
+vlib_get_vat_plugin_path (void)
+{
+  plugin_main_t *pm = &vlib_plugin_main;
+  return (pm->vat_plugin_path);
+}
+
+u8 *
+vlib_get_vat_plugin_name_filter (void)
+{
+  plugin_main_t *pm = &vlib_plugin_main;
+  return (pm->vat_plugin_name_filter);
+}
+
 static clib_error_t *
 vlib_plugins_show_cmd_fn (vlib_main_t * vm,
 			  unformat_input_t * input, vlib_cli_command_t * cmd)
@@ -497,6 +516,19 @@ done:
       u8 *s = 0;
       if (unformat (input, "path %s", &s))
 	pm->plugin_path = s;
+      else if (unformat (input, "name-filter %s", &s))
+	pm->plugin_name_filter = s;
+      else if (unformat (input, "vat-path %s", &s))
+	pm->vat_plugin_path = s;
+      else if (unformat (input, "vat-name-filter %s", &s))
+	pm->vat_plugin_name_filter = s;
+      else if (unformat (input, "plugin default %U",
+			 unformat_vlib_cli_sub_input, &sub_input))
+	{
+	  pm->plugins_default_disable =
+	    unformat (&sub_input, "disable") ? 1 : 0;
+	  unformat_free (&sub_input);
+	}
       else if (unformat (input, "plugin %s %U", &s,
 			 unformat_vlib_cli_sub_input, &sub_input))
 	{

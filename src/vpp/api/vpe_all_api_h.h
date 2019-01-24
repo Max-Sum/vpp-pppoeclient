@@ -28,8 +28,8 @@
 /* Include the current layer (third) vpp API definition layer */
 #include <vpp/api/vpe.api.h>
 
-/* Include stats APIs */
-#include <vpp/stats/stats.api.h>
+/* Include OAM APIs */
+#include <vpp/oam/oam.api.h>
 
 /*
  * fd.io coding-style-patch-verification: ON

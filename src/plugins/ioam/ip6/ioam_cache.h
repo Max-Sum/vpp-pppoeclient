@@ -98,6 +98,8 @@
  */
 typedef struct
 {
+  /** Required for pool_get_aligned */
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   ip6_address_t src_address;
   ip6_address_t dst_address;
   u16 src_port;
@@ -122,6 +124,8 @@ typedef struct
  */
 typedef struct
 {
+  /** Required for pool_get_aligned */
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   u32 pool_id;
   u32 pool_index;
   ip6_address_t src_address;
@@ -203,7 +207,7 @@ typedef struct
   u32 cleanup_process_node_index;
 } ioam_cache_main_t;
 
-ioam_cache_main_t ioam_cache_main;
+extern ioam_cache_main_t ioam_cache_main;
 
 extern vlib_node_registration_t ioam_cache_node;
 extern vlib_node_registration_t ioam_cache_ts_node;
@@ -295,7 +299,7 @@ ioam_cache_entry_free (ioam_cache_entry_t * entry)
   if (entry)
     {
       vec_free (entry->ioam_rewrite_string);
-      memset (entry, 0, sizeof (*entry));
+      clib_memset (entry, 0, sizeof (*entry));
       pool_put (cm->ioam_rewrite_pool, entry);
     }
 }
@@ -367,13 +371,13 @@ ioam_cache_add (vlib_buffer_t * b0,
   ioam_e2e_id_option_t *e2e = 0;
 
   pool_get_aligned (cm->ioam_rewrite_pool, entry, CLIB_CACHE_LINE_BYTES);
-  memset (entry, 0, sizeof (*entry));
+  clib_memset (entry, 0, sizeof (*entry));
   pool_index = entry - cm->ioam_rewrite_pool;
 
-  clib_memcpy (entry->dst_address.as_u64, ip0->dst_address.as_u64,
-	       sizeof (ip6_address_t));
-  clib_memcpy (entry->src_address.as_u64, ip0->src_address.as_u64,
-	       sizeof (ip6_address_t));
+  clib_memcpy_fast (entry->dst_address.as_u64, ip0->dst_address.as_u64,
+		    sizeof (ip6_address_t));
+  clib_memcpy_fast (entry->src_address.as_u64, ip0->src_address.as_u64,
+		    sizeof (ip6_address_t));
   entry->src_port = src_port;
   entry->dst_port = dst_port;
   entry->seq_no = seq_no;
@@ -391,7 +395,7 @@ ioam_cache_add (vlib_buffer_t * b0,
     }
   e2e_id_offset = (u8 *) e2e - (u8 *) hbh0;
   /* setup e2e id option to insert v6 address of the node caching it */
-  clib_memcpy (entry->ioam_rewrite_string, hbh0, rewrite_len);
+  clib_memcpy_fast (entry->ioam_rewrite_string, hbh0, rewrite_len);
   hbh0 = (ip6_hop_by_hop_header_t *) entry->ioam_rewrite_string;
 
   /* suffix rewrite string with e2e ID option */
@@ -433,7 +437,7 @@ ioam_cache_sr_rewrite_template_create (void)
   /* This nodes address and the original dest will be
    * filled when the packet is processed */
   vec_add2 (segments, this_seg, 1);
-  memset (this_seg, 0xfe, sizeof (ip6_address_t));
+  clib_memset (this_seg, 0xfe, sizeof (ip6_address_t));
   cm->sr_rewrite_template = ip6_sr_compute_rewrite_string_insert (segments);
   vec_free (segments);
 }
@@ -528,8 +532,7 @@ ioam_cache_ts_table_init (vlib_main_t * vm)
 			CLIB_CACHE_LINE_BYTES);
   vec_validate_aligned (cm->ts_stats, no_of_threads - 1,
 			CLIB_CACHE_LINE_BYTES);
-  vec_validate_aligned (cm->timer_wheels, no_of_threads - 1,
-			CLIB_CACHE_LINE_BYTES);
+  vec_validate (cm->timer_wheels, no_of_threads - 1);
   cm->lookup_table_nbuckets = IOAM_CACHE_TABLE_DEFAULT_HASH_NUM_BUCKETS;
   cm->lookup_table_nbuckets = 1 << max_log2 (cm->lookup_table_nbuckets);
   cm->lookup_table_size = IOAM_CACHE_TABLE_DEFAULT_HASH_MEMORY_SIZE;
@@ -537,7 +540,7 @@ ioam_cache_ts_table_init (vlib_main_t * vm)
     {
       pool_alloc_aligned (cm->ioam_ts_pool[i],
 			  MAX_CACHE_TS_ENTRIES, CLIB_CACHE_LINE_BYTES);
-      memset (&cm->ts_stats[i], 0, sizeof (ioam_cache_ts_pool_stats_t));
+      clib_memset (&cm->ts_stats[i], 0, sizeof (ioam_cache_ts_pool_stats_t));
       tw_timer_wheel_init_16t_2w_512sl (&cm->timer_wheels[i],
 					expired_cache_ts_timer_callback,
 					IOAM_CACHE_TS_TICK
@@ -589,7 +592,7 @@ ioam_cache_ts_entry_free (u32 thread_id,
 	}
       pool_put (cm->ioam_ts_pool[thread_id], entry);
       cm->ts_stats[thread_id].inuse--;
-      memset (entry, 0, sizeof (*entry));
+      clib_memset (entry, 0, sizeof (*entry));
     }
 }
 
@@ -651,13 +654,13 @@ ioam_cache_ts_add (ip6_header_t * ip0,
 
   pool_get_aligned (cm->ioam_ts_pool[thread_id], entry,
 		    CLIB_CACHE_LINE_BYTES);
-  memset (entry, 0, sizeof (*entry));
+  clib_memset (entry, 0, sizeof (*entry));
   *pool_index = entry - cm->ioam_ts_pool[thread_id];
 
-  clib_memcpy (entry->dst_address.as_u64, ip0->dst_address.as_u64,
-	       sizeof (ip6_address_t));
-  clib_memcpy (entry->src_address.as_u64, ip0->src_address.as_u64,
-	       sizeof (ip6_address_t));
+  clib_memcpy_fast (entry->dst_address.as_u64, ip0->dst_address.as_u64,
+		    sizeof (ip6_address_t));
+  clib_memcpy_fast (entry->src_address.as_u64, ip0->src_address.as_u64,
+		    sizeof (ip6_address_t));
   entry->src_port = src_port;
   entry->dst_port = dst_port;
   entry->seq_no = seq_no;

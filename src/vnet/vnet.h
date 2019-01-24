@@ -42,7 +42,7 @@
 
 #include <vppinfra/types.h>
 
-#include <vnet/unix/pcap.h>
+#include <vppinfra/pcap.h>
 #include <vnet/buffer.h>
 #include <vnet/config.h>
 #include <vnet/interface.h>
@@ -66,6 +66,8 @@ typedef struct vnet_main_t
     * sw_interface_add_del_functions[VNET_ITF_FUNC_N_PRIO];
     _vnet_interface_function_list_elt_t
     * sw_interface_admin_up_down_functions[VNET_ITF_FUNC_N_PRIO];
+    _vnet_interface_function_list_elt_t
+    * sw_interface_mtu_change_functions[VNET_ITF_FUNC_N_PRIO];
 
   uword *interface_tag_by_sw_if_index;
 
@@ -78,8 +80,8 @@ typedef struct vnet_main_t
   vlib_main_t *vlib_main;
 } vnet_main_t;
 
-vnet_main_t vnet_main;
-vnet_main_t **vnet_mains;
+extern vnet_main_t vnet_main;
+extern vnet_main_t **vnet_mains;
 
 #include <vnet/interface_funcs.h>
 #include <vnet/global_funcs.h>

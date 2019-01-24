@@ -55,12 +55,14 @@ typedef struct
 {
   u8 ver_flags;
   u8 type;
-  u16 length;			/* length in octets of the payload */
+  u16 length;			/* length in octets of the data following the fixed part of the header */
   u32 teid;
   u16 sequence;
   u8 pdu_number;
   u8 next_ext_type;
 } gtpu_header_t;
+
+#define GTPU_V1_HDR_LEN   8
 
 #define GTPU_VER_MASK (7<<5)
 #define GTPU_PT_BIT   (1<<4)
@@ -123,6 +125,9 @@ typedef CLIB_PACKED
 
 typedef struct
 {
+  /* Required for pool_get_aligned  */
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+
   /* Rewrite string */
   u8 *rewrite;
 
@@ -228,7 +233,7 @@ typedef struct
   vnet_main_t *vnet_main;
 } gtpu_main_t;
 
-gtpu_main_t gtpu_main;
+extern gtpu_main_t gtpu_main;
 
 extern vlib_node_registration_t gtpu4_input_node;
 extern vlib_node_registration_t gtpu6_input_node;

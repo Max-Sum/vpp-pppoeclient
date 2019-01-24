@@ -24,7 +24,6 @@
 
 #include <vlibapi/api.h>
 #include <vlibmemory/api.h>
-#include <vlibsocket/api.h>
 
 unsigned char srv6_localsid_name[32] = "Sample-SRv6-LocalSID-plugin";
 unsigned char keyword_str[32] = "new_srv6_localsid";
@@ -96,7 +95,7 @@ unformat_srv6_localsid_sample (unformat_input_t * input, va_list * args)
         sizeof(srv6_localsid_sample_per_sid_memory_t), 0, 0, 1);
 
       /* Set to zero the memory */
-      memset (ls_mem, 0, sizeof(srv6_localsid_sample_per_sid_memory_t));
+      clib_memset (ls_mem, 0, sizeof(srv6_localsid_sample_per_sid_memory_t));
 
       /* Our brand-new car is ready */
       ls_mem->fib_table = table_id;

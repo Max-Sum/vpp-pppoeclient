@@ -150,14 +150,8 @@ ip4_source_check_inline (vlib_main_t * vm,
 	  ip0 = vlib_buffer_get_current (p0);
 	  ip1 = vlib_buffer_get_current (p1);
 
-	  c0 =
-	    vnet_feature_next_with_data (vnet_buffer (p0)->sw_if_index
-					 [VLIB_RX], &next0, p0,
-					 sizeof (c0[0]));
-	  c1 =
-	    vnet_feature_next_with_data (vnet_buffer (p1)->sw_if_index
-					 [VLIB_RX], &next1, p1,
-					 sizeof (c1[0]));
+	  c0 = vnet_feature_next_with_data (&next0, p0, sizeof (c0[0]));
+	  c1 = vnet_feature_next_with_data (&next1, p1, sizeof (c1[0]));
 
 	  mtrie0 = &ip4_fib_get (c0->fib_index)->mtrie;
 	  mtrie1 = &ip4_fib_get (c1->fib_index)->mtrie;
@@ -234,10 +228,7 @@ ip4_source_check_inline (vlib_main_t * vm,
 	  p0 = vlib_get_buffer (vm, pi0);
 	  ip0 = vlib_buffer_get_current (p0);
 
-	  c0 =
-	    vnet_feature_next_with_data (vnet_buffer (p0)->sw_if_index
-					 [VLIB_RX], &next0, p0,
-					 sizeof (c0[0]));
+	  c0 = vnet_feature_next_with_data (&next0, p0, sizeof (c0[0]));
 
 	  mtrie0 = &ip4_fib_get (c0->fib_index)->mtrie;
 
@@ -309,7 +300,7 @@ VLIB_REGISTER_NODE (ip4_check_source_reachable_via_any) = {
 
   .n_next_nodes = IP4_SOURCE_CHECK_N_NEXT,
   .next_nodes = {
-    [IP4_SOURCE_CHECK_NEXT_DROP] = "error-drop",
+    [IP4_SOURCE_CHECK_NEXT_DROP] = "ip4-drop",
   },
 
   .format_buffer = format_ip4_header,
@@ -328,7 +319,7 @@ VLIB_REGISTER_NODE (ip4_check_source_reachable_via_rx) = {
 
   .n_next_nodes = IP4_SOURCE_CHECK_N_NEXT,
   .next_nodes = {
-    [IP4_SOURCE_CHECK_NEXT_DROP] = "error-drop",
+    [IP4_SOURCE_CHECK_NEXT_DROP] = "ip4-drop",
   },
 
   .format_buffer = format_ip4_header,
@@ -405,7 +396,7 @@ done:
  * Example of graph node before range checking is enabled:
  * @cliexstart{show vlib graph ip4-source-check-via-rx}
  *            Name                      Next                    Previous
- * ip4-source-check-via-rx         error-drop [0]
+ * ip4-source-check-via-rx         ip4-drop [0]
  * @cliexend
  *
  * Example of how to enable unicast source checking on an interface:
@@ -414,7 +405,7 @@ done:
  * Example of graph node after range checking is enabled:
  * @cliexstart{show vlib graph ip4-source-check-via-rx}
  *            Name                      Next                    Previous
- * ip4-source-check-via-rx         error-drop [0]         ip4-input-no-checksum
+ * ip4-source-check-via-rx         ip4-drop [0]           ip4-input-no-checksum
  *                           ip4-source-and-port-range-         ip4-input
  * @cliexend
  *

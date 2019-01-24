@@ -45,9 +45,6 @@ static char *ipsec_output_error_strings[] = {
 #undef _
 };
 
-static vlib_node_registration_t ipsec_output_ip4_node;
-static vlib_node_registration_t ipsec_output_ip6_node;
-
 typedef struct
 {
   u32 spd_id;
@@ -88,19 +85,21 @@ ipsec_output_policy_match (ipsec_spd_t * spd, u8 pr, u32 la, u32 ra, u16 lp,
     if (PREDICT_FALSE (p->protocol && (p->protocol != pr)))
       continue;
 
-    if (la < clib_net_to_host_u32 (p->laddr.start.ip4.as_u32))
-      continue;
-
-    if (la > clib_net_to_host_u32 (p->laddr.stop.ip4.as_u32))
-      continue;
-
     if (ra < clib_net_to_host_u32 (p->raddr.start.ip4.as_u32))
       continue;
 
     if (ra > clib_net_to_host_u32 (p->raddr.stop.ip4.as_u32))
       continue;
 
-    if (PREDICT_FALSE ((pr != IP_PROTOCOL_TCP) && (pr != IP_PROTOCOL_UDP)))
+    if (la < clib_net_to_host_u32 (p->laddr.start.ip4.as_u32))
+      continue;
+
+    if (la > clib_net_to_host_u32 (p->laddr.stop.ip4.as_u32))
+      continue;
+
+    if (PREDICT_FALSE
+	((pr != IP_PROTOCOL_TCP) && (pr != IP_PROTOCOL_UDP)
+	 && (pr != IP_PROTOCOL_SCTP)))
       return p;
 
     if (lp < p->lport.start)
@@ -131,9 +130,9 @@ ip6_addr_match_range (ip6_address_t * a, ip6_address_t * la,
 }
 
 always_inline ipsec_policy_t *
-ipsec_output_ip6_policy_match (ipsec_spd_t * spd,
-			       ip6_address_t * la,
-			       ip6_address_t * ra, u16 lp, u16 rp, u8 pr)
+ipsec6_output_policy_match (ipsec_spd_t * spd,
+			    ip6_address_t * la,
+			    ip6_address_t * ra, u16 lp, u16 rp, u8 pr)
 {
   ipsec_policy_t *p;
   u32 *i;
@@ -153,7 +152,9 @@ ipsec_output_ip6_policy_match (ipsec_spd_t * spd,
     if (!ip6_addr_match_range (la, &p->laddr.start.ip6, &p->laddr.stop.ip6))
       continue;
 
-    if (PREDICT_FALSE ((pr != IP_PROTOCOL_TCP) && (pr != IP_PROTOCOL_UDP)))
+    if (PREDICT_FALSE
+	((pr != IP_PROTOCOL_TCP) && (pr != IP_PROTOCOL_UDP)
+	 && (pr != IP_PROTOCOL_SCTP)))
       return p;
 
     if (lp < p->lport.start)
@@ -186,6 +187,7 @@ ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
   vlib_frame_t *f = 0;
   u32 spd_index0 = ~0;
   ipsec_spd_t *spd0 = 0;
+  int bogus;
   u64 nc_protect = 0, nc_bypass = 0, nc_discard = 0, nc_nomatch = 0;
 
   from = vlib_frame_vector_args (from_frame);
@@ -200,6 +202,7 @@ ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
       ip6_header_t *ip6_0 = 0;
       udp_header_t *udp0;
       u32 iph_offset = 0;
+      tcp_header_t *tcp0;
 
       bi0 = from[0];
       b0 = vlib_get_buffer (vm, bi0);
@@ -233,14 +236,13 @@ ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	     spd0->id);
 #endif
 
-	  p0 = ipsec_output_ip6_policy_match (spd0,
-					      &ip6_0->src_address,
-					      &ip6_0->dst_address,
-					      clib_net_to_host_u16
-					      (udp0->src_port),
-					      clib_net_to_host_u16
-					      (udp0->dst_port),
-					      ip6_0->protocol);
+	  p0 = ipsec6_output_policy_match (spd0,
+					   &ip6_0->src_address,
+					   &ip6_0->dst_address,
+					   clib_net_to_host_u16
+					   (udp0->src_port),
+					   clib_net_to_host_u16
+					   (udp0->dst_port), ip6_0->protocol);
 	}
       else
 	{
@@ -265,26 +267,72 @@ ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 					  clib_net_to_host_u16
 					  (udp0->dst_port));
 	}
+      tcp0 = (void *) udp0;
 
       if (PREDICT_TRUE (p0 != NULL))
 	{
 	  if (p0->policy == IPSEC_POLICY_ACTION_PROTECT)
 	    {
+	      ipsec_sa_t *sa = 0;
 	      nc_protect++;
-	      next_node_index = im->esp_encrypt_node_index;
+	      sa = pool_elt_at_index (im->sad, p0->sa_index);
+	      if (sa->protocol == IPSEC_PROTOCOL_ESP)
+		if (is_ipv6)
+		  next_node_index = im->esp6_encrypt_node_index;
+		else
+		  next_node_index = im->esp4_encrypt_node_index;
+	      else if (is_ipv6)
+		next_node_index = im->ah6_encrypt_node_index;
+	      else
+		next_node_index = im->ah4_encrypt_node_index;
 	      vnet_buffer (b0)->ipsec.sad_index = p0->sa_index;
-	      vlib_buffer_advance (b0, iph_offset);
 	      p0->counter.packets++;
 	      if (is_ipv6)
 		{
 		  p0->counter.bytes +=
 		    clib_net_to_host_u16 (ip6_0->payload_length);
 		  p0->counter.bytes += sizeof (ip6_header_t);
+		  if (PREDICT_FALSE
+		      (b0->flags & VNET_BUFFER_F_OFFLOAD_TCP_CKSUM))
+		    {
+		      tcp0->checksum =
+			ip6_tcp_udp_icmp_compute_checksum (vm, b0, ip6_0,
+							   &bogus);
+		      b0->flags &= ~VNET_BUFFER_F_OFFLOAD_TCP_CKSUM;
+		    }
+		  if (PREDICT_FALSE
+		      (b0->flags & VNET_BUFFER_F_OFFLOAD_UDP_CKSUM))
+		    {
+		      udp0->checksum =
+			ip6_tcp_udp_icmp_compute_checksum (vm, b0, ip6_0,
+							   &bogus);
+		      b0->flags &= ~VNET_BUFFER_F_OFFLOAD_UDP_CKSUM;
+		    }
 		}
 	      else
 		{
 		  p0->counter.bytes += clib_net_to_host_u16 (ip0->length);
+		  if (b0->flags & VNET_BUFFER_F_OFFLOAD_IP_CKSUM)
+		    {
+		      ip0->checksum = ip4_header_checksum (ip0);
+		      b0->flags &= ~VNET_BUFFER_F_OFFLOAD_IP_CKSUM;
+		    }
+		  if (PREDICT_FALSE
+		      (b0->flags & VNET_BUFFER_F_OFFLOAD_TCP_CKSUM))
+		    {
+		      tcp0->checksum =
+			ip4_tcp_udp_compute_checksum (vm, b0, ip0);
+		      b0->flags &= ~VNET_BUFFER_F_OFFLOAD_TCP_CKSUM;
+		    }
+		  if (PREDICT_FALSE
+		      (b0->flags & VNET_BUFFER_F_OFFLOAD_UDP_CKSUM))
+		    {
+		      udp0->checksum =
+			ip4_tcp_udp_compute_checksum (vm, b0, ip0);
+		      b0->flags &= ~VNET_BUFFER_F_OFFLOAD_UDP_CKSUM;
+		    }
 		}
+	      vlib_buffer_advance (b0, iph_offset);
 	    }
 	  else if (p0->policy == IPSEC_POLICY_ACTION_BYPASS)
 	    {
@@ -337,6 +385,11 @@ ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  last_next_node_index = next_node_index;
 
 	  f = vlib_get_frame_to_node (vm, next_node_index);
+
+	  /* frame->frame_flags, copy it from node */
+	  /* Copy trace flag from next_frame and from runtime. */
+	  f->frame_flags |= node->flags & VLIB_NODE_FLAG_TRACE;
+
 	  to_next = vlib_frame_vector_args (f);
 	}
 
@@ -366,17 +419,16 @@ ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
   return from_frame->n_vectors;
 }
 
-static uword
-ipsec_output_ip4_node_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
-			  vlib_frame_t * frame)
+VLIB_NODE_FN (ipsec4_output_node) (vlib_main_t * vm,
+				   vlib_node_runtime_t * node,
+				   vlib_frame_t * frame)
 {
   return ipsec_output_inline (vm, node, frame, 0);
 }
 
 /* *INDENT-OFF* */
-VLIB_REGISTER_NODE (ipsec_output_ip4_node,static) = {
-  .function = ipsec_output_ip4_node_fn,
-  .name = "ipsec-output-ip4",
+VLIB_REGISTER_NODE (ipsec4_output_node) = {
+  .name = "ipsec4-output-feature",
   .vector_size = sizeof (u32),
   .format_trace = format_ipsec_output_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
@@ -393,18 +445,16 @@ VLIB_REGISTER_NODE (ipsec_output_ip4_node,static) = {
 };
 /* *INDENT-ON* */
 
-VLIB_NODE_FUNCTION_MULTIARCH (ipsec_output_ip4_node, ipsec_output_ip4_node_fn)
-     static uword
-       ipsec_output_ip6_node_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
-				 vlib_frame_t * frame)
+VLIB_NODE_FN (ipsec6_output_node) (vlib_main_t * vm,
+				   vlib_node_runtime_t * node,
+				   vlib_frame_t * frame)
 {
   return ipsec_output_inline (vm, node, frame, 1);
 }
 
 /* *INDENT-OFF* */
-VLIB_REGISTER_NODE (ipsec_output_ip6_node,static) = {
-  .function = ipsec_output_ip6_node_fn,
-  .name = "ipsec-output-ip6",
+VLIB_REGISTER_NODE (ipsec6_output_node) = {
+  .name = "ipsec6-output-feature",
   .vector_size = sizeof (u32),
   .format_trace = format_ipsec_output_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
@@ -421,7 +471,6 @@ VLIB_REGISTER_NODE (ipsec_output_ip6_node,static) = {
 };
 /* *INDENT-ON* */
 
-VLIB_NODE_FUNCTION_MULTIARCH (ipsec_output_ip6_node, ipsec_output_ip6_node_fn)
 #else /* IPSEC > 1 */
 
 /* Dummy ipsec output node, in case when IPSec is disabled */
@@ -435,16 +484,16 @@ ipsec_output_node_fn (vlib_main_t * vm,
 }
 
 /* *INDENT-OFF* */
-VLIB_REGISTER_NODE (ipsec_output_node) = {
+VLIB_REGISTER_NODE (ipsec4_output_node) = {
   .vector_size = sizeof (u32),
   .function = ipsec_output_node_fn,
-  .name = "ipsec-output-ip4",
+  .name = "ipsec4-output-feature",
 };
 
-VLIB_REGISTER_NODE (ipsec_output_node) = {
+VLIB_REGISTER_NODE (ipsec6_output_node) = {
   .vector_size = sizeof (u32),
   .function = ipsec_output_node_fn,
-  .name = "ipsec-output-ip6",
+  .name = "ipsec6-output-feature",
 };
 /* *INDENT-ON* */
 #endif

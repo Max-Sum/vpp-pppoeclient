@@ -65,7 +65,7 @@ format_osi_header_with_length (u8 * s, va_list * args)
   osi_header_t *h = va_arg (*args, osi_header_t *);
   u32 max_header_bytes = va_arg (*args, u32);
   osi_protocol_t p = h->protocol;
-  uword indent, header_bytes;
+  u32 indent, header_bytes;
 
   header_bytes = sizeof (h[0]);
   if (max_header_bytes != 0 && header_bytes > max_header_bytes)
@@ -176,7 +176,7 @@ osi_init (vlib_main_t * vm)
   if ((error = vlib_call_init_function (vm, llc_init)))
     return error;
 
-  memset (pm, 0, sizeof (pm[0]));
+  clib_memset (pm, 0, sizeof (pm[0]));
   pm->vlib_main = vm;
 
   pm->protocol_info_by_name = hash_create_string (0, sizeof (uword));

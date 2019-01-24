@@ -325,7 +325,7 @@ local_set_variable_nolock (svmdb_client_t * client,
     {
       svmdb_value_t *newvalue;
       pool_get (shm->values, newvalue);
-      memset (newvalue, 0, sizeof (*newvalue));
+      clib_memset (newvalue, 0, sizeof (*newvalue));
       newvalue->elsize = elsize;
       vec_alloc (newvalue->value, vec_len (val) * elsize);
       clib_memcpy (newvalue->value, val, vec_len (val) * elsize);
@@ -456,7 +456,7 @@ svmdb_local_serialize_strings (svmdb_client_t * client, char *filename)
       goto out;
     }
 
-  serialize_open_unix_file_descriptor (sm, fd);
+  serialize_open_clib_file_descriptor (sm, fd);
 
   region_lock (client->db_rp, 20);
 
@@ -512,7 +512,7 @@ svmdb_local_unserialize_strings (svmdb_client_t * client, char *filename)
       goto out;
     }
 
-  unserialize_open_unix_file_descriptor (sm, fd);
+  unserialize_open_clib_file_descriptor (sm, fd);
 
   region_lock (client->db_rp, 21);
   oldheap = svm_push_data_heap (client->db_rp);
@@ -651,7 +651,7 @@ svmdb_local_find_or_add_vec_variable (svmdb_client_t * client,
       h = shm->namespaces[SVMDB_NAMESPACE_VEC];
 
       pool_get (shm->values, newvalue);
-      memset (newvalue, 0, sizeof (*newvalue));
+      clib_memset (newvalue, 0, sizeof (*newvalue));
       newvalue->elsize = 1;
       vec_alloc (newvalue->value, nbytes);
       _vec_len (newvalue->value) = nbytes;

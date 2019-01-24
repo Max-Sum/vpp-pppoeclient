@@ -29,7 +29,7 @@ mpls_sw_interface_is_enabled (u32 sw_if_index)
 {
     mpls_main_t * mm = &mpls_main;
 
-    if (vec_len(mm->mpls_enabled_by_sw_if_index) < sw_if_index)
+    if (vec_len(mm->mpls_enabled_by_sw_if_index) <= sw_if_index)
         return (0);
 
     return (mm->mpls_enabled_by_sw_if_index[sw_if_index]);
@@ -62,7 +62,7 @@ mpls_sw_interface_enable_disable (mpls_main_t * mm,
       fib_table_lock(lfib_index, FIB_PROTOCOL_MPLS,
                      (is_api? FIB_SOURCE_API: FIB_SOURCE_CLI));
 
-      vec_validate(mm->fib_index_by_sw_if_index, 0);
+      vec_validate(mm->fib_index_by_sw_if_index, sw_if_index);
       mm->fib_index_by_sw_if_index[sw_if_index] = lfib_index;
     }
   else
@@ -90,6 +90,7 @@ mpls_interface_enable_disable (vlib_main_t * vm,
   vnet_main_t * vnm = vnet_get_main();
   clib_error_t * error = 0;
   u32 sw_if_index, enable;
+  int rv;
 
   sw_if_index = ~0;
 
@@ -111,7 +112,10 @@ mpls_interface_enable_disable (vlib_main_t * vm,
       goto done;
     }
 
-  mpls_sw_interface_enable_disable(&mpls_main, sw_if_index, enable, 0);
+  rv = mpls_sw_interface_enable_disable(&mpls_main, sw_if_index, enable, 0);
+
+  if (VNET_API_ERROR_NO_SUCH_FIB == rv)
+      error = clib_error_return (0, "default MPLS table must be created first");
 
  done:
   return error;

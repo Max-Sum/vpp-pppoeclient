@@ -3,23 +3,23 @@
 import unittest
 
 from framework import VppTestCase, VppTestRunner
-from vpp_sub_interface import VppSubInterface, VppDot1QSubint, VppDot1ADSubint
+from vpp_ip import DpoProto
 from vpp_ip_route import VppIpMRoute, VppMRoutePath, VppMFibSignal, \
     MRouteItfFlags, MRouteEntryFlags, VppIpTable
 
 from scapy.packet import Raw
 from scapy.layers.l2 import Ether
-from scapy.layers.inet import IP, UDP, getmacbyip, ICMP
+from scapy.layers.inet import IP, UDP, getmacbyip
 from scapy.layers.inet6 import IPv6, getmacbyip6
-from util import ppp
 
 #
-# The number of packets sent is set to 90 so that when we replicate more than 3
+# The number of packets sent is set to 91 so that when we replicate more than 3
 # times, which we do for some entries, we will generate more than 256 packets
 # to the next node in the VLIB graph. Thus we are testing the code's
-# correctness handling this over-flow
+# correctness handling this over-flow.
+# It's also an odd number so we hit any single loops.
 #
-N_PKTS_IN_STREAM = 90
+N_PKTS_IN_STREAM = 91
 
 
 class TestMFIB(VppTestCase):
@@ -110,7 +110,7 @@ class TestIPMcast(VppTestCase):
                     capture.remove(p)
         return capture
 
-    def verify_capture_ip4(self, rx_if, sent):
+    def verify_capture_ip4(self, rx_if, sent, dst_mac=None):
         rxd = rx_if.get_capture(len(sent))
 
         try:
@@ -128,8 +128,11 @@ class TestIPMcast(VppTestCase):
                 tx_ip = tx[IP]
                 rx_ip = rx[IP]
 
+                if dst_mac is None:
+                    dst_mac = getmacbyip(rx_ip.dst)
+
                 # check the MAC address on the RX'd packet is correctly formed
-                self.assertEqual(eth.dst, getmacbyip(rx_ip.dst))
+                self.assertEqual(eth.dst, dst_mac)
 
                 self.assertEqual(rx_ip.src, tx_ip.src)
                 self.assertEqual(rx_ip.dst, tx_ip.dst)
@@ -214,7 +217,7 @@ class TestIPMcast(VppTestCase):
         route_1_1_1_1_232_1_1_1 = VppIpMRoute(
             self,
             "1.1.1.1",
-            "232.1.1.1", 64,
+            "232.1.1.1", 27,  # any grp-len is ok when src is set
             MRouteEntryFlags.MFIB_ENTRY_FLAG_NONE,
             [VppMRoutePath(self.pg0.sw_if_index,
                            MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT),
@@ -223,6 +226,26 @@ class TestIPMcast(VppTestCase):
              VppMRoutePath(self.pg2.sw_if_index,
                            MRouteItfFlags.MFIB_ITF_FLAG_FORWARD)])
         route_1_1_1_1_232_1_1_1.add_vpp_config()
+
+        #
+        # An (S,G).
+        # one accepting interface, pg0, 2 forwarding interfaces
+        # that use unicast next-hops
+        #
+        route_1_1_1_1_232_1_1_2 = VppIpMRoute(
+            self,
+            "1.1.1.1",
+            "232.1.1.2", 64,
+            MRouteEntryFlags.MFIB_ENTRY_FLAG_NONE,
+            [VppMRoutePath(self.pg0.sw_if_index,
+                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT),
+             VppMRoutePath(self.pg1.sw_if_index,
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                           nh=self.pg1.remote_ip4),
+             VppMRoutePath(self.pg2.sw_if_index,
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                           nh=self.pg2.remote_ip4)])
+        route_1_1_1_1_232_1_1_2.add_vpp_config()
 
         #
         # An (*,G/m).
@@ -250,6 +273,9 @@ class TestIPMcast(VppTestCase):
         self.pg_enable_capture(self.pg_interfaces)
         self.pg_start()
 
+        self.assertEqual(route_1_1_1_1_232_1_1_1.get_stats()['packets'],
+                         len(tx))
+
         # We expect replications on Pg1->7
         self.verify_capture_ip4(self.pg1, tx)
         self.verify_capture_ip4(self.pg2, tx)
@@ -276,7 +302,30 @@ class TestIPMcast(VppTestCase):
         self.verify_capture_ip4(self.pg1, tx)
         self.verify_capture_ip4(self.pg2, tx)
 
+        self.assertEqual(route_1_1_1_1_232_1_1_1.get_stats()['packets'],
+                         2*len(tx))
+
         # no replications on Pg0
+        self.pg0.assert_nothing_captured(
+            remark="IP multicast packets forwarded on PG0")
+        self.pg3.assert_nothing_captured(
+            remark="IP multicast packets forwarded on PG3")
+
+        #
+        # a stream to the unicast next-hops
+        #
+        self.vapi.cli("clear trace")
+        tx = self.create_stream_ip4(self.pg0, "1.1.1.1", "232.1.1.2")
+        self.pg0.add_stream(tx)
+
+        self.pg_enable_capture(self.pg_interfaces)
+        self.pg_start()
+
+        # We expect replications on Pg1->7
+        self.verify_capture_ip4(self.pg1, tx, dst_mac=self.pg1.remote_mac)
+        self.verify_capture_ip4(self.pg2, tx, dst_mac=self.pg2.remote_mac)
+
+        # no replications on Pg0 nor pg3
         self.pg0.assert_nothing_captured(
             remark="IP multicast packets forwarded on PG0")
         self.pg3.assert_nothing_captured(
@@ -296,6 +345,7 @@ class TestIPMcast(VppTestCase):
 
         # We expect replications on Pg1 only
         self.verify_capture_ip4(self.pg1, tx)
+        self.assertEqual(route_232.get_stats()['packets'], len(tx))
 
         # no replications on Pg0, Pg2 not Pg3
         self.pg0.assert_nothing_captured(
@@ -315,7 +365,7 @@ class TestIPMcast(VppTestCase):
         self.pg_enable_capture(self.pg_interfaces)
         self.pg_start()
 
-        # We expect replications on Pg1, 2, 3.
+        # We expect replications on Pg1->7
         self.verify_capture_ip4(self.pg1, tx)
         self.verify_capture_ip4(self.pg2, tx)
         self.verify_capture_ip4(self.pg3, tx)
@@ -324,9 +374,9 @@ class TestIPMcast(VppTestCase):
         self.verify_capture_ip4(self.pg6, tx)
         self.verify_capture_ip4(self.pg7, tx)
 
-        route_232_1_1_1.remove_vpp_config()
-        route_1_1_1_1_232_1_1_1.remove_vpp_config()
-        route_232.remove_vpp_config()
+        # no replications on Pg0
+        self.pg0.assert_nothing_captured(
+            remark="IP multicast packets forwarded on PG0")
 
     def test_ip6_mcast(self):
         """ IPv6 Multicast Replication """
@@ -354,13 +404,17 @@ class TestIPMcast(VppTestCase):
             "ff01::1", 128,
             MRouteEntryFlags.MFIB_ENTRY_FLAG_NONE,
             [VppMRoutePath(self.pg0.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT),
+                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT,
+                           proto=DpoProto.DPO_PROTO_IP6),
              VppMRoutePath(self.pg1.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD),
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                           proto=DpoProto.DPO_PROTO_IP6),
              VppMRoutePath(self.pg2.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD),
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                           proto=DpoProto.DPO_PROTO_IP6),
              VppMRoutePath(self.pg3.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD)],
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                           proto=DpoProto.DPO_PROTO_IP6)],
             is_ip6=1)
         route_ff01_1.add_vpp_config()
 
@@ -371,14 +425,17 @@ class TestIPMcast(VppTestCase):
         route_2001_ff01_1 = VppIpMRoute(
             self,
             "2001::1",
-            "ff01::1", 256,
+            "ff01::1", 0,  # any grp-len is ok when src is set
             MRouteEntryFlags.MFIB_ENTRY_FLAG_NONE,
             [VppMRoutePath(self.pg0.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT),
+                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT,
+                           proto=DpoProto.DPO_PROTO_IP6),
              VppMRoutePath(self.pg1.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD),
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                           proto=DpoProto.DPO_PROTO_IP6),
              VppMRoutePath(self.pg2.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD)],
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                           proto=DpoProto.DPO_PROTO_IP6)],
             is_ip6=1)
         route_2001_ff01_1.add_vpp_config()
 
@@ -392,14 +449,25 @@ class TestIPMcast(VppTestCase):
             "ff01::", 16,
             MRouteEntryFlags.MFIB_ENTRY_FLAG_NONE,
             [VppMRoutePath(self.pg0.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT),
+                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT,
+                           proto=DpoProto.DPO_PROTO_IP6),
              VppMRoutePath(self.pg1.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD)],
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                           proto=DpoProto.DPO_PROTO_IP6)],
             is_ip6=1)
         route_ff01.add_vpp_config()
 
         #
         # a stream that matches the route for (*, ff01::/16)
+        # sent on the non-accepting interface
+        #
+        self.vapi.cli("clear trace")
+        tx = self.create_stream_ip6(self.pg1, "2002::1", "ff01:2::255")
+        self.send_and_assert_no_replies(self.pg1, tx, "RPF miss")
+
+        #
+        # a stream that matches the route for (*, ff01::/16)
+        # sent on the accepting interface
         #
         self.vapi.cli("clear trace")
         tx = self.create_stream_ip6(self.pg0, "2002::1", "ff01:2::255")
@@ -473,10 +541,6 @@ class TestIPMcast(VppTestCase):
             remark="IP multicast packets forwarded on PG0")
         self.pg3.assert_nothing_captured(
             remark="IP multicast packets forwarded on PG3")
-
-        route_ff01.remove_vpp_config()
-        route_ff01_1.remove_vpp_config()
-        route_2001_ff01_1.remove_vpp_config()
 
     def _mcast_connected_send_stream(self, dst_ip):
         self.vapi.cli("clear trace")
@@ -584,8 +648,10 @@ class TestIPMcast(VppTestCase):
         signal_232_1_1_1_itf_0.compare(signals[1])
         signal_232_1_1_2_itf_0.compare(signals[0])
 
-        route_232_1_1_1.remove_vpp_config()
-        route_232_1_1_2.remove_vpp_config()
+        route_232_1_1_1.update_entry_flags(
+            MRouteEntryFlags.MFIB_ENTRY_FLAG_NONE)
+        route_232_1_1_2.update_entry_flags(
+            MRouteEntryFlags.MFIB_ENTRY_FLAG_NONE)
 
     def test_ip_mcast_signal(self):
         """ IP Multicast Signal """
@@ -679,11 +745,6 @@ class TestIPMcast(VppTestCase):
         signals = self.vapi.mfib_signal_dump()
         self.assertEqual(0, len(signals))
 
-        #
-        # Cleanup
-        #
-        route_232_1_1_1.remove_vpp_config()
-
     def test_ip_mcast_vrf(self):
         """ IP Multicast Replication in non-default table"""
 
@@ -733,11 +794,14 @@ class TestIPMcast(VppTestCase):
             "ff01::1", 256,
             MRouteEntryFlags.MFIB_ENTRY_FLAG_NONE,
             [VppMRoutePath(self.pg8.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT),
+                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT,
+                           proto=DpoProto.DPO_PROTO_IP6),
              VppMRoutePath(self.pg1.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD),
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                           proto=DpoProto.DPO_PROTO_IP6),
              VppMRoutePath(self.pg2.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD)],
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                           proto=DpoProto.DPO_PROTO_IP6)],
             table_id=10,
             is_ip6=1)
         route_2001_ff01_1.add_vpp_config()
@@ -755,6 +819,45 @@ class TestIPMcast(VppTestCase):
         # We expect replications on Pg1, 2,
         self.verify_capture_ip6(self.pg1, tx)
         self.verify_capture_ip6(self.pg2, tx)
+
+    def test_bidir(self):
+        """ IP Multicast Bi-directional """
+
+        #
+        # A (*,G). The set of accepting interfaces matching the forwarding
+        #
+        route_232_1_1_1 = VppIpMRoute(
+            self,
+            "0.0.0.0",
+            "232.1.1.1", 32,
+            MRouteEntryFlags.MFIB_ENTRY_FLAG_NONE,
+            [VppMRoutePath(self.pg0.sw_if_index,
+                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT |
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD),
+             VppMRoutePath(self.pg1.sw_if_index,
+                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT |
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD),
+             VppMRoutePath(self.pg2.sw_if_index,
+                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT |
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD),
+             VppMRoutePath(self.pg3.sw_if_index,
+                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT |
+                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD)])
+        route_232_1_1_1.add_vpp_config()
+
+        tx = self.create_stream_ip4(self.pg0, "1.1.1.1", "232.1.1.1")
+        self.pg0.add_stream(tx)
+
+        self.pg_enable_capture(self.pg_interfaces)
+        self.pg_start()
+
+        # We expect replications on Pg1, 2, 3, but not on pg0
+        self.verify_capture_ip4(self.pg1, tx)
+        self.verify_capture_ip4(self.pg2, tx)
+        self.verify_capture_ip4(self.pg3, tx)
+        self.pg0.assert_nothing_captured(
+            remark="IP multicast packets forwarded on PG0")
+
 
 if __name__ == '__main__':
     unittest.main(testRunner=VppTestRunner)

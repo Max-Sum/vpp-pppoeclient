@@ -40,6 +40,9 @@
 #include <vnet/dpo/interface_rx_dpo.h>
 #include <vnet/dpo/interface_tx_dpo.h>
 #include <vnet/dpo/mpls_disposition.h>
+#include <vnet/dpo/dvr_dpo.h>
+#include <vnet/dpo/l3_proxy_dpo.h>
+#include <vnet/dpo/ip6_ll_dpo.h>
 
 /**
  * Array of char* names for the DPO types and protos
@@ -120,6 +123,7 @@ dpo_proto_to_link (dpo_proto_t dp)
     case DPO_PROTO_IP4:
         return (VNET_LINK_IP4);
     case DPO_PROTO_MPLS:
+    case DPO_PROTO_BIER:
         return (VNET_LINK_MPLS);
     case DPO_PROTO_ETHERNET:
         return (VNET_LINK_ETHERNET);
@@ -149,20 +153,22 @@ format_dpo_id (u8 * s, va_list * args)
 
     if (NULL != dpo_vfts[dpo->dpoi_type].dv_format)
     {
-        return (format(s, "%U",
-                       dpo_vfts[dpo->dpoi_type].dv_format,
-                       dpo->dpoi_index,
-                       indent));
+        s = format(s, "%U",
+                   dpo_vfts[dpo->dpoi_type].dv_format,
+                   dpo->dpoi_index,
+                   indent);
     }
-
-    switch (dpo->dpoi_type)
+    else
     {
-    case DPO_FIRST:
-	s = format(s, "unset");
-	break;
-    default:
-	s = format(s, "unknown");
-	break;
+        switch (dpo->dpoi_type)
+        {
+        case DPO_FIRST:
+            s = format(s, "unset");
+            break;
+        default:
+            s = format(s, "unknown");
+            break;
+        }
     }
     return (s);
 }
@@ -299,6 +305,18 @@ dpo_default_get_next_node (const dpo_id_t *dpo)
     return (node_indices);
 }
 
+/**
+ * A default variant of the make interpose function that just returns
+ * the original
+ */
+static void
+dpo_default_mk_interpose (const dpo_id_t *original,
+                          const dpo_id_t *parent,
+                          dpo_id_t *clone)
+{
+    dpo_copy(clone, original);
+}
+
 void
 dpo_register (dpo_type_t type,
 	      const dpo_vft_t *vft,
@@ -309,6 +327,10 @@ dpo_register (dpo_type_t type,
     if (NULL == dpo_vfts[type].dv_get_next_node)
     {
         dpo_vfts[type].dv_get_next_node = dpo_default_get_next_node;
+    }
+    if (NULL == dpo_vfts[type].dv_mk_interpose)
+    {
+        dpo_vfts[type].dv_mk_interpose = dpo_default_mk_interpose;
     }
 
     vec_validate(dpo_nodes, type);
@@ -324,6 +346,17 @@ dpo_register_new_type (const dpo_vft_t *vft,
     dpo_register(type, vft, nodes);
 
     return (type);
+}
+
+void
+dpo_mk_interpose (const dpo_id_t *original,
+                  const dpo_id_t *parent,
+                  dpo_id_t *clone)
+{
+    if (!dpo_id_is_valid(original))
+	return;
+
+    dpo_vfts[original->dpoi_type].dv_mk_interpose(original, parent, clone);
 }
 
 void
@@ -344,6 +377,17 @@ dpo_unlock (dpo_id_t *dpo)
     dpo_vfts[dpo->dpoi_type].dv_unlock(dpo);
 }
 
+u32
+dpo_get_urpf(const dpo_id_t *dpo)
+{
+    if (dpo_id_is_valid(dpo) &&
+        (NULL != dpo_vfts[dpo->dpoi_type].dv_get_urpf))
+    {
+        return (dpo_vfts[dpo->dpoi_type].dv_get_urpf(dpo));
+    }
+
+    return (~0);
+}
 
 static u32
 dpo_get_next_node (dpo_type_t child_type,
@@ -415,6 +459,21 @@ dpo_get_next_node (dpo_type_t child_type,
     }
 
     return (dpo_edges[child_type][child_proto][parent_type][parent_proto]);
+}
+
+/**
+ * @brief return already stacked up next node index for a given
+ * child_type/child_proto and parent_type/patent_proto.
+ * The VLIB graph arc used is taken from the parent and child types
+ * passed.
+ */
+u32
+dpo_get_next_node_by_type_and_proto (dpo_type_t   child_type,
+                                     dpo_proto_t  child_proto,
+                                     dpo_type_t   parent_type,
+                                     dpo_proto_t  parent_proto)
+{
+   return (dpo_edges[child_type][child_proto][parent_type][parent_proto]);
 }
 
 /**
@@ -506,6 +565,9 @@ dpo_stack_from_node (u32 child_node_index,
         }
     }
     dpo_stack_i(edge, dpo, parent);
+
+    /* should free this local vector to avoid memory leak */
+    vec_free(parent_indices);
 }
 
 static clib_error_t *
@@ -519,10 +581,13 @@ dpo_module_init (vlib_main_t * vm)
     classify_dpo_module_init();
     lookup_dpo_module_init();
     ip_null_dpo_module_init();
+    ip6_ll_dpo_module_init();
     replicate_module_init();
     interface_rx_dpo_module_init();
     interface_tx_dpo_module_init();
     mpls_disp_dpo_module_init();
+    dvr_dpo_module_init();
+    l3_proxy_dpo_module_init();
 
     return (NULL);
 }

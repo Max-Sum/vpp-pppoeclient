@@ -22,17 +22,18 @@
 #include <vnet/ip/ip.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/ethernet/arp_packet.h>
+#include <dpdk/buffer.h>
 #include <dpdk/device/dpdk.h>
-
 #include <dpdk/device/dpdk_priv.h>
 #include <vppinfra/error.h>
 
 void
 dpdk_device_error (dpdk_device_t * xd, char *str, int rv)
 {
+  dpdk_log_err ("Interface %U error %d: %s",
+		format_dpdk_device_name, xd->port_id, rv, rte_strerror (rv));
   xd->errors = clib_error_return (xd->errors, "%s[port:%d, errno:%d]: %s",
-				  str, xd->device_index, rv,
-				  rte_strerror (rv));
+				  str, xd->port_id, rv, rte_strerror (rv));
 }
 
 void
@@ -40,7 +41,10 @@ dpdk_device_setup (dpdk_device_t * xd)
 {
   dpdk_main_t *dm = &dpdk_main;
   vnet_main_t *vnm = vnet_get_main ();
-  vnet_sw_interface_t *sw = vnet_get_sw_interface (vnm, xd->vlib_sw_if_index);
+  vnet_sw_interface_t *sw = vnet_get_sw_interface (vnm, xd->sw_if_index);
+  vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, xd->hw_if_index);
+  struct rte_eth_dev_info dev_info;
+  u64 bitmap;
   int rv;
   int j;
 
@@ -55,7 +59,34 @@ dpdk_device_setup (dpdk_device_t * xd)
       dpdk_device_stop (xd);
     }
 
-  rv = rte_eth_dev_configure (xd->device_index, xd->rx_q_used,
+  /* Enable flow director when flows exist */
+  if (xd->pmd == VNET_DPDK_PMD_I40E)
+    {
+      if ((xd->flags & DPDK_DEVICE_FLAG_RX_FLOW_OFFLOAD) != 0)
+	xd->port_conf.fdir_conf.mode = RTE_FDIR_MODE_PERFECT;
+      else
+	xd->port_conf.fdir_conf.mode = RTE_FDIR_MODE_NONE;
+    }
+
+  rte_eth_dev_info_get (xd->port_id, &dev_info);
+
+  bitmap = xd->port_conf.txmode.offloads & ~dev_info.tx_offload_capa;
+  if (bitmap)
+    {
+      dpdk_log_warn ("unsupported tx offloads requested on port %u: %U",
+		     xd->port_id, format_dpdk_tx_offload_caps, bitmap);
+      xd->port_conf.txmode.offloads ^= bitmap;
+    }
+
+  bitmap = xd->port_conf.rxmode.offloads & ~dev_info.rx_offload_capa;
+  if (bitmap)
+    {
+      dpdk_log_warn ("unsupported rx offloads requested on port %u: %U",
+		     xd->port_id, format_dpdk_rx_offload_caps, bitmap);
+      xd->port_conf.rxmode.offloads ^= bitmap;
+    }
+
+  rv = rte_eth_dev_configure (xd->port_id, xd->rx_q_used,
 			      xd->tx_q_used, &xd->port_conf);
 
   if (rv < 0)
@@ -67,33 +98,44 @@ dpdk_device_setup (dpdk_device_t * xd)
   /* Set up one TX-queue per worker thread */
   for (j = 0; j < xd->tx_q_used; j++)
     {
-      rv = rte_eth_tx_queue_setup (xd->device_index, j, xd->nb_tx_desc,
-				   xd->cpu_socket, &xd->tx_conf);
+      rv =
+	rte_eth_tx_queue_setup (xd->port_id, j, xd->nb_tx_desc,
+				xd->cpu_socket, &xd->tx_conf);
 
       /* retry with any other CPU socket */
       if (rv < 0)
-	rv = rte_eth_tx_queue_setup (xd->device_index, j, xd->nb_tx_desc,
-				     SOCKET_ID_ANY, &xd->tx_conf);
+	rv =
+	  rte_eth_tx_queue_setup (xd->port_id, j,
+				  xd->nb_tx_desc, SOCKET_ID_ANY,
+				  &xd->tx_conf);
       if (rv < 0)
 	dpdk_device_error (xd, "rte_eth_tx_queue_setup", rv);
     }
 
+  vec_validate_aligned (xd->buffer_pool_for_queue, xd->rx_q_used - 1,
+			CLIB_CACHE_LINE_BYTES);
   for (j = 0; j < xd->rx_q_used; j++)
     {
+      dpdk_mempool_private_t *privp;
       uword tidx = vnet_get_device_input_thread_index (dm->vnet_main,
 						       xd->hw_if_index, j);
-      unsigned lcore = vlib_worker_threads[tidx].lcore_id;
+      unsigned lcore = vlib_worker_threads[tidx].cpu_id;
       u16 socket_id = rte_lcore_to_socket_id (lcore);
 
-      rv = rte_eth_rx_queue_setup (xd->device_index, j, xd->nb_rx_desc,
-				   xd->cpu_socket, 0,
-				   dm->pktmbuf_pools[socket_id]);
+      rv =
+	rte_eth_rx_queue_setup (xd->port_id, j, xd->nb_rx_desc,
+				xd->cpu_socket, 0,
+				dm->pktmbuf_pools[socket_id]);
 
       /* retry with any other CPU socket */
       if (rv < 0)
-	rv = rte_eth_rx_queue_setup (xd->device_index, j, xd->nb_rx_desc,
-				     SOCKET_ID_ANY, 0,
-				     dm->pktmbuf_pools[socket_id]);
+	rv =
+	  rte_eth_rx_queue_setup (xd->port_id, j,
+				  xd->nb_rx_desc, SOCKET_ID_ANY, 0,
+				  dm->pktmbuf_pools[socket_id]);
+
+      privp = rte_mempool_get_priv (dm->pktmbuf_pools[socket_id]);
+      xd->buffer_pool_for_queue[j] = privp->buffer_pool_index;
 
       if (rv < 0)
 	dpdk_device_error (xd, "rte_eth_rx_queue_setup", rv);
@@ -101,6 +143,8 @@ dpdk_device_setup (dpdk_device_t * xd)
 
   if (vec_len (xd->errors))
     goto error;
+
+  rte_eth_dev_set_mtu (xd->port_id, hi->max_packet_bytes);
 
   if (xd->flags & DPDK_DEVICE_FLAG_ADMIN_UP)
     dpdk_device_start (xd);
@@ -123,7 +167,7 @@ dpdk_device_start (dpdk_device_t * xd)
   if (xd->flags & DPDK_DEVICE_FLAG_PMD_INIT_FAIL)
     return;
 
-  rv = rte_eth_dev_start (xd->device_index);
+  rv = rte_eth_dev_start (xd->port_id);
 
   if (rv)
     {
@@ -133,7 +177,7 @@ dpdk_device_start (dpdk_device_t * xd)
 
   if (xd->default_mac_address)
     rv =
-      rte_eth_dev_default_mac_addr_set (xd->device_index,
+      rte_eth_dev_default_mac_addr_set (xd->port_id,
 					(struct ether_addr *)
 					xd->default_mac_address);
 
@@ -141,22 +185,25 @@ dpdk_device_start (dpdk_device_t * xd)
     dpdk_device_error (xd, "rte_eth_dev_default_mac_addr_set", rv);
 
   if (xd->flags & DPDK_DEVICE_FLAG_PROMISC)
-    rte_eth_promiscuous_enable (xd->device_index);
+    rte_eth_promiscuous_enable (xd->port_id);
   else
-    rte_eth_promiscuous_disable (xd->device_index);
+    rte_eth_promiscuous_disable (xd->port_id);
 
-  rte_eth_allmulticast_enable (xd->device_index);
+  rte_eth_allmulticast_enable (xd->port_id);
 
   if (xd->pmd == VNET_DPDK_PMD_BOND)
     {
-      u8 slink[16];
-      int nlink = rte_eth_bond_slaves_get (xd->device_index, slink, 16);
+      dpdk_portid_t slink[16];
+      int nlink = rte_eth_bond_slaves_get (xd->port_id, slink, 16);
       while (nlink >= 1)
 	{
-	  u8 dpdk_port = slink[--nlink];
+	  dpdk_portid_t dpdk_port = slink[--nlink];
 	  rte_eth_allmulticast_enable (dpdk_port);
 	}
     }
+
+  dpdk_log_info ("Interface %U started",
+		 format_dpdk_device_name, xd->port_id);
 }
 
 void
@@ -165,20 +212,23 @@ dpdk_device_stop (dpdk_device_t * xd)
   if (xd->flags & DPDK_DEVICE_FLAG_PMD_INIT_FAIL)
     return;
 
-  rte_eth_allmulticast_disable (xd->device_index);
-  rte_eth_dev_stop (xd->device_index);
+  rte_eth_allmulticast_disable (xd->port_id);
+  rte_eth_dev_stop (xd->port_id);
+  clib_memset (&xd->link, 0, sizeof (struct rte_eth_link));
 
   /* For bonded interface, stop slave links */
   if (xd->pmd == VNET_DPDK_PMD_BOND)
     {
-      u8 slink[16];
-      int nlink = rte_eth_bond_slaves_get (xd->device_index, slink, 16);
+      dpdk_portid_t slink[16];
+      int nlink = rte_eth_bond_slaves_get (xd->port_id, slink, 16);
       while (nlink >= 1)
 	{
-	  u8 dpdk_port = slink[--nlink];
+	  dpdk_portid_t dpdk_port = slink[--nlink];
 	  rte_eth_dev_stop (dpdk_port);
 	}
     }
+  dpdk_log_info ("Interface %U stopped",
+		 format_dpdk_device_name, xd->port_id);
 }
 
 /* Even type for send_garp_na_process */
@@ -193,7 +243,6 @@ static uword
 send_garp_na_process (vlib_main_t * vm,
 		      vlib_node_runtime_t * rt, vlib_frame_t * f)
 {
-  vnet_main_t *vnm = vnet_get_main ();
   uword event_type, *event_data = 0;
 
   while (1)
@@ -209,11 +258,9 @@ send_garp_na_process (vlib_main_t * vm,
 	  if (i < 5)		/* wait 0.2 sec for link to settle, max total 1 sec */
 	    vlib_process_suspend (vm, 0.2);
 	  dpdk_device_t *xd = &dpdk_main.devices[dpdk_port];
-	  u32 hw_if_index = xd->hw_if_index;
-	  vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, hw_if_index);
 	  dpdk_update_link_state (xd, vlib_time_now (vm));
-	  send_ip4_garp (vm, hi);
-	  send_ip6_na (vm, hi);
+	  send_ip4_garp (vm, xd->sw_if_index);
+	  send_ip6_na (vm, xd->sw_if_index);
 	}
       vec_reset_length (event_data);
     }
@@ -240,7 +287,7 @@ garp_na_proc_callback (uword * dpdk_port)
 }
 
 always_inline int
-dpdk_port_state_callback_inline (uint8_t port_id,
+dpdk_port_state_callback_inline (dpdk_portid_t port_id,
 				 enum rte_eth_event_type type, void *param)
 {
   struct rte_eth_link link;
@@ -249,7 +296,7 @@ dpdk_port_state_callback_inline (uint8_t port_id,
   RTE_SET_USED (param);
   if (type != RTE_ETH_EVENT_INTR_LSC)
     {
-      clib_warning ("Unknown event %d received for port %d", type, port_id);
+      dpdk_log_info ("Unknown event %d received for port %d", type, port_id);
       return -1;
     }
 
@@ -260,52 +307,57 @@ dpdk_port_state_callback_inline (uint8_t port_id,
     {
       uword bd_port = xd->bond_port;
       int bd_mode = rte_eth_bond_mode_get (bd_port);
-#if 0
-      clib_warning ("Port %d state to %s, "
-		    "slave of port %d BondEthernet%d in mode %d",
-		    port_id, (link_up) ? "UP" : "DOWN",
-		    bd_port, xd->port_id, bd_mode);
-#endif
+      dpdk_log_info ("Port %d state to %s, "
+		     "slave of port %d BondEthernet%d in mode %d",
+		     port_id, (link_up) ? "UP" : "DOWN",
+		     bd_port, xd->bond_instance_num, bd_mode);
       if (bd_mode == BONDING_MODE_ACTIVE_BACKUP)
 	{
 	  vl_api_force_rpc_call_main_thread
 	    (garp_na_proc_callback, (u8 *) & bd_port, sizeof (uword));
 	}
-      xd->flags |= link_up ?
-	DPDK_DEVICE_FLAG_BOND_SLAVE_UP : ~DPDK_DEVICE_FLAG_BOND_SLAVE_UP;
+
+      if (link_up)
+	xd->flags |= DPDK_DEVICE_FLAG_BOND_SLAVE_UP;
+      else
+	xd->flags &= ~DPDK_DEVICE_FLAG_BOND_SLAVE_UP;
     }
   else				/* Should not happen as callback not setup for "normal" links */
     {
       if (link_up)
-	clib_warning ("Port %d Link Up - speed %u Mbps - %s",
-		      port_id, (unsigned) link.link_speed,
-		      (link.link_duplex == ETH_LINK_FULL_DUPLEX) ?
-		      "full-duplex" : "half-duplex");
+	dpdk_log_info ("Port %d Link Up - speed %u Mbps - %s",
+		       port_id, (unsigned) link.link_speed,
+		       (link.link_duplex == ETH_LINK_FULL_DUPLEX) ?
+		       "full-duplex" : "half-duplex");
       else
-	clib_warning ("Port %d Link Down\n\n", port_id);
+	dpdk_log_info ("Port %d Link Down\n\n", port_id);
     }
 
   return 0;
 }
 
-#if DPDK_VOID_CALLBACK
-void
-dpdk_port_state_callback (uint8_t port_id,
-			  enum rte_eth_event_type type, void *param)
-{
-  dpdk_port_state_callback_inline (port_id, type, param);
-}
-
-#else
 int
-dpdk_port_state_callback (uint8_t port_id,
+dpdk_port_state_callback (dpdk_portid_t port_id,
 			  enum rte_eth_event_type type,
 			  void *param,
 			  void *ret_param __attribute__ ((unused)))
 {
   return dpdk_port_state_callback_inline (port_id, type, param);
 }
-#endif
+
+/* If this device is PCI return pointer to info, otherwise NULL */
+struct rte_pci_device *
+dpdk_get_pci_device (const struct rte_eth_dev_info *info)
+{
+  const struct rte_bus *bus;
+
+  bus = rte_bus_find_by_device (info->device);
+  if (bus && !strcmp (bus->name, "pci"))
+    return RTE_DEV_TO_PCI (info->device);
+  else
+    return NULL;
+}
+
 /*
  * fd.io coding-style-patch-verification: ON
  *

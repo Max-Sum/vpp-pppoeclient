@@ -9,4 +9,6 @@ Programming notes for developers.
 - @subpage vapi_doc
 - @subpage acl_hash_lookup
 - @subpage acl_multicore
+- @subpage acl_lookup_context
 - @subpage libmemif_doc
+- @subpage syslog_doc

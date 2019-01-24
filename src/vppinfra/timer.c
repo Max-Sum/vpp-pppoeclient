@@ -41,9 +41,14 @@
 #include <sys/param.h>
 
 #include <vppinfra/vec.h>
+#include <vppinfra/smp.h>
 #include <vppinfra/time.h>
 #include <vppinfra/timer.h>
 #include <vppinfra/error.h>
+
+#ifndef HZ
+#define HZ 1000
+#endif
 
 typedef struct
 {
@@ -111,14 +116,14 @@ timer_interrupt (int signum)
          vector of pending timers. */
       t = vec_end (timers) - 1;
 
-      ASSERT (now >= 0 && finite (now));
+      ASSERT (now >= 0 && isfinite (now));
 
       /* Time difference between when timer goes off and now. */
       dt = t->time - now;
 
       /* If timer is within threshold of going off
          call user's callback. */
-      if (dt <= time_resolution && finite (dt))
+      if (dt <= time_resolution && isfinite (dt))
 	{
 	  _vec_len (timers) -= 1;
 	  (*t->func) (t->arg, -dt);
@@ -127,7 +132,7 @@ timer_interrupt (int signum)
 	{
 	  /* Set timer for to go off in future. */
 	  struct itimerval itv;
-	  memset (&itv, 0, sizeof (itv));
+	  clib_memset (&itv, 0, sizeof (itv));
 	  f64_to_tv (dt, &itv.it_value);
 	  if (setitimer (ITIMER_REAL, &itv, 0) < 0)
 	    clib_unix_error ("sititmer");
@@ -141,7 +146,7 @@ timer_block (sigset_t * save)
 {
   sigset_t block_timer;
 
-  memset (&block_timer, 0, sizeof (block_timer));
+  clib_memset (&block_timer, 0, sizeof (block_timer));
   sigaddset (&block_timer, TIMER_SIGNAL);
   sigprocmask (SIG_BLOCK, &block_timer, save);
 }
@@ -170,7 +175,7 @@ timer_call (timer_func_t * func, any arg, f64 dt)
       /* Initialize time_resolution before first call to timer_interrupt */
       time_resolution = 0.75 / (f64) HZ;
 
-      memset (&sa, 0, sizeof (sa));
+      clib_memset (&sa, 0, sizeof (sa));
       sa.sa_handler = timer_interrupt;
 
       if (sigaction (TIMER_SIGNAL, &sa, 0) < 0)
@@ -283,7 +288,7 @@ bar_t b = { limit:10 };
     timer_call (bar, (any) & b, random_f64 ());
 
   while (vec_len (timers) > 0)
-    sched_yield ();
+    os_sched_yield ();
 
   if (vec_len (foos) > 0)
     {

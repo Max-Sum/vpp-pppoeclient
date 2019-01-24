@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 
 import socket
-from util import ip4n_range
+from util import ip4n_range, ip4_range, reassemble4
 import unittest
 from framework import VppTestCase, VppTestRunner
 from template_bd import BridgeDomain
 
-from scapy.layers.l2 import Ether
+from scapy.layers.l2 import Ether, Raw
 from scapy.layers.inet import IP, UDP
 from scapy.layers.vxlan import VXLAN
 from scapy.utils import atol
@@ -29,6 +29,10 @@ class TestVxlan(BridgeDomain, VppTestCase):
                 UDP(sport=self.dport, dport=self.dport, chksum=0) /
                 VXLAN(vni=vni, flags=self.flags) /
                 pkt)
+
+    def ip_range(self, start, end):
+        """ range of remote ip's """
+        return ip4_range(self.pg0.remote_ip4, start, end)
 
     def encap_mcast(self, pkt, src_ip, src_mac, vni):
         """
@@ -97,7 +101,7 @@ class TestVxlan(BridgeDomain, VppTestCase):
         add or del tunnels sharing the same mcast dst
         to test vxlan ref_count mechanism
         """
-        n_shared_dst_tunnels = 2000
+        n_shared_dst_tunnels = 20
         vni_start = 10000
         vni_end = vni_start + n_shared_dst_tunnels
         for vni in range(vni_start, vni_end):
@@ -217,6 +221,35 @@ class TestVxlan(BridgeDomain, VppTestCase):
         except Exception:
             super(TestVxlan, cls).tearDownClass()
             raise
+
+    def test_encap_big_packet(self):
+        """ Encapsulation test send big frame from pg1
+        Verify receipt of encapsulated frames on pg0
+        """
+
+        self.vapi.sw_interface_set_mtu(self.pg0.sw_if_index, [1500, 0, 0, 0])
+
+        frame = (Ether(src='00:00:00:00:00:02', dst='00:00:00:00:00:01') /
+                 IP(src='4.3.2.1', dst='1.2.3.4') /
+                 UDP(sport=20000, dport=10000) /
+                 Raw('\xa5' * 1450))
+
+        self.pg1.add_stream([frame])
+
+        self.pg0.enable_capture()
+
+        self.pg_start()
+
+        # Pick first received frame and check if it's correctly encapsulated.
+        out = self.pg0.get_capture(2)
+        ether = out[0]
+        pkt = reassemble4(out)
+        pkt = ether / pkt
+        self.check_encapsulation(pkt, self.single_tunnel_bd)
+
+        payload = self.decapsulate(pkt)
+        # TODO: Scapy bug?
+        # self.assert_eq_pkts(payload, frame)
 
     # Method to define VPP actions before tear down of the test case.
     #  Overrides tearDown method in VppTestCase class.

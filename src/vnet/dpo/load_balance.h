@@ -77,11 +77,39 @@ typedef struct load_balance_path_t_ {
 } load_balance_path_t;
 
 /**
+ * Flags controlling load-balance creation and modification
+ */
+typedef enum load_balance_attr_t_ {
+    LOAD_BALANCE_ATTR_USES_MAP = 0,
+    LOAD_BALANCE_ATTR_STICKY = 1,
+} load_balance_attr_t;
+
+#define LOAD_BALANCE_ATTR_NAMES  {                  \
+    [LOAD_BALANCE_ATTR_USES_MAP] = "uses-map",      \
+    [LOAD_BALANCE_ATTR_STICKY] = "sticky",          \
+}
+
+#define FOR_EACH_LOAD_BALANCE_ATTR(_attr)                       \
+    for (_attr = 0; _attr <= LOAD_BALANCE_ATTR_STICKY; _attr++)
+
+typedef enum load_balance_flags_t_ {
+    LOAD_BALANCE_FLAG_NONE = 0,
+    LOAD_BALANCE_FLAG_USES_MAP = (1 << 0),
+    LOAD_BALANCE_FLAG_STICKY = (1 << 1),
+} __attribute__((packed)) load_balance_flags_t;
+
+/**
  * The FIB DPO provieds;
  *  - load-balancing over the next DPOs in the chain/graph
  *  - per-route counters
  */
 typedef struct load_balance_t_ {
+    /**
+     * required for pool_get_aligned.
+     *  memebers used in the switch path come first!
+     */
+    CLIB_CACHE_LINE_ALIGN_MARK(cacheline0);
+
     /**
      * number of buckets in the load-balance. always a power of 2.
      */
@@ -98,6 +126,11 @@ typedef struct load_balance_t_ {
      * u8.
      */
     dpo_proto_t lb_proto;
+
+    /**
+     * Flags concenring the LB's creation and modification
+     */
+    load_balance_flags_t lb_flags;
 
     /**
      * Flags from the load-balance's associated fib_entry_t
@@ -152,14 +185,6 @@ typedef enum load_balance_format_flags_t_ {
     LOAD_BALANCE_FORMAT_DETAIL = (1 << 0),
 } load_balance_format_flags_t;
 
-/**
- * Flags controlling load-balance creation and modification
- */
-typedef enum load_balance_flags_t_ {
-    LOAD_BALANCE_FLAG_NONE = 0,
-    LOAD_BALANCE_FLAG_USES_MAP = (1 << 0),
-} load_balance_flags_t;
-
 extern index_t load_balance_create(u32 num_buckets,
 				   dpo_proto_t lb_proto,
 				   flow_hash_config_t fhc);
@@ -182,6 +207,7 @@ extern u8* format_load_balance(u8 * s, va_list * args);
 extern const dpo_id_t *load_balance_get_bucket(index_t lbi,
 					       u32 bucket);
 extern int load_balance_is_drop(const dpo_id_t *dpo);
+extern u16 load_balance_n_buckets(index_t lbi);
 
 extern f64 load_balance_get_multipath_tolerance(void);
 

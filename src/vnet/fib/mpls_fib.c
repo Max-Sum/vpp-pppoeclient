@@ -92,13 +92,13 @@ mpls_fib_create_with_table_id (u32 table_id,
     mpls_fib_t *mf;
     int i;
 
-    pool_get_aligned(mpls_main.fibs, fib_table, CLIB_CACHE_LINE_BYTES);
+    pool_get(mpls_main.fibs, fib_table);
     pool_get_aligned(mpls_main.mpls_fibs, mf, CLIB_CACHE_LINE_BYTES);
 
     ASSERT((fib_table - mpls_main.fibs) ==
            (mf - mpls_main.mpls_fibs));
 
-    memset(fib_table, 0, sizeof(*fib_table));
+    clib_memset(fib_table, 0, sizeof(*fib_table));
 
     fib_table->ft_proto = FIB_PROTOCOL_MPLS;
     fib_table->ft_index = (fib_table - mpls_main.fibs);
@@ -357,6 +357,18 @@ mpls_fib_table_walk (mpls_fib_t *mpls_fib,
     ({
 	fn(lfei, ctx);
     }));
+}
+
+u8 *
+format_mpls_fib_table_memory (u8 * s, va_list * args)
+{
+    u64 n_tables, mem;
+
+    n_tables = pool_elts(mpls_main.fibs);
+    mem = n_tables * sizeof(mpls_fib_t);
+    s = format(s, "%=30s %=6ld %=8ld\n", "MPLS", n_tables, mem);
+
+    return (s);
 }
 
 static void

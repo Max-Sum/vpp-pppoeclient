@@ -45,8 +45,22 @@
 #include <vnet/pg/pg.h>
 #include <vnet/feature/feature.h>
 
+/* ethernet-input frame flags and scalar data */
+
+/* all packets in frame share same sw_if_index */
+#define ETH_INPUT_FRAME_F_SINGLE_SW_IF_IDX (1 << 0)
+
+/* all ip4 packets in frame have correct ip4 checksum */
+#define ETH_INPUT_FRAME_F_IP4_CKSUM_OK (1 << 1)
+
+typedef struct
+{
+  u32 sw_if_index;
+  u32 hw_if_index;
+} ethernet_input_frame_t;
+
 always_inline u64
-ethernet_mac_address_u64 (u8 * a)
+ethernet_mac_address_u64 (const u8 * a)
 {
   return (((u64) a[0] << (u64) (5 * 8))
 	  | ((u64) a[1] << (u64) (4 * 8))
@@ -55,30 +69,49 @@ ethernet_mac_address_u64 (u8 * a)
 	  | ((u64) a[4] << (u64) (1 * 8)) | ((u64) a[5] << (u64) (0 * 8)));
 }
 
+always_inline void
+ethernet_mac_address_from_u64 (u64 u, u8 * a)
+{
+  i8 ii;
+
+  for (ii = 5; ii >= 0; ii--)
+    {
+      a[ii] = u & 0xFF;
+      u = u >> 8;
+    }
+}
+
 static inline int
 ethernet_mac_address_is_multicast_u64 (u64 a)
 {
   return (a & (1ULL << (5 * 8))) != 0;
 }
 
+static inline int
+ethernet_mac_address_is_zero (const u8 * mac)
+{
+  return ((*((u32 *) mac) == 0) && (*((u16 *) (mac + 4)) == 0));
+}
+
+#ifdef CLIB_HAVE_VEC128
+static const u16x8 tagged_ethertypes = {
+  (u16) ETHERNET_TYPE_VLAN,
+  (u16) ETHERNET_TYPE_DOT1AD,
+  (u16) ETHERNET_TYPE_VLAN_9100,
+  (u16) ETHERNET_TYPE_VLAN_9200,
+  /* duplicate last one to fill register */
+  (u16) ETHERNET_TYPE_VLAN_9200,
+  (u16) ETHERNET_TYPE_VLAN_9200,
+  (u16) ETHERNET_TYPE_VLAN_9200,
+  (u16) ETHERNET_TYPE_VLAN_9200
+};
+#endif
+
 static_always_inline int
 ethernet_frame_is_tagged (u16 type)
 {
-#if __SSE4_2__
-  const __m128i ethertype_mask = _mm_set_epi16 (ETHERNET_TYPE_VLAN,
-						ETHERNET_TYPE_DOT1AD,
-						ETHERNET_TYPE_VLAN_9100,
-						ETHERNET_TYPE_VLAN_9200,
-						/* duplicate last one to
-						   fill register */
-						ETHERNET_TYPE_VLAN_9200,
-						ETHERNET_TYPE_VLAN_9200,
-						ETHERNET_TYPE_VLAN_9200,
-						ETHERNET_TYPE_VLAN_9200);
-
-  __m128i r = _mm_set1_epi16 (type);
-  r = _mm_cmpeq_epi16 (ethertype_mask, r);
-  return !_mm_test_all_zeros (r, r);
+#ifdef CLIB_HAVE_VEC128
+  return !u16x8_is_all_zero (tagged_ethertypes == u16x8_splat (type));
 #else
   if ((type == ETHERNET_TYPE_VLAN) ||
       (type == ETHERNET_TYPE_DOT1AD) ||
@@ -86,6 +119,33 @@ ethernet_frame_is_tagged (u16 type)
     return 1;
 #endif
   return 0;
+}
+
+static_always_inline int
+ethernet_frame_is_any_tagged_x2 (u16 type0, u16 type1)
+{
+#ifdef CLIB_HAVE_VEC128
+  u16x8 r0 = (tagged_ethertypes == u16x8_splat (type0));
+  u16x8 r1 = (tagged_ethertypes == u16x8_splat (type1));
+  return !u16x8_is_all_zero (r0 | r1);
+#else
+  return ethernet_frame_is_tagged (type0) || ethernet_frame_is_tagged (type1);
+#endif
+}
+
+static_always_inline int
+ethernet_frame_is_any_tagged_x4 (u16 type0, u16 type1, u16 type2, u16 type3)
+{
+#ifdef CLIB_HAVE_VEC128
+  u16x8 r0 = (tagged_ethertypes == u16x8_splat (type0));
+  u16x8 r1 = (tagged_ethertypes == u16x8_splat (type1));
+  u16x8 r2 = (tagged_ethertypes == u16x8_splat (type2));
+  u16x8 r3 = (tagged_ethertypes == u16x8_splat (type3));
+  return !u16x8_is_all_zero (r0 | r1 | r2 | r3);
+#else
+  return ethernet_frame_is_tagged (type0) || ethernet_frame_is_tagged (type1)
+    || ethernet_frame_is_tagged (type2) || ethernet_frame_is_tagged (type3);
+#endif
 }
 
 /* Max. sized ethernet/vlan header for parsing. */
@@ -108,6 +168,7 @@ typedef u32 (ethernet_flag_change_function_t)
 /* Ethernet interface instance. */
 typedef struct ethernet_interface
 {
+  u32 flags;
 
   /* Accept all packets (promiscuous mode). */
 #define ETHERNET_INTERFACE_FLAG_ACCEPT_ALL (1 << 0)
@@ -271,7 +332,7 @@ typedef struct
   uword *bm_loopback_instances;
 } ethernet_main_t;
 
-ethernet_main_t ethernet_main;
+extern ethernet_main_t ethernet_main;
 
 always_inline ethernet_type_info_t *
 ethernet_get_type_info (ethernet_main_t * em, ethernet_type_t type)
@@ -305,6 +366,7 @@ void ethernet_register_l2_input (vlib_main_t * vm, u32 node_index);
 void ethernet_register_l3_redirect (vlib_main_t * vm, u32 node_index);
 
 /* Formats ethernet address X:X:X:X:X:X */
+u8 *format_mac_address (u8 * s, va_list * args);
 u8 *format_ethernet_address (u8 * s, va_list * args);
 u8 *format_ethernet_type (u8 * s, va_list * args);
 u8 *format_ethernet_vlan_tci (u8 * s, va_list * va);
@@ -313,6 +375,7 @@ u8 *format_ethernet_header_with_length (u8 * s, va_list * args);
 
 /* Parse ethernet address in either X:X:X:X:X:X unix or X.X.X cisco format. */
 uword unformat_ethernet_address (unformat_input_t * input, va_list * args);
+uword unformat_mac_address (unformat_input_t * input, va_list * args);
 
 /* Parse ethernet type as 0xXXXX or type name from ethernet/types.def.
    In either host or network byte order. */
@@ -401,17 +464,6 @@ void ethernet_sw_interface_set_l2_mode_noport (vnet_main_t * vnm,
 void ethernet_set_rx_redirect (vnet_main_t * vnm, vnet_hw_interface_t * hi,
 			       u32 enable);
 
-int
-vnet_arp_set_ip4_over_ethernet (vnet_main_t * vnm,
-				u32 sw_if_index, void *a_arg,
-				int is_static, int is_no_fib_entry);
-
-int
-vnet_arp_unset_ip4_over_ethernet (vnet_main_t * vnm,
-				  u32 sw_if_index, void *a_arg);
-
-int vnet_proxy_arp_fib_reset (u32 fib_id);
-
 clib_error_t *next_by_ethertype_init (next_by_ethertype_t * l3_next);
 clib_error_t *next_by_ethertype_register (next_by_ethertype_t * l3_next,
 					  u32 ethertype, u32 next_index);
@@ -465,7 +517,6 @@ eth_vlan_table_lookups (ethernet_main_t * em,
 // Returns 1 if a matching subinterface was found, otherwise returns 0.
 always_inline u32
 eth_identify_subint (vnet_hw_interface_t * hi,
-		     vlib_buffer_t * b0,
 		     u32 match_flags,
 		     main_intf_t * main_intf,
 		     vlan_intf_t * vlan_intf,
@@ -492,13 +543,13 @@ eth_identify_subint (vnet_hw_interface_t * hi,
   if ((subint->flags & match_flags) == match_flags)
     goto matched;
 
-  // check for untagged interface
-  subint = &main_intf->untagged_subint;
+  // check for default interface
+  subint = &main_intf->default_subint;
   if ((subint->flags & match_flags) == match_flags)
     goto matched;
 
-  // check for default interface
-  subint = &main_intf->default_subint;
+  // check for untagged interface
+  subint = &main_intf->untagged_subint;
   if ((subint->flags & match_flags) == match_flags)
     goto matched;
 
@@ -516,7 +567,7 @@ matched:
 
 // Compare two ethernet macs. Return 1 if they are the same, 0 if different
 always_inline u32
-eth_mac_equal (u8 * mac1, u8 * mac2)
+eth_mac_equal (const u8 * mac1, const u8 * mac2)
 {
   return (*((u32 *) (mac1 + 0)) == *((u32 *) (mac2 + 0)) &&
 	  *((u32 *) (mac1 + 2)) == *((u32 *) (mac2 + 2)));

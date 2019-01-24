@@ -44,7 +44,7 @@ cj_log (u32 type, void *data0, void *data1)
   if (cjm->enable == 0)
     return;
 
-  new_tail = __sync_add_and_fetch (&cjm->tail, 1);
+  new_tail = clib_atomic_add_fetch (&cjm->tail, 1);
 
   r = (cj_record_t *) & (cjm->records[new_tail & (cjm->num_records - 1)]);
   r->time = vlib_time_now (cjm->vlib_main);
@@ -97,7 +97,7 @@ cj_config (vlib_main_t * vm, unformat_input_t * input)
 
   cjm->num_records = max_pow2 (cjm->num_records);
   vec_validate (cjm->records, cjm->num_records - 1);
-  memset (cjm->records, 0xff, cjm->num_records * sizeof (cj_record_t));
+  clib_memset (cjm->records, 0xff, cjm->num_records * sizeof (cj_record_t));
   cjm->tail = ~0;
   cjm->enable = enable;
 
@@ -178,7 +178,7 @@ cj_dump_internal (u8 filter0_enable, u64 filter0,
     }
   /* dump from the beginning through the final tail */
   r = cjm->records;
-  for (i = 0; i <= cjm->tail; i++)
+  for (i = 0; i < index; i++)
     {
       if (filter0_enable && (r->data[0] != filter0))
 	goto skip2;
@@ -220,18 +220,28 @@ cj_command_fn (vlib_main_t * vm,
 {
   int is_enable = -1;
   int is_dump = -1;
+  unformat_input_t _line_input, *line_input = &_line_input;
+  clib_error_t *error = NULL;
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return clib_error_return (0, "expected enable | disable | dump");
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
-      if (unformat (input, "enable") || unformat (input, "on"))
+      if (unformat (line_input, "enable") || unformat (line_input, "on"))
 	is_enable = 1;
-      else if (unformat (input, "disable") || unformat (input, "off"))
+      else if (unformat (line_input, "disable")
+	       || unformat (line_input, "off"))
 	is_enable = 0;
-      else if (unformat (input, "dump"))
+      else if (unformat (line_input, "dump"))
 	is_dump = 1;
       else
-	return clib_error_return (0, "unknown input `%U'",
-				  format_unformat_error, input);
+	{
+	  error = clib_error_return (0, "unknown input `%U'",
+				     format_unformat_error, line_input);
+	  goto done;
+	}
     }
 
   if (is_enable >= 0)
@@ -240,7 +250,9 @@ cj_command_fn (vlib_main_t * vm,
   if (is_dump > 0)
     cj_dump ();
 
-  return 0;
+done:
+  unformat_free (line_input);
+  return error;
 }
 
 /*?

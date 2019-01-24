@@ -32,11 +32,6 @@
 static mpls_tunnel_t *mpls_tunnel_pool;
 
 /**
- * @brief Pool of free tunnel SW indices - i.e. recycled indices
- */
-static u32 * mpls_tunnel_free_hw_if_indices;
-
-/**
  * @brief DB of SW index to tunnel index
  */
 static u32 *mpls_tunnel_db;
@@ -52,7 +47,7 @@ static const char *mpls_tunnel_attribute_names[] = MPLS_TUNNEL_ATTRIBUTES;
 static mpls_tunnel_t*
 mpls_tunnel_get_from_sw_if_index (u32 sw_if_index)
 {
-    if ((vec_len(mpls_tunnel_db) < sw_if_index) ||
+    if ((vec_len(mpls_tunnel_db) <= sw_if_index) ||
         (~0 == mpls_tunnel_db[sw_if_index]))
         return (NULL);
 
@@ -123,23 +118,20 @@ mpls_tunnel_collect_forwarding (fib_node_index_t pl_index,
     path_ext = fib_path_ext_list_find_by_path_index(&ctx->mt->mt_path_exts,
                                                     path_index);
 
-    if (NULL != path_ext)
-    {
-        /*
-         * found a matching extension. stack it to obtain the forwarding
-         * info for this path.
-         */
-        ctx->next_hops = fib_path_ext_stack(path_ext,
-                                            ctx->fct,
-                                            ctx->fct,
-                                            ctx->next_hops);
-    }
-    else
-        ASSERT(0);
     /*
-     * else
-     *   There should be a path-extenios associated with each path
+     * we don't want IP TTL decrements for packets hitting the MPLS labels
+     * we stack on, since the IP TTL decrement is done by the adj
      */
+    path_ext->fpe_mpls_flags |= FIB_PATH_EXT_MPLS_FLAG_NO_IP_TTL_DECR;
+
+    /*
+     * found a matching extension. stack it to obtain the forwarding
+     * info for this path.
+     */
+    ctx->next_hops = fib_path_ext_stack(path_ext,
+                                        ctx->fct,
+                                        ctx->fct,
+                                        ctx->next_hops);
 
     return (FIB_PATH_LIST_WALK_CONTINUE);
 }
@@ -173,9 +165,12 @@ mpls_tunnel_mk_lb (mpls_tunnel_t *mt,
 
     lb_proto = fib_forw_chain_type_to_dpo_proto(fct);
 
-    fib_path_list_walk(mt->mt_path_list,
-                       mpls_tunnel_collect_forwarding,
-                       &ctx);
+    if (FIB_NODE_INDEX_INVALID != mt->mt_path_list)
+    {
+        fib_path_list_walk(mt->mt_path_list,
+                           mpls_tunnel_collect_forwarding,
+                           &ctx);
+    }
 
     if (!dpo_id_is_valid(dpo_lb))
     {
@@ -273,9 +268,8 @@ mpls_tunnel_stack (adj_index_t ai)
 
         mpls_tunnel_mk_lb(mt,
                           adj->ia_link,
-                          (VNET_LINK_MPLS == adj_get_link_type(ai) ?
-                           FIB_FORW_CHAIN_TYPE_MPLS_NON_EOS:
-                           FIB_FORW_CHAIN_TYPE_MPLS_EOS),
+                          fib_forw_chain_type_from_link_type(
+                              adj_get_link_type(ai)),
                           &dpo);
 
         adj_nbr_midchain_stack(ai, &dpo);
@@ -377,7 +371,8 @@ mpls_tunnel_admin_up_down (vnet_main_t * vnm,
 static void
 mpls_tunnel_fixup (vlib_main_t *vm,
                    ip_adjacency_t *adj,
-                   vlib_buffer_t *b0)
+                   vlib_buffer_t *b0,
+                   const void*data)
 {
     /*
      * A no-op w.r.t. the header. but reset the 'have we pushed any
@@ -402,7 +397,9 @@ mpls_tunnel_update_adj (vnet_main_t * vnm,
     {
     case IP_LOOKUP_NEXT_ARP:
     case IP_LOOKUP_NEXT_GLEAN:
+    case IP_LOOKUP_NEXT_BCAST:
         adj_nbr_midchain_update_rewrite(ai, mpls_tunnel_fixup,
+                                        NULL,
                                         ADJ_FLAG_NONE,
                                         mpls_tunnel_build_rewrite_i());
         break;
@@ -412,6 +409,7 @@ mpls_tunnel_update_adj (vnet_main_t * vnm,
          * There's no MAC fixup, so the last 2 parameters are 0
          */
         adj_mcast_midchain_update_rewrite(ai, mpls_tunnel_fixup,
+                                          NULL,
                                           ADJ_FLAG_NONE,
                                           mpls_tunnel_build_rewrite_i(),
                                           0, 0);
@@ -518,6 +516,11 @@ mpls_tunnel_tx (vlib_main_t * vm,
           b0 = vlib_get_buffer(vm, bi0);
 
           vnet_buffer(b0)->ip.adj_index[VLIB_TX] = mt->mt_l2_lb.dpoi_index;
+          /* since we are coming out of the L2 world, where the vlib_buffer
+           * union is used for other things, make sure it is clean for
+           * MPLS from now on.
+           */
+          vnet_buffer(b0)->mpls.first = 0;
 
           if (PREDICT_FALSE(b0->flags & VLIB_BUFFER_IS_TRACED))
             {
@@ -589,7 +592,8 @@ vnet_mpls_tunnel_del (u32 sw_if_index)
                                    mt->mt_sibling_index);
     dpo_reset(&mt->mt_l2_lb);
 
-    vec_add1 (mpls_tunnel_free_hw_if_indices, mt->mt_hw_if_index);
+    vnet_delete_hw_interface (vnet_get_main(), mt->mt_hw_if_index);
+
     pool_put(mpls_tunnel_pool, mt);
     mpls_tunnel_db[sw_if_index] = ~0;
 }
@@ -605,7 +609,7 @@ vnet_mpls_tunnel_create (u8 l2_only,
 
     vnm = vnet_get_main();
     pool_get(mpls_tunnel_pool, mt);
-    memset (mt, 0, sizeof (*mt));
+    clib_memset (mt, 0, sizeof (*mt));
     mti = mt - mpls_tunnel_pool;
     fib_node_init(&mt->mt_node, FIB_NODE_TYPE_MPLS_TUNNEL);
     mt->mt_path_list = FIB_NODE_INDEX_INVALID;
@@ -617,27 +621,18 @@ vnet_mpls_tunnel_create (u8 l2_only,
         mt->mt_flags |= MPLS_TUNNEL_FLAG_L2;
 
     /*
-     * Create a new, or re=use and old, tunnel HW interface
+     * Create a new tunnel HW interface
      */
-    if (vec_len (mpls_tunnel_free_hw_if_indices) > 0)
-    {
-        mt->mt_hw_if_index =
-            mpls_tunnel_free_hw_if_indices[vec_len(mpls_tunnel_free_hw_if_indices)-1];
-        _vec_len (mpls_tunnel_free_hw_if_indices) -= 1;
-        hi = vnet_get_hw_interface (vnm, mt->mt_hw_if_index);
-        hi->hw_instance = mti;
-        hi->dev_instance = mti;
-    }
-    else
-    {
-        mt->mt_hw_if_index = vnet_register_interface(
-                                 vnm,
-                                 mpls_tunnel_class.index,
-                                 mti,
-                                 mpls_tunnel_hw_interface_class.index,
-                                 mti);
-        hi = vnet_get_hw_interface (vnm, mt->mt_hw_if_index);
-    }
+    mt->mt_hw_if_index = vnet_register_interface(
+        vnm,
+        mpls_tunnel_class.index,
+        mti,
+        mpls_tunnel_hw_interface_class.index,
+        mti);
+    hi = vnet_get_hw_interface (vnm, mt->mt_hw_if_index);
+
+    /* Standard default MPLS tunnel MTU. */
+    vnet_sw_interface_set_mtu (vnm, hi->sw_if_index, 9000);
 
     /*
      * Add the new tunnel to the tunnel DB - key:SW if index
@@ -768,6 +763,18 @@ vnet_mpls_tunnel_path_remove (u32 sw_if_index,
     return (fib_path_list_get_n_paths(mt->mt_path_list));
 }
 
+int
+vnet_mpls_tunnel_get_index (u32 sw_if_index)
+{
+    mpls_tunnel_t *mt;
+
+    mt = mpls_tunnel_get_from_sw_if_index(sw_if_index);
+
+    if (NULL == mt)
+        return (~0);
+
+    return (mt - mpls_tunnel_pool);
+}
 
 static clib_error_t *
 vnet_create_mpls_tunnel_command_fn (vlib_main_t * vm,
@@ -778,11 +785,11 @@ vnet_create_mpls_tunnel_command_fn (vlib_main_t * vm,
     vnet_main_t * vnm = vnet_get_main();
     u8 is_del = 0, l2_only = 0, is_multicast =0;
     fib_route_path_t rpath, *rpaths = NULL;
-    mpls_label_t out_label = MPLS_LABEL_INVALID;
-    u32 sw_if_index = ~0;
+    u32 sw_if_index = ~0, payload_proto;
     clib_error_t *error = NULL;
 
-    memset(&rpath, 0, sizeof(rpath));
+    clib_memset(&rpath, 0, sizeof(rpath));
+    payload_proto = DPO_PROTO_MPLS;
 
     /* Get a line of input. */
     if (! unformat_user (input, unformat_line_input, line_input))
@@ -800,56 +807,14 @@ vnet_create_mpls_tunnel_command_fn (vlib_main_t * vm,
             is_del = 0;
         else if (unformat (line_input, "add"))
             is_del = 0;
-        else if (unformat (line_input, "out-labels"))
-	{
-            while (unformat (line_input, "%U",
-                             unformat_mpls_unicast_label,
-                             &out_label))
-            {
-                vec_add1 (rpath.frp_label_stack, out_label);
-            }
-	}
-        else if (unformat (line_input, "via %U %U",
-                           unformat_ip4_address,
-                           &rpath.frp_addr.ip4,
-                           unformat_vnet_sw_interface, vnm,
-                           &rpath.frp_sw_if_index))
-        {
-            rpath.frp_weight = 1;
-            rpath.frp_proto = DPO_PROTO_IP4;
-        }
-
-        else if (unformat (line_input, "via %U %U",
-                           unformat_ip6_address,
-                           &rpath.frp_addr.ip6,
-                           unformat_vnet_sw_interface, vnm,
-                           &rpath.frp_sw_if_index))
-        {
-            rpath.frp_weight = 1;
-            rpath.frp_proto = DPO_PROTO_IP6;
-        }
-        else if (unformat (line_input, "via %U",
-                           unformat_ip6_address,
-                           &rpath.frp_addr.ip6))
-        {
-            rpath.frp_fib_index = 0;
-            rpath.frp_weight = 1;
-            rpath.frp_sw_if_index = ~0;
-            rpath.frp_proto = DPO_PROTO_IP6;
-        }
-        else if (unformat (line_input, "via %U",
-                           unformat_ip4_address,
-                           &rpath.frp_addr.ip4))
-        {
-            rpath.frp_fib_index = 0;
-            rpath.frp_weight = 1;
-            rpath.frp_sw_if_index = ~0;
-            rpath.frp_proto = DPO_PROTO_IP4;
-        }
         else if (unformat (line_input, "l2-only"))
             l2_only = 1;
         else if (unformat (line_input, "multicast"))
             is_multicast = 1;
+        else if (unformat (line_input, "via %U",
+                           unformat_fib_route_path,
+                           &rpath, &payload_proto))
+            vec_add1(rpaths, rpath);
         else
         {
             error = clib_error_return (0, "unknown input '%U'",
@@ -858,11 +823,13 @@ vnet_create_mpls_tunnel_command_fn (vlib_main_t * vm,
         }
     }
 
-    vec_add1(rpaths, rpath);
-
     if (is_del)
     {
-        if (!vnet_mpls_tunnel_path_remove(sw_if_index, rpaths))
+        if (NULL == rpaths)
+        {
+            vnet_mpls_tunnel_del(sw_if_index);
+        }
+        else if (!vnet_mpls_tunnel_path_remove(sw_if_index, rpaths))
         {
             vnet_mpls_tunnel_del(sw_if_index);
         }
@@ -901,7 +868,7 @@ done:
 VLIB_CLI_COMMAND (create_mpls_tunnel_command, static) = {
   .path = "mpls tunnel",
   .short_help =
-  "mpls tunnel via [addr] [interface] [out-labels]",
+  "mpls tunnel [multicast] [l2-only] via [next-hop-address] [next-hop-interface] [next-hop-table <value>] [weight <value>] [preference <value>] [udp-encap-id <value>] [ip4-lookup-in-table <value>] [ip6-lookup-in-table <value>] [mpls-lookup-in-table <value>] [resolve-via-host] [resolve-via-connected] [rx-ip4 <interface>] [out-labels <value value value>]",
   .function = vnet_create_mpls_tunnel_command_fn,
 };
 
@@ -970,7 +937,7 @@ show_mpls_tunnel_command_fn (vlib_main_t * vm,
     else
     {
         if (pool_is_free_index(mpls_tunnel_pool, mti))
-            return clib_error_return (0, "Not atunnel index %d", mti);
+            return clib_error_return (0, "Not a tunnel index %d", mti);
 
         mt = pool_elt_at_index(mpls_tunnel_pool, mti);
 
@@ -1005,9 +972,7 @@ VLIB_CLI_COMMAND (show_mpls_tunnel_command, static) = {
 static mpls_tunnel_t *
 mpls_tunnel_from_fib_node (fib_node_t *node)
 {
-#if (CLIB_DEBUG > 0)
     ASSERT(FIB_NODE_TYPE_MPLS_TUNNEL == node->fn_type);
-#endif
     return ((mpls_tunnel_t*) (((char*)node) -
                              STRUCT_OFFSET_OF(mpls_tunnel_t, mt_node)));
 }

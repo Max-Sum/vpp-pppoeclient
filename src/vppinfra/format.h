@@ -68,10 +68,10 @@ word va_fformat (FILE * f, char *fmt, va_list * va);
 word fformat (FILE * f, char *fmt, ...);
 word fdformat (int fd, char *fmt, ...);
 
-always_inline uword
+always_inline u32
 format_get_indent (u8 * s)
 {
-  uword indent = 0;
+  u32 indent = 0;
   u8 *nl;
 
   if (!s)
@@ -116,6 +116,7 @@ _(format_timeval);
 _(format_time_float);
 _(format_signal);
 _(format_ucontext_pc);
+_(format_page_map);
 #endif
 
 #undef _
@@ -152,7 +153,7 @@ unformat_init (unformat_input_t * i,
 	       uword (*fill_buffer) (unformat_input_t *),
 	       void *fill_buffer_arg)
 {
-  memset (i, 0, sizeof (i[0]));
+  clib_memset (i, 0, sizeof (i[0]));
   i->fill_buffer = fill_buffer;
   i->fill_buffer_arg = fill_buffer_arg;
 }
@@ -162,7 +163,7 @@ unformat_free (unformat_input_t * i)
 {
   vec_free (i->buffer);
   vec_free (i->buffer_marks);
-  memset (i, 0, sizeof (i[0]));
+  clib_memset (i, 0, sizeof (i[0]));
 }
 
 always_inline uword
@@ -305,7 +306,7 @@ u8 *format_hexdump (u8 * s, va_list * va);
 /* Unix specific formats. */
 #ifdef CLIB_UNIX
 /* Setup input from Unix file. */
-void unformat_init_unix_file (unformat_input_t * input, int file_descriptor);
+void unformat_init_clib_file (unformat_input_t * input, int file_descriptor);
 
 /* Take input from Unix environment variable; returns
    1 if variable exists zero otherwise. */

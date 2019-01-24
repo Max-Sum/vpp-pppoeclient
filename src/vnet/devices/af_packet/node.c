@@ -25,10 +25,12 @@
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/devices/devices.h>
 #include <vnet/feature/feature.h>
+#include <vnet/ethernet/packet.h>
 
 #include <vnet/devices/af_packet/af_packet.h>
 
-#define foreach_af_packet_input_error
+#define foreach_af_packet_input_error \
+  _(PARTIAL_PKT, "partial packet")
 
 typedef enum
 {
@@ -58,7 +60,7 @@ format_af_packet_input_trace (u8 * s, va_list * args)
   CLIB_UNUSED (vlib_main_t * vm) = va_arg (*args, vlib_main_t *);
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
   af_packet_input_trace_t *t = va_arg (*args, af_packet_input_trace_t *);
-  uword indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
 
   s = format (s, "af_packet: hw_if_index %d next-index %d",
 	      t->hw_if_index, t->next_index);
@@ -106,6 +108,71 @@ buffer_add_to_chain (vlib_main_t * vm, u32 bi, u32 first_bi, u32 prev_bi)
   b->next_buffer = 0;
 }
 
+static_always_inline void
+mark_tcp_udp_cksum_calc (vlib_buffer_t * b)
+{
+  ethernet_header_t *eth = vlib_buffer_get_current (b);
+  if (clib_net_to_host_u16 (eth->type) == ETHERNET_TYPE_IP4)
+    {
+      ip4_header_t *ip4 =
+	(vlib_buffer_get_current (b) + sizeof (ethernet_header_t));
+      b->flags |= VNET_BUFFER_F_IS_IP4;
+      if (ip4->protocol == IP_PROTOCOL_TCP)
+	{
+	  b->flags |= VNET_BUFFER_F_OFFLOAD_TCP_CKSUM;
+	  ((tcp_header_t
+	    *) (vlib_buffer_get_current (b) +
+		sizeof (ethernet_header_t) +
+		ip4_header_bytes (ip4)))->checksum = 0;
+	}
+      else if (ip4->protocol == IP_PROTOCOL_UDP)
+	{
+	  b->flags |= VNET_BUFFER_F_OFFLOAD_UDP_CKSUM;
+	  ((udp_header_t
+	    *) (vlib_buffer_get_current (b) +
+		sizeof (ethernet_header_t) +
+		ip4_header_bytes (ip4)))->checksum = 0;
+	}
+      vnet_buffer (b)->l3_hdr_offset = sizeof (ethernet_header_t);
+      vnet_buffer (b)->l4_hdr_offset =
+	sizeof (ethernet_header_t) + ip4_header_bytes (ip4);
+    }
+  else if (clib_net_to_host_u16 (eth->type) == ETHERNET_TYPE_IP6)
+    {
+      ip6_header_t *ip6 =
+	(vlib_buffer_get_current (b) + sizeof (ethernet_header_t));
+      b->flags |= VNET_BUFFER_F_IS_IP6;
+      u16 ip6_hdr_len = sizeof (ip6_header_t);
+      if (ip6_ext_hdr (ip6->protocol))
+	{
+	  ip6_ext_header_t *p = (void *) (ip6 + 1);
+	  ip6_hdr_len += ip6_ext_header_len (p);
+	  while (ip6_ext_hdr (p->next_hdr))
+	    {
+	      ip6_hdr_len += ip6_ext_header_len (p);
+	      p = ip6_ext_next_header (p);
+	    }
+	}
+      if (ip6->protocol == IP_PROTOCOL_TCP)
+	{
+	  b->flags |= VNET_BUFFER_F_OFFLOAD_TCP_CKSUM;
+	  ((tcp_header_t
+	    *) (vlib_buffer_get_current (b) +
+		sizeof (ethernet_header_t) + ip6_hdr_len))->checksum = 0;
+	}
+      else if (ip6->protocol == IP_PROTOCOL_UDP)
+	{
+	  b->flags |= VNET_BUFFER_F_OFFLOAD_UDP_CKSUM;
+	  ((udp_header_t
+	    *) (vlib_buffer_get_current (b) +
+		sizeof (ethernet_header_t) + ip6_hdr_len))->checksum = 0;
+	}
+      vnet_buffer (b)->l3_hdr_offset = sizeof (ethernet_header_t);
+      vnet_buffer (b)->l4_hdr_offset =
+	sizeof (ethernet_header_t) + ip6_hdr_len;
+    }
+}
+
 always_inline uword
 af_packet_device_input_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 			   vlib_frame_t * frame, af_packet_if_t * apif)
@@ -124,9 +191,8 @@ af_packet_device_input_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
   u32 frame_num = apif->rx_req->tp_frame_nr;
   u8 *block_start = apif->rx_ring + block * block_size;
   uword n_trace = vlib_get_trace_count (vm, node);
-  u32 thread_index = vlib_get_thread_index ();
-  u32 n_buffer_bytes = vlib_buffer_free_list_buffer_size (vm,
-							  VLIB_BUFFER_DEFAULT_FREE_LIST_INDEX);
+  u32 thread_index = vm->thread_index;
+  u32 n_buffer_bytes = VLIB_BUFFER_DATA_SIZE;
   u32 min_bufs = apif->rx_req->tp_frame_size / n_buffer_bytes;
 
   if (apif->per_interface_next_index != ~0)
@@ -181,9 +247,9 @@ af_packet_device_input_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 		{
 		  if (PREDICT_TRUE (offset == 0))
 		    {
-		      clib_memcpy (vlib_buffer_get_current (b0),
-				   (u8 *) tph + tph->tp_mac,
-				   sizeof (ethernet_header_t));
+		      clib_memcpy_fast (vlib_buffer_get_current (b0),
+					(u8 *) tph + tph->tp_mac,
+					sizeof (ethernet_header_t));
 		      ethernet_header_t *eth = vlib_buffer_get_current (b0);
 		      ethernet_vlan_header_t *vlan =
 			(ethernet_vlan_header_t *) (eth + 1);
@@ -195,10 +261,10 @@ af_packet_device_input_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 		      bytes_copied = sizeof (ethernet_header_t);
 		    }
 		}
-	      clib_memcpy (((u8 *) vlib_buffer_get_current (b0)) +
-			   bytes_copied + vlan_len,
-			   (u8 *) tph + tph->tp_mac + offset + bytes_copied,
-			   (bytes_to_copy - bytes_copied));
+	      clib_memcpy_fast (((u8 *) vlib_buffer_get_current (b0)) +
+				bytes_copied + vlan_len,
+				(u8 *) tph + tph->tp_mac + offset +
+				bytes_copied, (bytes_to_copy - bytes_copied));
 
 	      /* fill buffer header */
 	      b0->current_length = bytes_to_copy + vlan_len;
@@ -211,6 +277,8 @@ af_packet_device_input_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 		  vnet_buffer (b0)->sw_if_index[VLIB_TX] = (u32) ~ 0;
 		  first_bi0 = bi0;
 		  first_b0 = vlib_get_buffer (vm, first_bi0);
+		  if (tph->tp_status & TP_STATUS_CSUMNOTREADY)
+		    mark_tcp_udp_cksum_calc (first_b0);
 		}
 	      else
 		buffer_add_to_chain (vm, bi0, first_bi0, prev_bi0);
@@ -224,6 +292,21 @@ af_packet_device_input_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  to_next += 1;
 	  n_left_to_next--;
 
+	  /* drop partial packets */
+	  if (PREDICT_FALSE (tph->tp_len != tph->tp_snaplen))
+	    {
+	      next0 = VNET_DEVICE_INPUT_NEXT_DROP;
+	      first_b0->error =
+		node->errors[AF_PACKET_INPUT_ERROR_PARTIAL_PKT];
+	    }
+	  else
+	    {
+	      next0 = VNET_DEVICE_INPUT_NEXT_ETHERNET_INPUT;
+	      /* redirect if feature path enabled */
+	      vnet_feature_start_device_input_x1 (apif->sw_if_index, &next0,
+						  first_b0);
+	    }
+
 	  /* trace */
 	  VLIB_BUFFER_TRACE_TRAJECTORY_INIT (first_b0);
 	  if (PREDICT_FALSE (n_trace > 0))
@@ -235,11 +318,8 @@ af_packet_device_input_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 	      tr = vlib_add_trace (vm, node, first_b0, sizeof (*tr));
 	      tr->next_index = next0;
 	      tr->hw_if_index = apif->hw_if_index;
-	      clib_memcpy (&tr->tph, tph, sizeof (struct tpacket2_hdr));
+	      clib_memcpy_fast (&tr->tph, tph, sizeof (struct tpacket2_hdr));
 	    }
-
-	  /* redirect if feature path enabled */
-	  vnet_feature_start_device_input_x1 (apif->sw_if_index, &next0, b0);
 
 	  /* enque and take next packet */
 	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,

@@ -290,7 +290,7 @@ node_elog_init (vlib_main_t * vm, uword ni)
 {
   elog_event_type_t t;
 
-  memset (&t, 0, sizeof (t));
+  clib_memset (&t, 0, sizeof (t));
 
   /* 2 event types for this node: one when node function is called.
      One when it returns. */
@@ -324,11 +324,33 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
       ASSERT (VLIB_NODE_TYPE_INTERNAL == zero.type);
     }
 
+  if (r->node_fn_registrations)
+    {
+      vlib_node_fn_registration_t *fnr = r->node_fn_registrations;
+      int priority = -1;
+
+      /* to avoid confusion, please remove ".function " statiement from
+         CLIB_NODE_REGISTRATION() if using function function candidates */
+      ASSERT (r->function == 0);
+
+      while (fnr)
+	{
+	  if (fnr->priority > priority)
+	    {
+	      priority = fnr->priority;
+	      r->function = fnr->function;
+	    }
+	  fnr = fnr->next_registration;
+	}
+    }
+
   ASSERT (r->function != 0);
 
   n = clib_mem_alloc_no_fail (sizeof (n[0]));
-  memset (n, 0, sizeof (n[0]));
+  clib_memset (n, 0, sizeof (n[0]));
   n->index = vec_len (nm->nodes);
+  n->node_fn_registrations = r->node_fn_registrations;
+  n->protocol_hint = r->protocol_hint;
 
   vec_add1 (nm->nodes, n);
 
@@ -430,7 +452,7 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
 	  clib_panic ("failed to allocate process stack (%d bytes)",
 		      1 << log2_n_stack_bytes);
 
-	memset (p, 0, sizeof (p[0]));
+	clib_memset (p, 0, sizeof (p[0]));
 	p->log2_n_stack_bytes = log2_n_stack_bytes;
 
 	/* Process node's runtime index is really index into process
@@ -508,7 +530,7 @@ null_node_fn (vlib_main_t * vm,
   u16 n_vectors = frame->n_vectors;
 
   vlib_node_increment_counter (vm, node->node_index, 0, n_vectors);
-  vlib_buffer_free (vm, vlib_frame_args (frame), n_vectors);
+  vlib_buffer_free (vm, vlib_frame_vector_args (frame), n_vectors);
   vlib_frame_free (vm, node, frame);
 
   return n_vectors;
@@ -541,6 +563,68 @@ vlib_register_all_static_nodes (vlib_main_t * vm)
       register_node (vm, r);
       r = r->next_registration;
     }
+}
+
+void
+vlib_node_get_nodes (vlib_main_t * vm, u32 max_threads, int include_stats,
+		     int barrier_sync, vlib_node_t **** node_dupsp,
+		     vlib_main_t *** stat_vmsp)
+{
+  vlib_node_main_t *nm = &vm->node_main;
+  vlib_node_t *n;
+  vlib_node_t ***node_dups = *node_dupsp;
+  vlib_node_t **nodes;
+  vlib_main_t **stat_vms = *stat_vmsp;
+  vlib_main_t *stat_vm;
+  uword i, j;
+  u32 threads_to_serialize;
+
+  if (vec_len (stat_vms) == 0)
+    {
+      for (i = 0; i < vec_len (vlib_mains); i++)
+	{
+	  stat_vm = vlib_mains[i];
+	  if (stat_vm)
+	    vec_add1 (stat_vms, stat_vm);
+	}
+    }
+
+  threads_to_serialize = clib_min (max_threads, vec_len (stat_vms));
+
+  vec_validate (node_dups, threads_to_serialize - 1);
+
+  /*
+   * Barrier sync across stats scraping.
+   * Otherwise, the counts will be grossly inaccurate.
+   */
+  if (barrier_sync)
+    vlib_worker_thread_barrier_sync (vm);
+
+  for (j = 0; j < threads_to_serialize; j++)
+    {
+      stat_vm = stat_vms[j];
+      nm = &stat_vm->node_main;
+
+      if (include_stats)
+	{
+	  for (i = 0; i < vec_len (nm->nodes); i++)
+	    {
+	      n = nm->nodes[i];
+	      vlib_node_sync_stats (stat_vm, n);
+	    }
+	}
+
+      nodes = node_dups[j];
+      vec_validate (nodes, vec_len (nm->nodes) - 1);
+      clib_memcpy (nodes, nm->nodes, vec_len (nm->nodes) * sizeof (nodes[0]));
+      node_dups[j] = nodes;
+    }
+
+  if (barrier_sync)
+    vlib_worker_thread_barrier_release (vm);
+
+  *node_dupsp = node_dups;
+  *stat_vmsp = stat_vms;
 }
 
 clib_error_t *

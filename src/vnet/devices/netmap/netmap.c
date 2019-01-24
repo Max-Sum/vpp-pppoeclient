@@ -27,6 +27,8 @@
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/devices/netmap/netmap.h>
 
+netmap_main_t netmap_main;
+
 static u32
 netmap_eth_flag_change (vnet_main_t * vnm, vnet_hw_interface_t * hi,
 			u32 flags)
@@ -78,7 +80,7 @@ close_netmap_if (netmap_main_t * nm, netmap_if_t * nif)
   vec_free (nif->host_if_name);
   vec_free (nif->req);
 
-  memset (nif, 0, sizeof (*nif));
+  clib_memset (nif, 0, sizeof (*nif));
   pool_put (nm->interfaces, nif);
 }
 
@@ -278,7 +280,7 @@ netmap_init (vlib_main_t * vm)
   vlib_thread_registration_t *tr;
   uword *p;
 
-  memset (nm, 0, sizeof (netmap_main_t));
+  clib_memset (nm, 0, sizeof (netmap_main_t));
 
   nm->input_cpu_first_index = 0;
   nm->input_cpu_count = 1;

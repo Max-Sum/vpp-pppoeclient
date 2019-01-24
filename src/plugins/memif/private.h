@@ -16,6 +16,7 @@
  */
 
 #include <vppinfra/lock.h>
+#include <vlib/log.h>
 
 #define MEMIF_DEFAULT_SOCKET_FILENAME  "memif.sock"
 #define MEMIF_DEFAULT_RING_SIZE 1024
@@ -23,53 +24,67 @@
 #define MEMIF_DEFAULT_TX_QUEUES 1
 #define MEMIF_DEFAULT_BUFFER_SIZE 2048
 
-#define MEMIF_MAX_M2S_RING		(vec_len (vlib_mains) - 1)
-#define MEMIF_MAX_S2M_RING		(vec_len (vlib_mains) - 1)
-#define MEMIF_MAX_REGION		255
+#define MEMIF_MAX_M2S_RING		(vec_len (vlib_mains))
+#define MEMIF_MAX_S2M_RING		256
+#define MEMIF_MAX_REGION		256
 #define MEMIF_MAX_LOG2_RING_SIZE	14
 
-#define MEMIF_DEBUG 0
 
-#if MEMIF_DEBUG == 1
-#define DBG(...) clib_warning(__VA_ARGS__)
-#define DBG_UNIX_LOG(...) clib_unix_warning(__VA_ARGS__)
-#else
-#define DBG(...)
-#define DBG_UNIX_LOG(...)
-#endif
+#define memif_log_debug(dev, f, ...) do {                               \
+  memif_if_t *_dev = (memif_if_t *) dev;                                \
+  if (_dev)                                                             \
+    vlib_log(VLIB_LOG_LEVEL_DEBUG, memif_main.log_class, "%U: " f,      \
+	     format_vnet_hw_if_index_name, vnet_get_main(),             \
+	     _dev->hw_if_index, ##__VA_ARGS__);                         \
+  else                                                                  \
+    vlib_log(VLIB_LOG_LEVEL_DEBUG, memif_main.log_class, f,             \
+             ##__VA_ARGS__);                                            \
+} while (0)
 
-#if MEMIF_DEBUG == 1
+#define memif_log_warn(dev, f, ...) do {                                \
+  memif_if_t *_dev = (memif_if_t *) dev;                                \
+  if (_dev)                                                             \
+    vlib_log(VLIB_LOG_LEVEL_WARNING, memif_main.log_class, "%U: " f,    \
+	     format_vnet_hw_if_index_name, vnet_get_main(),             \
+	     _dev->hw_if_index, ##__VA_ARGS__);                         \
+  else                                                                  \
+    vlib_log(VLIB_LOG_LEVEL_WARNING, memif_main.log_class, f,           \
+             ##__VA_ARGS__);                                            \
+} while (0)
+
+#define memif_log_err(dev, f, ...) do {                                 \
+  memif_if_t *_dev = (memif_if_t *) dev;                                \
+  if (_dev)                                                             \
+    vlib_log(VLIB_LOG_LEVEL_ERR, memif_main.log_class, "%U: " f,        \
+	     format_vnet_hw_if_index_name, vnet_get_main(),             \
+	     _dev->hw_if_index, ##__VA_ARGS__);                         \
+  else                                                                  \
+    vlib_log(VLIB_LOG_LEVEL_ERR, memif_main.log_class, f,               \
+             ##__VA_ARGS__);                                            \
+} while (0)
+
 #define memif_file_add(a, b) do {					\
-  ASSERT (*a == ~0);							\
   *a = clib_file_add (&file_main, b);					\
-  clib_warning ("clib_file_add fd %d private_data %u idx %u",		\
+  memif_log_warn (0, "clib_file_add fd %d private_data %u idx %u",	\
 		(b)->file_descriptor, (b)->private_data, *a);		\
 } while (0)
 
 #define memif_file_del(a) do {						\
-  clib_warning ("clib_file_del idx %u",a - file_main.file_pool);	\
+  memif_log_warn (0, "clib_file_del idx %u", a - file_main.file_pool);	\
   clib_file_del (&file_main, a);					\
 } while (0)
 
 #define memif_file_del_by_index(a) do {					\
-  clib_warning ("clib_file_del idx %u", a);				\
+  memif_log_warn (0, "clib_file_del idx %u", a);			\
   clib_file_del_by_index (&file_main, a);				\
 } while (0)
-#else
-#define memif_file_add(a, b) do {					\
-  ASSERT (*a == ~0);							\
-  *a = clib_file_add (&file_main, b);					\
-} while (0)
-#define memif_file_del(a) clib_file_del(&file_main, a)
-#define memif_file_del_by_index(a) clib_file_del_by_index(&file_main, a)
-#endif
 
 typedef struct
 {
   u8 *filename;
-  int fd;
-  uword clib_file_index;
-  uword *pending_file_indices;
+  u32 socket_id;
+  clib_socket_t *sock;
+  clib_socket_t **pending_clients;
   int ref_cnt;
   int is_listener;
 
@@ -82,9 +97,12 @@ typedef struct
 
 typedef struct
 {
+  /* Required for vec_validate_aligned */
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   void *shm;
   memif_region_size_t region_size;
   int fd;
+  u8 is_external;
 } memif_region_t;
 
 typedef struct
@@ -95,6 +113,7 @@ typedef struct
 
 typedef struct
 {
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   /* ring data */
   memif_ring_t *ring;
   memif_log2_ring_size_t log2_ring_size;
@@ -103,11 +122,15 @@ typedef struct
 
   u16 last_head;
   u16 last_tail;
+  u32 *buffers;
 
   /* interrupts */
   int int_fd;
   uword int_clib_file_index;
   u64 int_count;
+
+  /* queue type */
+  memif_ring_type_t type;
 } memif_queue_t;
 
 #define foreach_memif_if_flag \
@@ -115,7 +138,9 @@ typedef struct
   _(1, IS_SLAVE, "slave")		\
   _(2, CONNECTING, "connecting")	\
   _(3, CONNECTED, "connected")		\
-  _(4, DELETING, "deleting")
+  _(4, DELETING, "deleting")		\
+  _(5, ZERO_COPY, "zero-copy")		\
+  _(6, ERROR, "error")
 
 typedef enum
 {
@@ -138,9 +163,8 @@ typedef struct
   u32 per_interface_next_index;
 
   /* socket connection */
+  clib_socket_t *sock;
   uword socket_file_index;
-  int conn_fd;
-  uword conn_clib_file_index;
   memif_msg_fifo_elt_t *msg_queue;
   u8 *secret;
 
@@ -150,9 +174,6 @@ typedef struct
   memif_queue_t *tx_queues;
 
   /* remote info */
-  pid_t remote_pid;
-  uid_t remote_uid;
-  gid_t remote_gid;
   u8 *remote_name;
   u8 *remote_if_name;
 
@@ -179,6 +200,37 @@ typedef struct
 
 typedef struct
 {
+  u32 packet_len;
+  u16 first_buffer_vec_index;
+} memif_packet_op_t;
+
+typedef struct
+{
+  CLIB_ALIGN_MARK (pad, 16);	/* align up to 16 bytes for 32bit builds */
+  void *data;
+  u32 data_len;
+  i16 buffer_offset;
+  u16 buffer_vec_index;
+} memif_copy_op_t;
+
+#define MEMIF_RX_VECTOR_SZ VLIB_FRAME_SIZE
+
+typedef struct
+{
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+
+  /* copy vector */
+  memif_packet_op_t packet_ops[MEMIF_RX_VECTOR_SZ];
+  memif_copy_op_t *copy_ops;
+  u32 *buffers;
+
+  /* buffer template */
+  vlib_buffer_t buffer_template;
+  memif_desc_t desc_template;
+} memif_per_thread_data_t;
+
+typedef struct
+{
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
 
   /** API message ID base */
@@ -189,10 +241,12 @@ typedef struct
 
   /* pool of all unix socket files */
   memif_socket_file_t *socket_files;
-  mhash_t socket_file_index_by_filename;
+  uword *socket_file_index_by_sock_id;	/* map user socket id to pool idx */
 
-  /* rx buffer cache */
-  u32 **rx_buffers;
+  /* per thread data */
+  memif_per_thread_data_t *per_thread_data;
+
+  vlib_log_class_t log_class;
 
 } memif_main_t;
 
@@ -209,9 +263,10 @@ enum
 typedef struct
 {
   memif_interface_id_t id;
-  u8 *socket_filename;
+  u32 socket_id;
   u8 *secret;
   u8 is_master;
+  u8 is_zero_copy;
   memif_interface_mode_t mode:8;
   memif_log2_ring_size_t log2_ring_size;
   u16 buffer_size;
@@ -224,6 +279,8 @@ typedef struct
   u32 sw_if_index;
 } memif_create_if_args_t;
 
+int memif_socket_filename_add_del (u8 is_add, u32 sock_id,
+				   u8 * sock_filename);
 int memif_create_if (vlib_main_t * vm, memif_create_if_args_t * args);
 int memif_delete_if (vlib_main_t * vm, memif_if_t * mif);
 clib_error_t *memif_plugin_api_hookup (vlib_main_t * vm);
@@ -241,6 +298,7 @@ clib_error_t *memif_connect (memif_if_t * mif);
 void memif_disconnect (memif_if_t * mif, clib_error_t * err);
 
 /* socket.c */
+void memif_socket_close (clib_socket_t ** sock);
 clib_error_t *memif_conn_fd_accept_ready (clib_file_t * uf);
 clib_error_t *memif_master_conn_fd_read_ready (clib_file_t * uf);
 clib_error_t *memif_slave_conn_fd_read_ready (clib_file_t * uf);
@@ -251,6 +309,7 @@ clib_error_t *memif_slave_conn_fd_error (clib_file_t * uf);
 clib_error_t *memif_msg_send_disconnect (memif_if_t * mif,
 					 clib_error_t * err);
 u8 *format_memif_device_name (u8 * s, va_list * args);
+
 
 /*
  * fd.io coding-style-patch-verification: ON

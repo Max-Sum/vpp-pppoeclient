@@ -35,6 +35,7 @@
 
 #include <vnet/fib/fib_types.h>
 #include <vnet/adj/adj_types.h>
+#include <vnet/bier/bier_types.h>
 
 /**
  * Enurmeration of path configuration attributes
@@ -79,14 +80,13 @@ typedef enum fib_path_cfg_attribute_t_ {
      */
     FIB_PATH_CFG_ATTRIBUTE_LOCAL,
     /**
-     * The path is L2. i.e. the parameters therein are to be interpreted as
-     * pertaining to L2 config.
+     * The deag path does a source lookup
      */
-    FIB_PATH_CFG_ATTRIBUTE_L2,
+    FIB_PATH_CFG_ATTRIBUTE_DEAG_SRC,
     /**
      * Marker. Add new types before this one, then update it.
      */
-    FIB_PATH_CFG_ATTRIBUTE_LAST = FIB_PATH_CFG_ATTRIBUTE_LOCAL,
+    FIB_PATH_CFG_ATTRIBUTE_LAST = FIB_PATH_CFG_ATTRIBUTE_DEAG_SRC,
 } __attribute__ ((packed)) fib_path_cfg_attribute_t;
 
 /**
@@ -103,7 +103,7 @@ typedef enum fib_path_cfg_attribute_t_ {
     [FIB_PATH_CFG_ATTRIBUTE_ATTACHED] = "attached",	\
     [FIB_PATH_CFG_ATTRIBUTE_INTF_RX] = "interface-rx",	\
     [FIB_PATH_CFG_ATTRIBUTE_RPF_ID] = "rpf-id",         \
-    [FIB_PATH_CFG_ATTRIBUTE_L2] = "l2",         \
+    [FIB_PATH_CFG_ATTRIBUTE_DEAG_SRC] = "deag-src",     \
 }
 
 #define FOR_EACH_FIB_PATH_CFG_ATTRIBUTE(_item) \
@@ -124,16 +124,16 @@ typedef enum fib_path_cfg_flags_t_ {
     FIB_PATH_CFG_FLAG_ATTACHED = (1 << FIB_PATH_CFG_ATTRIBUTE_ATTACHED),
     FIB_PATH_CFG_FLAG_INTF_RX = (1 << FIB_PATH_CFG_ATTRIBUTE_INTF_RX),
     FIB_PATH_CFG_FLAG_RPF_ID = (1 << FIB_PATH_CFG_ATTRIBUTE_RPF_ID),
-    FIB_PATH_CFG_FLAG_L2 = (1 << FIB_PATH_CFG_ATTRIBUTE_L2),
+    FIB_PATH_CFG_FLAG_DEAG_SRC = (1 << FIB_PATH_CFG_ATTRIBUTE_DEAG_SRC),
 } __attribute__ ((packed)) fib_path_cfg_flags_t;
 
+typedef enum fib_path_format_flags_t_
+{
+    FIB_PATH_FORMAT_FLAGS_NONE = 0,
+    FIB_PATH_FORMAT_FLAGS_ONE_LINE = (1 << 0),
+} fib_format_path_flags_t;
 
-extern u8 *fib_path_format(fib_node_index_t pi, u8 *s);
-extern u8 *fib_path_adj_format(fib_node_index_t pi,
-			       u32 indent,
-			       u8 *s);
-
-extern u8 * format_fib_path(u8 * s, va_list * args);
+extern u8 *format_fib_path(u8 *s, va_list *args);
 
 extern fib_node_index_t fib_path_create(fib_node_index_t pl_index,
 					const fib_route_path_t *path);
@@ -164,6 +164,7 @@ extern load_balance_path_t * fib_path_append_nh_for_multipath_hash(
     load_balance_path_t *hash_key);
 extern void fib_path_stack_mpls_disp(fib_node_index_t path_index,
                                      dpo_proto_t payload_proto,
+                                     fib_mpls_lsp_mode_t mode,
                                      dpo_id_t *dpo);
 extern void fib_path_contribute_forwarding(fib_node_index_t path_index,
 					   fib_forward_chain_type_t type,
@@ -174,12 +175,15 @@ extern adj_index_t fib_path_get_adj(fib_node_index_t path_index);
 extern int fib_path_recursive_loop_detect(fib_node_index_t path_index,
 					  fib_node_index_t **entry_indicies);
 extern u32 fib_path_get_resolving_interface(fib_node_index_t fib_entry_index);
+extern index_t fib_path_get_resolving_index(fib_node_index_t path_index);
 extern u16 fib_path_get_weight(fib_node_index_t path_index);
 extern u16 fib_path_get_preference(fib_node_index_t path_index);
+extern u32 fib_path_get_rpf_id(fib_node_index_t path_index);
 
 extern void fib_path_module_init(void);
 extern fib_path_list_walk_rc_t fib_path_encode(fib_node_index_t path_list_index,
                                                fib_node_index_t path_index,
+                                               const struct fib_path_ext_t_ *ext_list,
                                                void *ctx);
 
 #endif

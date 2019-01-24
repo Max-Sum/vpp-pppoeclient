@@ -66,7 +66,7 @@ typedef struct svm_map_region_args_
 {
   const char *root_path;	/* NULL means use the truly global arena */
   const char *name;
-  u64 baseva;
+  uword baseva;
   u64 size;
   u64 pvt_heap_size;
   uword flags;
@@ -77,15 +77,25 @@ typedef struct svm_map_region_args_
   int gid;
 } svm_map_region_args_t;
 
+/*
+ * Memory mapped to high addresses for session/vppcom/vcl/etc...
+ */
+#if __WORDSIZE == 64
+#define HIGH_SEGMENT_BASEVA (8ULL   << 30)	/* 8GB */
+#elif __WORDSIZE == 32
+#define HIGH_SEGMENT_BASEVA (3584UL << 20)	/* 3.5GB */
+#else
+#error "unknown __WORDSIZE"
+#endif
 
 /*
  * Memory shared across all router instances. Packet buffers, etc
  * Base should be "out of the way," and size should be big enough to
  * cover everything we plan to put here.
  */
-#define SVM_GLOBAL_REGION_BASEVA  0x30000000
 #define SVM_GLOBAL_REGION_SIZE    (64<<20)
 #define SVM_GLOBAL_REGION_NAME "/global_vm"
+u64 svm_get_global_region_base_va ();
 
 /*
  * Memory shared across individual router instances.
@@ -112,11 +122,15 @@ typedef struct
 
 void *svm_region_find_or_create (svm_map_region_args_t * a);
 void svm_region_init (void);
+void svm_region_init_mapped_region (svm_map_region_args_t * a,
+				    svm_region_t * rp);
 int svm_region_init_chroot (const char *root_path);
 void svm_region_init_chroot_uid_gid (const char *root_path, int uid, int gid);
 void svm_region_init_args (svm_map_region_args_t * a);
 void svm_region_exit (void);
+void svm_region_exit_client (void);
 void svm_region_unmap (void *rp_arg);
+void svm_region_unmap_client (void *rp_arg);
 void svm_client_scan (const char *root_path);
 void svm_client_scan_this_region_nolock (svm_region_t * rp);
 u8 *shm_name_from_svm_map_region_args (svm_map_region_args_t * a);

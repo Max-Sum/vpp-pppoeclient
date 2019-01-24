@@ -16,9 +16,6 @@
 
 #include <vppinfra/serialize.h>
 
-extern void vl_msg_api_barrier_sync (void);
-extern void vl_msg_api_barrier_release (void);
-
 /* serialized representation of state strings */
 
 #define foreach_state_string_code               \
@@ -50,72 +47,24 @@ static char *state_strings[] = {
  * to recycle a vector / avoid memory allocation, etc.
  * Switch heaps before/after to serialize into API client shared memory.
  */
-
 u8 *
-vlib_node_serialize (vlib_node_main_t * nm, u8 * vector,
-		     u32 max_threads, int include_nexts, int include_stats)
+vlib_node_serialize (vlib_main_t * vm, vlib_node_t *** node_dups, u8 * vector,
+		     int include_nexts, int include_stats)
 {
   serialize_main_t _sm, *sm = &_sm;
-  vlib_main_t *vm = vlib_get_main ();
   vlib_node_t *n;
-  static vlib_node_t ***node_dups;
   vlib_node_t **nodes;
-  static vlib_main_t **stat_vms;
-  vlib_main_t *stat_vm;
   u8 *namep;
   u32 name_bytes;
   uword i, j, k;
-  u64 l, v, c, d;
+  u64 l, v, c, d, pmc;
   state_string_enum_t state_code;
-  u32 threads_to_serialize;
-
-  vec_reset_length (node_dups);
-
-  if (vec_len (stat_vms) == 0)
-    {
-      for (i = 0; i < vec_len (vlib_mains); i++)
-	{
-	  stat_vm = vlib_mains[i];
-	  if (stat_vm)
-	    vec_add1 (stat_vms, stat_vm);
-	}
-    }
-
-  threads_to_serialize = clib_min (max_threads, vec_len (stat_vms));
-
-  /*
-   * Barrier sync across stats scraping.
-   * Otherwise, the counts will be grossly inaccurate.
-   */
-  vl_msg_api_barrier_sync ();
-
-  for (j = 0; j < threads_to_serialize; j++)
-    {
-      stat_vm = stat_vms[j];
-      nm = &stat_vm->node_main;
-
-      if (include_stats)
-	{
-	  for (i = 0; i < vec_len (nm->nodes); i++)
-	    {
-	      n = nm->nodes[i];
-	      vlib_node_sync_stats (stat_vm, n);
-	    }
-	}
-
-      nodes = vec_dup (nm->nodes);
-
-      vec_add1 (node_dups, nodes);
-    }
-  vl_msg_api_barrier_release ();
 
   serialize_open_vector (sm, vector);
+  serialize_likely_small_unsigned_integer (sm, vec_len (node_dups));
 
-  serialize_likely_small_unsigned_integer (sm, vec_len (stat_vms));
-
-  for (j = 0; j < vec_len (stat_vms); j++)
+  for (j = 0; j < vec_len (node_dups); j++)
     {
-      stat_vm = stat_vms[j];
       nodes = node_dups[j];
 
       serialize_likely_small_unsigned_integer (sm, vec_len (nodes));
@@ -128,6 +77,8 @@ vlib_node_serialize (vlib_node_main_t * nm, u8 * vector,
 	  v = n->stats_total.vectors - n->stats_last_clear.vectors;
 	  c = n->stats_total.calls - n->stats_last_clear.calls;
 	  d = n->stats_total.suspends - n->stats_last_clear.suspends;
+	  pmc = n->stats_total.perf_counter_ticks
+	    - n->stats_last_clear.perf_counter_ticks;
 
 	  state_code = STATE_INTERNAL;
 
@@ -175,6 +126,7 @@ vlib_node_serialize (vlib_node_main_t * nm, u8 * vector,
 
 	  serialize_likely_small_unsigned_integer (sm, (u64) state_code);
 	  serialize_likely_small_unsigned_integer (sm, n->type);
+	  serialize_likely_small_unsigned_integer (sm, n->flags);
 
 	  if (include_nexts)
 	    {
@@ -199,11 +151,12 @@ vlib_node_serialize (vlib_node_main_t * nm, u8 * vector,
 	      serialize_integer (sm, v, 8);
 	      /* Total suspends */
 	      serialize_integer (sm, d, 8);
+	      /* PMC counter */
+	      serialize_integer (sm, pmc, 8);
 	    }
 	  else			/* no stats */
 	    serialize_likely_small_unsigned_integer (sm, 0);
 	}
-      vec_free (nodes);
     }
   return (serialize_close_vector (sm));
 }
@@ -218,7 +171,7 @@ vlib_node_unserialize (u8 * vector)
   vlib_node_t **nodes;
   vlib_node_t ***nodes_by_thread = 0;
   int i, j, k;
-  u64 l, v, c, d;
+  u64 l, v, c, d, pmc;
   state_string_enum_t state_code;
   int stats_present;
 
@@ -248,6 +201,7 @@ vlib_node_unserialize (u8 * vector)
 	  node->state_string = (u8 *) state_strings[state_code];
 
 	  node->type = unserialize_likely_small_unsigned_integer (sm);
+	  node->flags = unserialize_likely_small_unsigned_integer (sm);
 	  nnexts = unserialize_likely_small_unsigned_integer (sm);
 	  if (nnexts > 0)
 	    vec_validate (node->next_nodes, nnexts - 1);
@@ -275,6 +229,9 @@ vlib_node_unserialize (u8 * vector)
 	      /* Total suspends */
 	      unserialize_integer (sm, &d, 8);
 	      node->stats_total.suspends = d;
+	      /* PMC counter */
+	      unserialize_integer (sm, &pmc, 8);
+	      node->stats_total.perf_counter_ticks = pmc;
 	    }
 	}
     }

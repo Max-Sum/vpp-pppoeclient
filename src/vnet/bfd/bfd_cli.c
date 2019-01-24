@@ -20,6 +20,7 @@
 #include <vlib/vlib.h>
 #include <vlib/cli.h>
 #include <vppinfra/format.h>
+#include <vppinfra/warnings.h>
 #include <vnet/api_errno.h>
 #include <vnet/ip/format.h>
 #include <vnet/bfd/bfd_api.h>
@@ -120,8 +121,13 @@ show_bfd (vlib_main_t * vm, unformat_input_t * input,
 {
   bfd_main_t *bm = &bfd_main;
   bfd_session_t *bs = NULL;
+  unformat_input_t _line_input, *line_input = &_line_input;
 
-  if (unformat (input, "keys"))
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  if (unformat (line_input, "keys"))
     {
       bfd_auth_key_t *key = NULL;
       u8 *s = format (NULL, "%=10s %=25s %=10s\n", "Configuration Key ID",
@@ -137,7 +143,7 @@ show_bfd (vlib_main_t * vm, unformat_input_t * input,
       vlib_cli_output (vm, "Number of configured BFD keys: %lu\n",
 		       (u64) pool_elts (bm->auth_keys));
     }
-  else if (unformat (input, "sessions"))
+  else if (unformat (line_input, "sessions"))
     {
       u8 *s = format (NULL, "%=10s %=32s %=20s %=20s\n", "Index", "Property",
 		      "Local value", "Remote value");
@@ -151,7 +157,7 @@ show_bfd (vlib_main_t * vm, unformat_input_t * input,
       vlib_cli_output (vm, "Number of configured BFD sessions: %lu\n",
 		       (u64) pool_elts (bm->sessions));
     }
-  else if (unformat (input, "echo-source"))
+  else if (unformat (line_input, "echo-source"))
     {
       int is_set;
       u32 sw_if_index;
@@ -212,22 +218,6 @@ VLIB_CLI_COMMAND (show_bfd_command, static) = {
 };
 /* *INDENT-ON* */
 
-static u8 *
-format_vnet_api_errno (u8 * s, va_list * args)
-{
-  vnet_api_error_t api_error = va_arg (*args, vnet_api_error_t);
-#define _(a, b, c)           \
-  case b:                    \
-    s = format (s, "%s", c); \
-    break;
-  switch (api_error)
-    {
-      foreach_vnet_api_error default:s = format (s, "UNKNOWN");
-      break;
-    }
-  return s;
-}
-
 static clib_error_t *
 bfd_cli_key_add (vlib_main_t * vm, unformat_input_t * input,
 		 CLIB_UNUSED (vlib_cli_command_t * lmd))
@@ -238,16 +228,21 @@ bfd_cli_key_add (vlib_main_t * vm, unformat_input_t * input,
   u8 *vec_auth_type = NULL;
   bfd_auth_type_e auth_type = BFD_AUTH_TYPE_reserved;
   u8 *secret = NULL;
+  unformat_input_t _line_input, *line_input = &_line_input;
   static const u8 keyed_sha1[] = "keyed-sha1";
   static const u8 meticulous_keyed_sha1[] = "meticulous-keyed-sha1";
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
-      if (unformat (input, "conf-key-id %u", &key_id))
+      if (unformat (line_input, "conf-key-id %u", &key_id))
 	{
 	  have_key_id = 1;
 	}
-      else if (unformat (input, "type %U", unformat_token, "a-zA-Z0-9-",
+      else if (unformat (line_input, "type %U", unformat_token, "a-zA-Z0-9-",
 			 &vec_auth_type))
 	{
 	  if (vec_len (vec_auth_type) == sizeof (keyed_sha1) - 1 &&
@@ -269,14 +264,15 @@ bfd_cli_key_add (vlib_main_t * vm, unformat_input_t * input,
 	      goto out;
 	    }
 	}
-      else if (unformat (input, "secret %U", unformat_hex_string, &secret))
+      else
+	if (unformat (line_input, "secret %U", unformat_hex_string, &secret))
 	{
 	  /* nothing to do here */
 	}
       else
 	{
 	  ret = clib_error_return (0, "Unknown input `%U'",
-				   format_unformat_error, input);
+				   format_unformat_error, line_input);
 	  goto out;
 	}
     }
@@ -329,13 +325,18 @@ bfd_cli_key_del (vlib_main_t * vm, unformat_input_t * input,
 {
   clib_error_t *ret = NULL;
   u32 key_id = 0;
+  unformat_input_t _line_input, *line_input = &_line_input;
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
-      if (!unformat (input, "conf-key-id %u", &key_id))
+      if (!unformat (line_input, "conf-key-id %u", &key_id))
 	{
 	  ret = clib_error_return (0, "Unknown input `%U'",
-				   format_unformat_error, input);
+				   format_unformat_error, line_input);
 	  goto out;
 	}
     }
@@ -379,26 +380,17 @@ static const unsigned optional = 0;
   t n;
 
 #define UNFORMAT(t, n, s, r, ...)              \
-  if (unformat (input, s " " __VA_ARGS__, &n)) \
+  if (unformat (line_input, s " " __VA_ARGS__, &n)) \
     {                                          \
       something_parsed = 1;                    \
       have_##n = 1;                            \
     }
 
-#if __GNUC__ >= 6
-#define PRAGMA_STR1 \
-  _Pragma ("GCC diagnostic ignored \"-Wtautological-compare\"");
-#define PRAGMA_STR2 _Pragma ("GCC diagnostic pop");
-#else
-#define PRAGMA_STR1
-#define PRAGMA_STR2
-#endif
-
 #define CHECK_MANDATORY(t, n, s, r, ...)                                  \
-  PRAGMA_STR1                                                             \
+WARN_OFF(tautological-compare)                                            \
   if (mandatory == r && !have_##n)                                        \
-    PRAGMA_STR2                                                           \
     {                                                                     \
+      WARN_ON(tautological-compare)                                       \
       ret = clib_error_return (0, "Required parameter `%s' missing.", s); \
       goto out;                                                           \
     }
@@ -408,6 +400,7 @@ bfd_cli_udp_session_add (vlib_main_t * vm, unformat_input_t * input,
 			 CLIB_UNUSED (vlib_cli_command_t * lmd))
 {
   clib_error_t *ret = NULL;
+  unformat_input_t _line_input, *line_input = &_line_input;
 #define foreach_bfd_cli_udp_session_add_cli_param(F)              \
   F (u32, sw_if_index, INTERFACE_STR, mandatory, "%U",            \
      unformat_vnet_sw_interface, &vnet_main)                      \
@@ -423,7 +416,11 @@ bfd_cli_udp_session_add (vlib_main_t * vm, unformat_input_t * input,
 
   foreach_bfd_cli_udp_session_add_cli_param (DECLARE);
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
       int something_parsed = 0;
       foreach_bfd_cli_udp_session_add_cli_param (UNFORMAT);
@@ -431,7 +428,7 @@ bfd_cli_udp_session_add (vlib_main_t * vm, unformat_input_t * input,
       if (!something_parsed)
 	{
 	  ret = clib_error_return (0, "Unknown input `%U'",
-				   format_unformat_error, input);
+				   format_unformat_error, line_input);
 	  goto out;
 	}
     }
@@ -501,6 +498,7 @@ bfd_cli_udp_session_mod (vlib_main_t * vm, unformat_input_t * input,
 			 CLIB_UNUSED (vlib_cli_command_t * lmd))
 {
   clib_error_t *ret = NULL;
+  unformat_input_t _line_input, *line_input = &_line_input;
 #define foreach_bfd_cli_udp_session_mod_cli_param(F)              \
   F (u32, sw_if_index, INTERFACE_STR, mandatory, "%U",            \
      unformat_vnet_sw_interface, &vnet_main)                      \
@@ -514,7 +512,11 @@ bfd_cli_udp_session_mod (vlib_main_t * vm, unformat_input_t * input,
 
   foreach_bfd_cli_udp_session_mod_cli_param (DECLARE);
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
       int something_parsed = 0;
       foreach_bfd_cli_udp_session_mod_cli_param (UNFORMAT);
@@ -522,7 +524,7 @@ bfd_cli_udp_session_mod (vlib_main_t * vm, unformat_input_t * input,
       if (!something_parsed)
 	{
 	  ret = clib_error_return (0, "Unknown input `%U'",
-				   format_unformat_error, input);
+				   format_unformat_error, line_input);
 	  goto out;
 	}
     }
@@ -571,6 +573,7 @@ bfd_cli_udp_session_del (vlib_main_t * vm, unformat_input_t * input,
 			 CLIB_UNUSED (vlib_cli_command_t * lmd))
 {
   clib_error_t *ret = NULL;
+  unformat_input_t _line_input, *line_input = &_line_input;
 #define foreach_bfd_cli_udp_session_del_cli_param(F)              \
   F (u32, sw_if_index, INTERFACE_STR, mandatory, "%U",            \
      unformat_vnet_sw_interface, &vnet_main)                      \
@@ -581,7 +584,11 @@ bfd_cli_udp_session_del (vlib_main_t * vm, unformat_input_t * input,
 
   foreach_bfd_cli_udp_session_del_cli_param (DECLARE);
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
       int something_parsed = 0;
       foreach_bfd_cli_udp_session_del_cli_param (UNFORMAT);
@@ -589,7 +596,7 @@ bfd_cli_udp_session_del (vlib_main_t * vm, unformat_input_t * input,
       if (!something_parsed)
 	{
 	  ret = clib_error_return (0, "Unknown input `%U'",
-				   format_unformat_error, input);
+				   format_unformat_error, line_input);
 	  goto out;
 	}
     }
@@ -627,6 +634,7 @@ bfd_cli_udp_session_set_flags (vlib_main_t * vm, unformat_input_t * input,
 			       CLIB_UNUSED (vlib_cli_command_t * lmd))
 {
   clib_error_t *ret = NULL;
+  unformat_input_t _line_input, *line_input = &_line_input;
 #define foreach_bfd_cli_udp_session_set_flags_cli_param(F)        \
   F (u32, sw_if_index, INTERFACE_STR, mandatory, "%U",            \
      unformat_vnet_sw_interface, &vnet_main)                      \
@@ -639,7 +647,11 @@ bfd_cli_udp_session_set_flags (vlib_main_t * vm, unformat_input_t * input,
 
   foreach_bfd_cli_udp_session_set_flags_cli_param (DECLARE);
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
       int something_parsed = 0;
       foreach_bfd_cli_udp_session_set_flags_cli_param (UNFORMAT);
@@ -647,7 +659,7 @@ bfd_cli_udp_session_set_flags (vlib_main_t * vm, unformat_input_t * input,
       if (!something_parsed)
 	{
 	  ret = clib_error_return (0, "Unknown input `%U'",
-				   format_unformat_error, input);
+				   format_unformat_error, line_input);
 	  goto out;
 	}
     }
@@ -700,10 +712,12 @@ VLIB_CLI_COMMAND (bfd_cli_udp_session_set_flags_command, static) = {
 /* *INDENT-ON* */
 
 static clib_error_t *
-bfd_cli_udp_session_auth_activate (vlib_main_t * vm, unformat_input_t * input,
+bfd_cli_udp_session_auth_activate (vlib_main_t * vm,
+				   unformat_input_t * input,
 				   CLIB_UNUSED (vlib_cli_command_t * lmd))
 {
   clib_error_t *ret = NULL;
+  unformat_input_t _line_input, *line_input = &_line_input;
 #define foreach_bfd_cli_udp_session_auth_activate_cli_param(F)    \
   F (u32, sw_if_index, INTERFACE_STR, mandatory, "%U",            \
      unformat_vnet_sw_interface, &vnet_main)                      \
@@ -717,7 +731,11 @@ bfd_cli_udp_session_auth_activate (vlib_main_t * vm, unformat_input_t * input,
 
   foreach_bfd_cli_udp_session_auth_activate_cli_param (DECLARE);
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
       int something_parsed = 0;
       foreach_bfd_cli_udp_session_auth_activate_cli_param (UNFORMAT);
@@ -725,7 +743,7 @@ bfd_cli_udp_session_auth_activate (vlib_main_t * vm, unformat_input_t * input,
       if (!something_parsed)
 	{
 	  ret = clib_error_return (0, "Unknown input `%U'",
-				   format_unformat_error, input);
+				   format_unformat_error, line_input);
 	  goto out;
 	}
     }
@@ -796,6 +814,7 @@ bfd_cli_udp_session_auth_deactivate (vlib_main_t *vm, unformat_input_t *input,
                                      CLIB_UNUSED (vlib_cli_command_t *lmd))
 {
   clib_error_t *ret = NULL;
+  unformat_input_t _line_input, *line_input = &_line_input;
 #define foreach_bfd_cli_udp_session_auth_deactivate_cli_param(F)  \
   F (u32, sw_if_index, INTERFACE_STR, mandatory, "%U",            \
      unformat_vnet_sw_interface, &vnet_main)                      \
@@ -807,7 +826,11 @@ bfd_cli_udp_session_auth_deactivate (vlib_main_t *vm, unformat_input_t *input,
 
   foreach_bfd_cli_udp_session_auth_deactivate_cli_param (DECLARE);
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
       int something_parsed = 0;
       foreach_bfd_cli_udp_session_auth_deactivate_cli_param (UNFORMAT);
@@ -875,13 +898,18 @@ bfd_cli_udp_set_echo_source (vlib_main_t * vm, unformat_input_t * input,
 			     CLIB_UNUSED (vlib_cli_command_t * lmd))
 {
   clib_error_t *ret = NULL;
+  unformat_input_t _line_input, *line_input = &_line_input;
 #define foreach_bfd_cli_udp_set_echo_source_cli_param(F) \
   F (u32, sw_if_index, INTERFACE_STR, mandatory, "%U",   \
      unformat_vnet_sw_interface, &vnet_main)
 
   foreach_bfd_cli_udp_set_echo_source_cli_param (DECLARE);
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
       int something_parsed = 0;
       foreach_bfd_cli_udp_set_echo_source_cli_param (UNFORMAT);
@@ -889,7 +917,7 @@ bfd_cli_udp_set_echo_source (vlib_main_t * vm, unformat_input_t * input,
       if (!something_parsed)
 	{
 	  ret = clib_error_return (0, "Unknown input `%U'",
-				   format_unformat_error, input);
+				   format_unformat_error, line_input);
 	  goto out;
 	}
     }

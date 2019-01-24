@@ -24,6 +24,9 @@
 #include <vnet/api_errno.h>
 #include <vnet/dhcp/dhcp_proxy.h>
 #include <vnet/dhcp/client.h>
+#include <vnet/dhcp/dhcp6_pd_client_dp.h>
+#include <vnet/dhcp/dhcp6_ia_na_client_dp.h>
+#include <vnet/dhcp/dhcp6_client_common_dp.h>
 #include <vnet/fib/fib_table.h>
 
 #include <vnet/vnet_msg_enum.h>
@@ -48,21 +51,30 @@
 _(DHCP_PROXY_CONFIG,dhcp_proxy_config)            \
 _(DHCP_PROXY_DUMP,dhcp_proxy_dump)                \
 _(DHCP_PROXY_SET_VSS,dhcp_proxy_set_vss)          \
-_(DHCP_CLIENT_CONFIG, dhcp_client_config)
+_(DHCP_CLIENT_CONFIG, dhcp_client_config)         \
+_(DHCP_CLIENT_DUMP, dhcp_client_dump)             \
+_(WANT_DHCP6_PD_REPLY_EVENTS, want_dhcp6_pd_reply_events)               \
+_(DHCP6_PD_SEND_CLIENT_MESSAGE, dhcp6_pd_send_client_message)           \
+_(WANT_DHCP6_REPLY_EVENTS, want_dhcp6_reply_events)               \
+_(DHCP6_SEND_CLIENT_MESSAGE, dhcp6_send_client_message)           \
+_(DHCP6_CLIENTS_ENABLE_DISABLE, dhcp6_clients_enable_disable)     \
+_(DHCP6_DUID_LL_SET, dhcp6_duid_ll_set)
 
 
 static void
 vl_api_dhcp_proxy_set_vss_t_handler (vl_api_dhcp_proxy_set_vss_t * mp)
 {
   vl_api_dhcp_proxy_set_vss_reply_t *rmp;
+  u8 *vpn_ascii_id;
   int rv;
 
-  rv = dhcp_proxy_set_vss ((mp->is_ipv6 ?
-			    FIB_PROTOCOL_IP6 :
-			    FIB_PROTOCOL_IP4),
-			   ntohl (mp->tbl_id),
-			   ntohl (mp->oui),
-			   ntohl (mp->fib_id), (int) mp->is_add == 0);
+  mp->vpn_ascii_id[sizeof (mp->vpn_ascii_id) - 1] = 0;
+  vpn_ascii_id = format (0, "%s", mp->vpn_ascii_id);
+  rv =
+    dhcp_proxy_set_vss ((mp->is_ipv6 ? FIB_PROTOCOL_IP6 : FIB_PROTOCOL_IP4),
+			ntohl (mp->tbl_id), mp->vss_type, vpn_ascii_id,
+			ntohl (mp->oui), ntohl (mp->vpn_index),
+			mp->is_add == 0);
 
   REPLY_MACRO (VL_API_DHCP_PROXY_SET_VSS_REPLY);
 }
@@ -108,14 +120,14 @@ static void vl_api_dhcp_proxy_config_t_handler
 static void
 vl_api_dhcp_proxy_dump_t_handler (vl_api_dhcp_proxy_dump_t * mp)
 {
-  unix_shared_memory_queue_t *q;
+  vl_api_registration_t *reg;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    return;
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;;
 
   dhcp_proxy_dump ((mp->is_ip6 == 1 ?
-		    FIB_PROTOCOL_IP6 : FIB_PROTOCOL_IP4), q, mp->context);
+		    FIB_PROTOCOL_IP6 : FIB_PROTOCOL_IP4), reg, mp->context);
 }
 
 void
@@ -123,7 +135,7 @@ dhcp_send_details (fib_protocol_t proto,
 		   void *opaque, u32 context, dhcp_proxy_t * proxy)
 {
   vl_api_dhcp_proxy_details_t *mp;
-  unix_shared_memory_queue_t *q = opaque;
+  vl_api_registration_t *reg = opaque;
   vl_api_dhcp_server_t *v_server;
   dhcp_server_t *server;
   fib_table_t *s_fib;
@@ -136,7 +148,7 @@ dhcp_send_details (fib_protocol_t proto,
   mp = vl_msg_api_alloc (n);
   if (!mp)
     return;
-  memset (mp, 0, n);
+  clib_memset (mp, 0, n);
   mp->_vl_msg_id = ntohs (VL_API_DHCP_PROXY_DETAILS);
   mp->context = context;
   mp->count = count;
@@ -147,11 +159,27 @@ dhcp_send_details (fib_protocol_t proto,
 
   vss = dhcp_get_vss_info (&dhcp_proxy_main, proxy->rx_fib_index, proto);
 
-  if (NULL != vss)
+  if (vss)
     {
-      mp->vss_oui = htonl (vss->oui);
-      mp->vss_fib_id = htonl (vss->fib_id);
+      mp->vss_type = vss->vss_type;
+      if (vss->vss_type == VSS_TYPE_ASCII)
+	{
+	  u32 id_len = vec_len (vss->vpn_ascii_id);
+	  clib_memcpy (mp->vss_vpn_ascii_id, vss->vpn_ascii_id, id_len);
+	}
+      else if (vss->vss_type == VSS_TYPE_VPN_ID)
+	{
+	  u32 oui = ((u32) vss->vpn_id[0] << 16) + ((u32) vss->vpn_id[1] << 8)
+	    + ((u32) vss->vpn_id[2]);
+	  u32 fib_id = ((u32) vss->vpn_id[3] << 24) +
+	    ((u32) vss->vpn_id[4] << 16) + ((u32) vss->vpn_id[5] << 8) +
+	    ((u32) vss->vpn_id[6]);
+	  mp->vss_oui = htonl (oui);
+	  mp->vss_fib_id = htonl (fib_id);
+	}
     }
+  else
+    mp->vss_type = VSS_TYPE_INVALID;
 
   vec_foreach_index (count, proxy->dhcp_servers)
   {
@@ -182,39 +210,72 @@ dhcp_send_details (fib_protocol_t proto,
       /* put the address in the first bytes */
       memcpy (mp->dhcp_src_address, &proxy->dhcp_src_address.ip4, 4);
     }
-  vl_msg_api_send_shmem (q, (u8 *) & mp);
+  vl_api_send_msg (reg, (u8 *) mp);
 }
 
-void
-dhcp_compl_event_callback (u32 client_index, u32 pid, u8 * hostname,
-			   u8 mask_width, u8 is_ipv6, u8 * host_address,
-			   u8 * router_address, u8 * host_mac)
+static void
+dhcp_client_lease_encode (vl_api_dhcp_lease_t * lease,
+			  const dhcp_client_t * client)
 {
-  unix_shared_memory_queue_t *q;
-  vl_api_dhcp_compl_event_t *mp;
-  u32 len;
+  size_t len;
 
-  q = vl_api_client_index_to_input_queue (client_index);
-  if (!q)
+  lease->is_ipv6 = 0;		// only support IPv6 clients
+  lease->sw_if_index = ntohl (client->sw_if_index);
+  lease->state = client->state;
+  len = clib_min (sizeof (lease->hostname) - 1, vec_len (client->hostname));
+  clib_memcpy (&lease->hostname, client->hostname, len);
+  lease->hostname[len] = 0;
+
+  lease->mask_width = client->subnet_mask_width;
+  clib_memcpy (&lease->host_address[0], (u8 *) & client->leased_address, 4);
+  clib_memcpy (&lease->router_address[0], (u8 *) & client->router_address, 4);
+
+  if (NULL != client->l2_rewrite)
+    clib_memcpy (&lease->host_mac[0], client->l2_rewrite + 6, 6);
+}
+
+static void
+dhcp_client_data_encode (vl_api_dhcp_client_t * vclient,
+			 const dhcp_client_t * client)
+{
+  size_t len;
+
+  vclient->sw_if_index = ntohl (client->sw_if_index);
+  len = clib_min (sizeof (vclient->hostname) - 1, vec_len (client->hostname));
+  clib_memcpy (&vclient->hostname, client->hostname, len);
+  vclient->hostname[len] = 0;
+
+  len = clib_min (sizeof (vclient->id) - 1,
+		  vec_len (client->client_identifier));
+  clib_memcpy (&vclient->id, client->client_identifier, len);
+  vclient->id[len] = 0;
+
+  if (NULL != client->event_callback)
+    vclient->want_dhcp_event = 1;
+  else
+    vclient->want_dhcp_event = 0;
+  vclient->set_broadcast_flag = client->set_broadcast_flag;
+  vclient->pid = client->pid;
+}
+
+static void
+dhcp_compl_event_callback (u32 client_index, const dhcp_client_t * client)
+{
+  vl_api_registration_t *reg;
+  vl_api_dhcp_compl_event_t *mp;
+
+  reg = vl_api_client_index_to_registration (client_index);
+  if (!reg)
     return;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
   mp->client_index = client_index;
-  mp->pid = pid;
-  mp->is_ipv6 = is_ipv6;
-  len = (vec_len (hostname) < 63) ? vec_len (hostname) : 63;
-  clib_memcpy (&mp->hostname, hostname, len);
-  mp->hostname[len] = 0;
-  mp->mask_width = mask_width;
-  clib_memcpy (&mp->host_address[0], host_address, 16);
-  clib_memcpy (&mp->router_address[0], router_address, 16);
-
-  if (NULL != host_mac)
-    clib_memcpy (&mp->host_mac[0], host_mac, 6);
+  mp->pid = client->pid;
+  dhcp_client_lease_encode (&mp->lease, client);
 
   mp->_vl_msg_id = ntohs (VL_API_DHCP_COMPL_EVENT);
 
-  vl_msg_api_send_shmem (q, (u8 *) & mp);
+  vl_api_send_msg (reg, (u8 *) mp);
 }
 
 static void vl_api_dhcp_client_config_t_handler
@@ -222,19 +283,74 @@ static void vl_api_dhcp_client_config_t_handler
 {
   vlib_main_t *vm = vlib_get_main ();
   vl_api_dhcp_client_config_reply_t *rmp;
+  u32 sw_if_index;
   int rv = 0;
 
-  VALIDATE_SW_IF_INDEX (mp);
+  sw_if_index = ntohl (mp->client.sw_if_index);
+  if (!vnet_sw_if_index_is_api_valid (sw_if_index))
+    {
+      rv = VNET_API_ERROR_INVALID_SW_IF_INDEX;
+      goto bad_sw_if_index;
+    }
 
-  rv = dhcp_client_config (vm, ntohl (mp->sw_if_index),
-			   mp->hostname, mp->client_id,
-			   mp->is_add, mp->client_index,
-			   mp->want_dhcp_event ? dhcp_compl_event_callback :
-			   NULL, mp->pid);
+  rv = dhcp_client_config (mp->is_add,
+			   mp->client_index,
+			   vm,
+			   sw_if_index,
+			   mp->client.hostname,
+			   mp->client.id,
+			   (mp->client.want_dhcp_event ?
+			    dhcp_compl_event_callback :
+			    NULL),
+			   mp->client.set_broadcast_flag, mp->client.pid);
 
   BAD_SW_IF_INDEX_LABEL;
 
   REPLY_MACRO (VL_API_DHCP_CLIENT_CONFIG_REPLY);
+}
+
+typedef struct dhcp_client_send_walk_ctx_t_
+{
+  vl_api_registration_t *reg;
+  u32 context;
+} dhcp_client_send_walk_ctx_t;
+
+static int
+send_dhcp_client_entry (const dhcp_client_t * client, void *arg)
+{
+  dhcp_client_send_walk_ctx_t *ctx;
+  vl_api_dhcp_client_details_t *mp;
+
+  ctx = arg;
+
+  mp = vl_msg_api_alloc (sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
+
+  mp->_vl_msg_id = ntohs (VL_API_DHCP_CLIENT_DETAILS);
+  mp->context = ctx->context;
+
+  dhcp_client_data_encode (&mp->client, client);
+  dhcp_client_lease_encode (&mp->lease, client);
+
+  vl_api_send_msg (ctx->reg, (u8 *) mp);
+
+  return (1);
+}
+
+static void
+vl_api_dhcp_client_dump_t_handler (vl_api_dhcp_client_dump_t * mp)
+{
+  vl_api_registration_t *reg;
+
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  dhcp_client_send_walk_ctx_t ctx = {
+    .reg = reg,
+    .context = mp->context,
+  };
+  dhcp_client_walk (send_dhcp_client_entry, &ctx);
 }
 
 /*
@@ -275,6 +391,11 @@ dhcp_api_hookup (vlib_main_t * vm)
    * Set up the (msg_name, crc, message-id) table
    */
   setup_message_id_table (am);
+
+  dhcp6_pd_set_publisher_node (dhcp6_pd_reply_process_node.index,
+			       DHCP6_PD_DP_REPLY_REPORT);
+  dhcp6_set_publisher_node (dhcp6_reply_process_node.index,
+			    DHCP6_DP_REPLY_REPORT);
 
   return 0;
 }

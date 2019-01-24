@@ -69,7 +69,7 @@ adj_mcast_add_or_lock (fib_protocol_t proto,
 	adj_mcasts[proto][sw_if_index] = adj_get_index(adj);
         adj_lock(adj_get_index(adj));
 
-	vnet_rewrite_init(vnm, sw_if_index,
+	vnet_rewrite_init(vnm, sw_if_index, link_type,
 			  adj_get_mcast_node(proto),
 			  vnet_tx_node_index_for_sw_interface(vnm, sw_if_index),
 			  &adj->rewrite_header);
@@ -101,8 +101,7 @@ adj_mcast_add_or_lock (fib_protocol_t proto,
 void
 adj_mcast_update_rewrite (adj_index_t adj_index,
                           u8 *rewrite,
-                          u8 offset,
-                          u32 mask)
+                          u8 offset)
 {
     ip_adjacency_t *adj;
 
@@ -121,12 +120,9 @@ adj_mcast_update_rewrite (adj_index_t adj_index,
                                         adj->rewrite_header.sw_if_index),
                                     rewrite);
     /*
-     * set the fields corresponding to the mcast IP address rewrite
-     * The mask must be stored in network byte order, since the packet's
-     * IP address will also be in network order.
+     * set the offset corresponding to the mcast IP address rewrite
      */
     adj->rewrite_header.dst_mcast_offset = offset;
-    adj->rewrite_header.dst_mcast_mask = clib_host_to_net_u32(mask);
 }
 
 /**
@@ -139,6 +135,7 @@ adj_mcast_update_rewrite (adj_index_t adj_index,
 void
 adj_mcast_midchain_update_rewrite (adj_index_t adj_index,
                                    adj_midchain_fixup_t fixup,
+                                   const void *fixup_data,
                                    adj_flags_t flags,
                                    u8 *rewrite,
                                    u8 offset,
@@ -160,7 +157,7 @@ adj_mcast_midchain_update_rewrite (adj_index_t adj_index,
      */
     ASSERT(NULL != rewrite);
 
-    adj_midchain_setup(adj_index, fixup, flags);
+    adj_midchain_setup(adj_index, fixup, fixup_data, flags);
 
     /*
      * update the adj's rewrite string and build the arc
@@ -173,13 +170,7 @@ adj_mcast_midchain_update_rewrite (adj_index_t adj_index,
                                         adj->rewrite_header.sw_if_index),
                                     rewrite);
 
-    /*
-     * set the fields corresponding to the mcast IP address rewrite
-     * The mask must be stored in network byte order, since the packet's
-     * IP address will also be in network order.
-     */
     adj->rewrite_header.dst_mcast_offset = offset;
-    adj->rewrite_header.dst_mcast_mask = clib_host_to_net_u32(mask);
 }
 
 void
@@ -229,12 +220,14 @@ VNET_SW_INTERFACE_ADMIN_UP_DOWN_FUNCTION(adj_mcast_interface_state_change);
  * @brief Invoked on each SW interface of a HW interface when the
  * HW interface state changes
  */
-static void
+static walk_rc_t
 adj_mcast_hw_sw_interface_state_change (vnet_main_t * vnm,
                                         u32 sw_if_index,
                                         void *arg)
 {
     adj_mcast_interface_state_change(vnm, sw_if_index, (uword) arg);
+
+    return (WALK_CONTINUE);
 }
 
 /**
@@ -354,14 +347,13 @@ format_adj_mcast_midchain (u8* s, va_list *ap)
 {
     index_t index = va_arg(*ap, index_t);
     CLIB_UNUSED(u32 indent) = va_arg(*ap, u32);
-    vnet_main_t * vnm = vnet_get_main();
     ip_adjacency_t * adj = adj_get(index);
 
     s = format(s, "%U-mcast-midchain: ",
                format_fib_protocol, adj->ia_nh_proto);
     s = format (s, "%U",
 		format_vnet_rewrite,
-		vnm->vlib_main, &adj->rewrite_header,
+		&adj->rewrite_header,
                 sizeof (adj->rewrite_data), 0);
     s = format (s, "\n%Ustacked-on:\n%U%U",
 		format_white_space, indent,
@@ -387,11 +379,13 @@ const static dpo_vft_t adj_mcast_dpo_vft = {
     .dv_lock = adj_dpo_lock,
     .dv_unlock = adj_dpo_unlock,
     .dv_format = format_adj_mcast,
+    .dv_get_urpf = adj_dpo_get_urpf,
 };
 const static dpo_vft_t adj_mcast_midchain_dpo_vft = {
     .dv_lock = adj_dpo_lock,
     .dv_unlock = adj_dpo_unlock,
     .dv_format = format_adj_mcast_midchain,
+    .dv_get_urpf = adj_dpo_get_urpf,
 };
 
 /**

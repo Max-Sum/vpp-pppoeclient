@@ -65,7 +65,7 @@ format_ppp_header_with_length (u8 * s, va_list * args)
   ppp_header_t *h = va_arg (*args, ppp_header_t *);
   u32 max_header_bytes = va_arg (*args, u32);
   ppp_protocol_t p = clib_net_to_host_u16 (h->protocol);
-  uword indent, header_bytes;
+  u32 indent, header_bytes;
 
   header_bytes = sizeof (h[0]);
   if (max_header_bytes != 0 && header_bytes > max_header_bytes)
@@ -229,7 +229,7 @@ ppp_init (vlib_main_t * vm)
 {
   ppp_main_t *pm = &ppp_main;
 
-  memset (pm, 0, sizeof (pm[0]));
+  clib_memset (pm, 0, sizeof (pm[0]));
   pm->vlib_main = vm;
 
   pm->protocol_info_by_name = hash_create_string (0, sizeof (uword));
@@ -243,14 +243,6 @@ ppp_init (vlib_main_t * vm)
 }
 
 VLIB_INIT_FUNCTION (ppp_init);
-
-ppp_main_t *
-ppp_get_main (vlib_main_t * vm)
-{
-  vlib_call_init_function (vm, ppp_init);
-  return &ppp_main;
-}
-
 
 /*
  * fd.io coding-style-patch-verification: ON

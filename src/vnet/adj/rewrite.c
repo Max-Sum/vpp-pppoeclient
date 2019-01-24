@@ -69,7 +69,7 @@ format_vnet_rewrite (u8 * s, va_list * args)
 {
   vnet_rewrite_header_t *rw = va_arg (*args, vnet_rewrite_header_t *);
   u32 max_data_bytes = va_arg (*args, u32);
-  CLIB_UNUSED (uword indent) = va_arg (*args, u32);
+  CLIB_UNUSED (u32 indent) = va_arg (*args, u32);
   vnet_main_t *vnm = vnet_get_main ();
 
   if (rw->sw_if_index != ~0)
@@ -77,15 +77,16 @@ format_vnet_rewrite (u8 * s, va_list * args)
       vnet_sw_interface_t *si;
       si = vnet_get_sw_interface_safe (vnm, rw->sw_if_index);
       if (NULL != si)
-	s = format (s, "%U: ", format_vnet_sw_interface_name, vnm, si);
+	s = format (s, "%U:", format_vnet_sw_interface_name, vnm, si);
       else
 	s = format (s, "DELETED:%d", rw->sw_if_index);
     }
 
+  s = format (s, " mtu:%d", rw->max_l3_packet_bytes);
+
   /* Format rewrite string. */
   if (rw->data_bytes > 0)
-
-    s = format (s, "%U",
+    s = format (s, " %U",
 		format_hex_bytes,
 		rw->data + max_data_bytes - rw->data_bytes, rw->data_bytes);
 
@@ -102,12 +103,22 @@ vnet_tx_node_index_for_sw_interface (vnet_main_t * vnm, u32 sw_if_index)
 void
 vnet_rewrite_init (vnet_main_t * vnm,
 		   u32 sw_if_index,
+		   vnet_link_t linkt,
 		   u32 this_node, u32 next_node, vnet_rewrite_header_t * rw)
 {
   rw->sw_if_index = sw_if_index;
   rw->next_index = vlib_node_add_next (vnm->vlib_main, this_node, next_node);
   rw->max_l3_packet_bytes =
-    vnet_sw_interface_get_mtu (vnm, sw_if_index, VLIB_TX);
+    vnet_sw_interface_get_mtu (vnm, sw_if_index, vnet_link_to_mtu (linkt));
+}
+
+void
+vnet_rewrite_update_mtu (vnet_main_t * vnm, vnet_link_t linkt,
+			 vnet_rewrite_header_t * rw)
+{
+  rw->max_l3_packet_bytes =
+    vnet_sw_interface_get_mtu (vnm, rw->sw_if_index,
+			       vnet_link_to_mtu (linkt));
 }
 
 void
@@ -125,7 +136,7 @@ vnet_rewrite_for_sw_interface (vnet_main_t * vnm,
     vnet_get_hw_interface_class (vnm, hw->hw_class_index);
   u8 *rewrite = NULL;
 
-  vnet_rewrite_init (vnm, sw_if_index, node_index,
+  vnet_rewrite_init (vnm, sw_if_index, link_type, node_index,
 		     vnet_tx_node_index_for_sw_interface (vnm, sw_if_index),
 		     rw);
 
@@ -155,7 +166,8 @@ vnet_rewrite_for_tunnel (vnet_main_t * vnm,
   rw->sw_if_index = tx_sw_if_index;
   rw->next_index = vlib_node_add_next (vnm->vlib_main, rewrite_node_index,
 				       post_rewrite_node_index);
-  rw->max_l3_packet_bytes = (u16) ~ 0;	/* we can't know at this point */
+  /* we can't know at this point */
+  rw->max_l3_packet_bytes = (u16) ~ 0;
 
   ASSERT (rewrite_length < sizeof (adj->rewrite_data));
   /* Leave room for ethernet + VLAN tag */

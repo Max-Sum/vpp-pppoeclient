@@ -250,7 +250,7 @@ VLIB_REGISTER_NODE (ip6_icmp_input_node) = {
 
   .n_next_nodes = 1,
   .next_nodes = {
-    [ICMP_INPUT_NEXT_DROP] = "error-drop",
+    [ICMP_INPUT_NEXT_DROP] = "ip6-drop",
   },
 };
 /* *INDENT-ON* */
@@ -341,58 +341,14 @@ ip6_icmp_echo_request (vlib_main_t * vm,
 	  ip0->hop_limit = im->host_config.ttl;
 	  ip1->hop_limit = im->host_config.ttl;
 
-	  if (ip6_address_is_link_local_unicast (&ip0->dst_address))
-	    {
-	      ethernet_header_t *eth0;
-	      u8 tmp_mac[6];
-	      /* For link local, reuse current MAC header by sawpping
-	       *  SMAC to DMAC instead of IP6 lookup since link local
-	       *  is not in the IP6 FIB */
-	      vlib_buffer_reset (p0);
-	      eth0 = vlib_buffer_get_current (p0);
-	      clib_memcpy (tmp_mac, eth0->dst_address, 6);
-	      clib_memcpy (eth0->dst_address, eth0->src_address, 6);
-	      clib_memcpy (eth0->src_address, tmp_mac, 6);
-	      vnet_buffer (p0)->sw_if_index[VLIB_TX] =
-		vnet_buffer (p0)->sw_if_index[VLIB_RX];
-	      next0 = ICMP6_ECHO_REQUEST_NEXT_OUTPUT;
-	    }
-	  else
-	    {
-	      /* Determine the correct lookup fib indices... */
-	      fib_index0 = vec_elt (im->fib_index_by_sw_if_index,
-				    vnet_buffer (p0)->sw_if_index[VLIB_RX]);
-	      vnet_buffer (p0)->sw_if_index[VLIB_TX] = fib_index0;
-	    }
-
-	  if (ip6_address_is_link_local_unicast (&ip1->dst_address))
-	    {
-	      ethernet_header_t *eth1;
-	      u8 tmp_mac[6];
-	      /* For link local, reuse current MAC header by sawpping
-	       *  SMAC to DMAC instead of IP6 lookup since link local
-	       *  is not in the IP6 FIB */
-	      vlib_buffer_reset (p1);
-	      eth1 = vlib_buffer_get_current (p1);
-	      clib_memcpy (tmp_mac, eth1->dst_address, 6);
-	      clib_memcpy (eth1->dst_address, eth1->src_address, 6);
-	      clib_memcpy (eth1->src_address, tmp_mac, 6);
-	      vnet_buffer (p1)->sw_if_index[VLIB_TX] =
-		vnet_buffer (p1)->sw_if_index[VLIB_RX];
-	      next1 = ICMP6_ECHO_REQUEST_NEXT_OUTPUT;
-	    }
-	  else
-	    {
-	      /* Determine the correct lookup fib indices... */
-	      fib_index1 = vec_elt (im->fib_index_by_sw_if_index,
-				    vnet_buffer (p1)->sw_if_index[VLIB_RX]);
-	      vnet_buffer (p1)->sw_if_index[VLIB_TX] = fib_index1;
-	    }
-
-	  vnet_buffer (p0)->sw_if_index[VLIB_RX]
-	    = vnet_main.local_interface_sw_if_index;
-	  vnet_buffer (p1)->sw_if_index[VLIB_RX]
-	    = vnet_main.local_interface_sw_if_index;
+	  /* Determine the correct lookup fib indices... */
+	  fib_index0 = vec_elt (im->fib_index_by_sw_if_index,
+				vnet_buffer (p0)->sw_if_index[VLIB_RX]);
+	  vnet_buffer (p0)->sw_if_index[VLIB_TX] = fib_index0;
+	  /* Determine the correct lookup fib indices... */
+	  fib_index1 = vec_elt (im->fib_index_by_sw_if_index,
+				vnet_buffer (p1)->sw_if_index[VLIB_RX]);
+	  vnet_buffer (p1)->sw_if_index[VLIB_TX] = fib_index1;
 
 	  /* verify speculative enqueues, maybe switch current next frame */
 	  /* if next0==next1==next_index then nothing special needs to be done */
@@ -441,30 +397,11 @@ ip6_icmp_echo_request (vlib_main_t * vm,
 
 	  ip0->hop_limit = im->host_config.ttl;
 
-	  if (ip6_address_is_link_local_unicast (&ip0->dst_address))
-	    {
-	      ethernet_header_t *eth0;
-	      u8 tmp_mac[6];
-	      /* For link local, reuse current MAC header by sawpping
-	       *  SMAC to DMAC instead of IP6 lookup since link local
-	       *  is not in the IP6 FIB */
-	      vlib_buffer_reset (p0);
-	      eth0 = vlib_buffer_get_current (p0);
-	      clib_memcpy (tmp_mac, eth0->dst_address, 6);
-	      clib_memcpy (eth0->dst_address, eth0->src_address, 6);
-	      clib_memcpy (eth0->src_address, tmp_mac, 6);
-	      vnet_buffer (p0)->sw_if_index[VLIB_TX] =
-		vnet_buffer (p0)->sw_if_index[VLIB_RX];
-	      next0 = ICMP6_ECHO_REQUEST_NEXT_OUTPUT;
-	    }
-	  else
-	    {
-	      fib_index0 = vec_elt (im->fib_index_by_sw_if_index,
-				    vnet_buffer (p0)->sw_if_index[VLIB_RX]);
-	      vnet_buffer (p0)->sw_if_index[VLIB_TX] = fib_index0;
-	    }
-	  vnet_buffer (p0)->sw_if_index[VLIB_RX]
-	    = vnet_main.local_interface_sw_if_index;
+	  /* if the packet is link local, we'll bounce through the link-local
+	   * table with the RX interface correctly set */
+	  fib_index0 = vec_elt (im->fib_index_by_sw_if_index,
+				vnet_buffer (p0)->sw_if_index[VLIB_RX]);
+	  vnet_buffer (p0)->sw_if_index[VLIB_TX] = fib_index0;
 
 	  /* Verify speculative enqueue, maybe switch current next frame */
 	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
@@ -587,15 +524,27 @@ ip6_icmp_error (vlib_main_t * vm,
 		{
 		  b = vlib_get_buffer (vm, b->next_buffer);
 		  b->current_length = 0;
+		  // XXX: Buffer leak???
 		}
 	    }
+
+	  /* Add IP header and ICMPv6 header including a 4 byte data field */
+	  int headroom = sizeof (ip6_header_t) + sizeof (icmp46_header_t) + 4;
+
+	  /* Verify that we're not falling off the edge */
+	  if (p0->current_data - headroom < -VLIB_BUFFER_PRE_DATA_SIZE)
+	    {
+	      next0 = IP6_ICMP_ERROR_NEXT_DROP;
+	      error0 = ICMP6_ERROR_DROP;
+	      goto error;
+	    }
+
+	  vlib_buffer_advance (p0, -headroom);
+	  vnet_buffer (p0)->sw_if_index[VLIB_TX] = ~0;
+	  p0->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
 	  p0->current_length =
 	    p0->current_length > 1280 ? 1280 : p0->current_length;
 
-	  /* Add IP header and ICMPv6 header including a 4 byte data field */
-	  vlib_buffer_advance (p0,
-			       -sizeof (ip6_header_t) -
-			       sizeof (icmp46_header_t) - 4);
 	  out_ip0 = vlib_buffer_get_current (p0);
 	  icmp0 = (icmp46_header_t *) & out_ip0[1];
 
@@ -622,6 +571,7 @@ ip6_icmp_error (vlib_main_t * vm,
 	    {
 	      next0 = IP6_ICMP_ERROR_NEXT_DROP;
 	      error0 = ICMP6_ERROR_DROP;
+	      goto error;
 	    }
 
 	  /* Fill icmp header fields */
@@ -634,11 +584,11 @@ ip6_icmp_error (vlib_main_t * vm,
 	    ip6_tcp_udp_icmp_compute_checksum (vm, p0, out_ip0,
 					       &bogus_length);
 
-
-
 	  /* Update error status */
 	  if (error0 == ICMP6_ERROR_NONE)
 	    error0 = icmp6_icmp_type_to_error (icmp0->type);
+
+	error:
 	  vlib_error_count (vm, node->node_index, error0, 1);
 
 	  /* Verify speculative enqueue, maybe switch current next frame */
@@ -836,24 +786,25 @@ icmp6_init (vlib_main_t * vm)
   foreach_icmp6_code;
 #undef _
 
-  memset (cm->input_next_index_by_type,
-	  ICMP_INPUT_NEXT_DROP, sizeof (cm->input_next_index_by_type));
-  memset (cm->max_valid_code_by_type, 0, sizeof (cm->max_valid_code_by_type));
+  clib_memset (cm->input_next_index_by_type,
+	       ICMP_INPUT_NEXT_DROP, sizeof (cm->input_next_index_by_type));
+  clib_memset (cm->max_valid_code_by_type, 0,
+	       sizeof (cm->max_valid_code_by_type));
 
 #define _(a,n,t) cm->max_valid_code_by_type[ICMP6_##a] = clib_max (cm->max_valid_code_by_type[ICMP6_##a], n);
   foreach_icmp6_code;
 #undef _
 
-  memset (cm->min_valid_hop_limit_by_type, 0,
-	  sizeof (cm->min_valid_hop_limit_by_type));
+  clib_memset (cm->min_valid_hop_limit_by_type, 0,
+	       sizeof (cm->min_valid_hop_limit_by_type));
   cm->min_valid_hop_limit_by_type[ICMP6_router_solicitation] = 255;
   cm->min_valid_hop_limit_by_type[ICMP6_router_advertisement] = 255;
   cm->min_valid_hop_limit_by_type[ICMP6_neighbor_solicitation] = 255;
   cm->min_valid_hop_limit_by_type[ICMP6_neighbor_advertisement] = 255;
   cm->min_valid_hop_limit_by_type[ICMP6_redirect] = 255;
 
-  memset (cm->min_valid_length_by_type, sizeof (icmp46_header_t),
-	  sizeof (cm->min_valid_length_by_type));
+  clib_memset (cm->min_valid_length_by_type, sizeof (icmp46_header_t),
+	       sizeof (cm->min_valid_length_by_type));
   cm->min_valid_length_by_type[ICMP6_router_solicitation] =
     sizeof (icmp6_neighbor_discovery_header_t);
   cm->min_valid_length_by_type[ICMP6_router_advertisement] =

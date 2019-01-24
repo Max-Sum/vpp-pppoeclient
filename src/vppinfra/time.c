@@ -91,7 +91,7 @@ clock_frequency_from_proc_filesystem (void)
   if (fd < 0)
     return cpu_freq;
 
-  unformat_init_unix_file (&input, fd);
+  unformat_init_clib_file (&input, fd);
 
   ppc_timebase = 0;
   while (unformat_check_input (&input) != UNFORMAT_END_OF_INPUT)
@@ -120,7 +120,7 @@ clock_frequency_from_proc_filesystem (void)
 static f64
 clock_frequency_from_sys_filesystem (void)
 {
-  f64 cpu_freq;
+  f64 cpu_freq = 0.0;
   int fd;
   unformat_input_t input;
 
@@ -130,8 +130,8 @@ clock_frequency_from_sys_filesystem (void)
   if (fd < 0)
     goto done;
 
-  unformat_init_unix_file (&input, fd);
-  unformat (&input, "%f", &cpu_freq);
+  unformat_init_clib_file (&input, fd);
+  (void) unformat (&input, "%f", &cpu_freq);
   cpu_freq *= 1e3;		/* measured in kHz */
   unformat_free (&input);
   close (fd);
@@ -142,16 +142,19 @@ done:
 f64
 os_cpu_clock_frequency (void)
 {
+#if defined (__aarch64__)
+  /* The system counter increments at a fixed frequency. It is distributed
+   * to each core which has registers for reading the current counter value
+   * as well as the clock frequency. The system counter is not clocked at
+   * the same frequency as the core. */
+  u64 hz;
+  asm volatile ("mrs %0, cntfrq_el0":"=r" (hz));
+  return (f64) hz;
+#endif
   f64 cpu_freq;
 
   if (clib_cpu_supports_invariant_tsc ())
     return estimate_clock_frequency (1e-3);
-
-#if defined (__aarch64__)
-  u64 tsc;
-  asm volatile ("mrs %0, CNTFRQ_EL0":"=r" (tsc));
-  return (f64) tsc;
-#endif
 
   /* First try /sys version. */
   cpu_freq = clock_frequency_from_sys_filesystem ();
@@ -174,7 +177,7 @@ os_cpu_clock_frequency (void)
 void
 clib_time_init (clib_time_t * c)
 {
-  memset (c, 0, sizeof (c[0]));
+  clib_memset (c, 0, sizeof (c[0]));
   c->clocks_per_second = os_cpu_clock_frequency ();
   c->seconds_per_clock = 1 / c->clocks_per_second;
   c->log2_clocks_per_second = min_log2_u64 ((u64) c->clocks_per_second);
@@ -194,7 +197,7 @@ clib_time_verify_frequency (clib_time_t * c)
   f64 dtr = now_reference - c->last_verify_reference_time;
   f64 dtr_max;
   u64 dtc = c->last_cpu_time - c->last_verify_cpu_time;
-  f64 round_units = 100e5;
+  f64 new_clocks_per_second, delta;
 
   c->last_verify_cpu_time = c->last_cpu_time;
   c->last_verify_reference_time = now_reference;
@@ -214,8 +217,43 @@ clib_time_verify_frequency (clib_time_t * c)
       return;
     }
 
+  if (PREDICT_FALSE (c->round_to_units == 0.0))
+    {
+      f64 next_pow10, est_round_to_units;
+      /*
+       * Compute the first power of ten which is greater than
+       * 0.1% of the new clock rate. Save the result, and use it
+       * to round future results, so we don't end up calculating
+       * silly-looking clock rates.
+       */
+      est_round_to_units = ((f64) dtc / dtr) * 0.001;
+      next_pow10 = ceil (log10 (est_round_to_units));
+      c->round_to_units = pow (10.0, next_pow10);
+    }
+
+  /*
+   * Reject large frequency changes, another consequence of
+   * system clock changes particularly with old kernels.
+   */
+  new_clocks_per_second =
+    flt_round_nearest ((f64) dtc / (dtr * c->round_to_units))
+    * c->round_to_units;
+
+  delta = new_clocks_per_second - c->clocks_per_second;
+  if (delta < 0.0)
+    delta = -delta;
+
+  if (PREDICT_FALSE ((delta / c->clocks_per_second) > .01))
+    {
+      clib_warning ("Rejecting large frequency change of %.2f%%",
+		    (delta / c->clocks_per_second) * 100.0);
+      c->log2_clocks_per_frequency_verify = c->log2_clocks_per_second;
+      return;
+    }
+
   c->clocks_per_second =
-    flt_round_nearest ((f64) dtc / (dtr * round_units)) * round_units;
+    flt_round_nearest ((f64) dtc / (dtr * c->round_to_units))
+    * c->round_to_units;
   c->seconds_per_clock = 1 / c->clocks_per_second;
 
   /* Double time between verifies; max at 64 secs ~ 1 minute. */

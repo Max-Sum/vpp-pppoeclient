@@ -49,6 +49,7 @@
 #include <vnet/dpo/punt_dpo.h>
 #include <vnet/dpo/receive_dpo.h>
 #include <vnet/dpo/ip_null_dpo.h>
+#include <vnet/dpo/l3_proxy_dpo.h>
 #include <vnet/ip/ip6_neighbor.h>
 
 /**
@@ -136,7 +137,7 @@ ip_interface_address_add_del (ip_lookup_main_t * lm,
       u32 hi;			/* head index */
 
       pool_get (lm->if_address_pool, a);
-      memset (a, ~0, sizeof (a[0]));
+      clib_memset (a, ~0, sizeof (a[0]));
       ai = a - lm->if_address_pool;
 
       hi = pi = lm->if_address_pool_index_by_sw_if_index[sw_if_index];
@@ -252,47 +253,6 @@ format_ip_flow_hash_config (u8 * s, va_list * args)
 }
 
 u8 *
-format_ip_lookup_next (u8 * s, va_list * args)
-{
-  /* int promotion of ip_lookup_next_t */
-  ip_lookup_next_t n = va_arg (*args, int);
-  char *t = 0;
-
-  switch (n)
-    {
-    default:
-      s = format (s, "unknown %d", n);
-      return s;
-
-    case IP_LOOKUP_NEXT_DROP:
-      t = "drop";
-      break;
-    case IP_LOOKUP_NEXT_PUNT:
-      t = "punt";
-      break;
-    case IP_LOOKUP_NEXT_ARP:
-      t = "arp";
-      break;
-    case IP_LOOKUP_NEXT_MIDCHAIN:
-      t = "midchain";
-      break;
-    case IP_LOOKUP_NEXT_GLEAN:
-      t = "glean";
-      break;
-    case IP_LOOKUP_NEXT_MCAST:
-      t = "mcast";
-      break;
-    case IP_LOOKUP_NEXT_REWRITE:
-      break;
-    }
-
-  if (t)
-    vec_add (s, t, strlen (t));
-
-  return s;
-}
-
-u8 *
 format_ip_adjacency_packet_data (u8 * s, va_list * args)
 {
   u32 adj_index = va_arg (*args, u32);
@@ -360,29 +320,23 @@ const ip46_address_t zero_addr = {
 	     0, 0},
 };
 
-clib_error_t *
+static clib_error_t *
 vnet_ip_route_cmd (vlib_main_t * vm,
 		   unformat_input_t * main_input, vlib_cli_command_t * cmd)
 {
   unformat_input_t _line_input, *line_input = &_line_input;
-  fib_route_path_t *rpaths = NULL, rpath;
+  u32 table_id, is_del, fib_index, payload_proto;
   dpo_id_t dpo = DPO_INVALID, *dpos = NULL;
+  fib_route_path_t *rpaths = NULL, rpath;
   fib_prefix_t *prefixs = NULL, pfx;
-  mpls_label_t out_label, via_label;
   clib_error_t *error = NULL;
-  u32 weight, preference;
-  u32 table_id, is_del;
-  vnet_main_t *vnm;
-  u32 fib_index;
   f64 count;
   int i;
 
-  vnm = vnet_get_main ();
   is_del = 0;
   table_id = 0;
   count = 1;
-  memset (&pfx, 0, sizeof (pfx));
-  out_label = via_label = MPLS_LABEL_INVALID;
+  clib_memset (&pfx, 0, sizeof (pfx));
 
   /* Get a line of input. */
   if (!unformat_user (main_input, unformat_line_input, line_input))
@@ -390,156 +344,28 @@ vnet_ip_route_cmd (vlib_main_t * vm,
 
   while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
-      memset (&rpath, 0, sizeof (rpath));
+      clib_memset (&rpath, 0, sizeof (rpath));
 
       if (unformat (line_input, "table %d", &table_id))
 	;
-      else if (unformat (line_input, "resolve-via-host"))
-	{
-	  if (vec_len (rpaths) == 0)
-	    {
-	      error = clib_error_return (0, "Paths then flags");
-	      goto done;
-	    }
-	  rpaths[vec_len (rpaths) - 1].frp_flags |=
-	    FIB_ROUTE_PATH_RESOLVE_VIA_HOST;
-	}
-      else if (unformat (line_input, "resolve-via-attached"))
-	{
-	  if (vec_len (rpaths) == 0)
-	    {
-	      error = clib_error_return (0, "Paths then flags");
-	      goto done;
-	    }
-	  rpaths[vec_len (rpaths) - 1].frp_flags |=
-	    FIB_ROUTE_PATH_RESOLVE_VIA_ATTACHED;
-	}
-      else if (unformat (line_input, "out-labels"))
-	{
-	  if (vec_len (rpaths) == 0)
-	    {
-	      error = clib_error_return (0, "Paths then labels");
-	      goto done;
-	    }
-	  else
-	    {
-	      while (unformat (line_input, "%U",
-			       unformat_mpls_unicast_label, &out_label))
-		{
-		  vec_add1 (rpaths[vec_len (rpaths) - 1].frp_label_stack,
-			    out_label);
-		}
-	    }
-	}
-      else if (unformat (line_input, "via-label %U",
-			 unformat_mpls_unicast_label, &rpath.frp_local_label))
-	{
-	  rpath.frp_weight = 1;
-	  rpath.frp_eos = MPLS_NON_EOS;
-	  rpath.frp_proto = DPO_PROTO_MPLS;
-	  rpath.frp_sw_if_index = ~0;
-	  vec_add1 (rpaths, rpath);
-	}
       else if (unformat (line_input, "count %f", &count))
 	;
 
       else if (unformat (line_input, "%U/%d",
 			 unformat_ip4_address, &pfx.fp_addr.ip4, &pfx.fp_len))
 	{
-	  pfx.fp_proto = FIB_PROTOCOL_IP4;
+	  payload_proto = pfx.fp_proto = FIB_PROTOCOL_IP4;
 	  vec_add1 (prefixs, pfx);
 	}
       else if (unformat (line_input, "%U/%d",
 			 unformat_ip6_address, &pfx.fp_addr.ip6, &pfx.fp_len))
 	{
-	  pfx.fp_proto = FIB_PROTOCOL_IP6;
+	  payload_proto = pfx.fp_proto = FIB_PROTOCOL_IP6;
 	  vec_add1 (prefixs, pfx);
 	}
-      else if (unformat (line_input, "via %U %U",
-			 unformat_ip4_address,
-			 &rpath.frp_addr.ip4,
-			 unformat_vnet_sw_interface, vnm,
-			 &rpath.frp_sw_if_index))
-	{
-	  rpath.frp_weight = 1;
-	  rpath.frp_proto = DPO_PROTO_IP4;
-	  vec_add1 (rpaths, rpath);
-	}
-
-      else if (unformat (line_input, "via %U %U",
-			 unformat_ip6_address,
-			 &rpath.frp_addr.ip6,
-			 unformat_vnet_sw_interface, vnm,
-			 &rpath.frp_sw_if_index))
-	{
-	  rpath.frp_weight = 1;
-	  rpath.frp_proto = DPO_PROTO_IP6;
-	  vec_add1 (rpaths, rpath);
-	}
-      else if (unformat (line_input, "weight %u", &weight))
-	{
-	  ASSERT (vec_len (rpaths));
-	  rpaths[vec_len (rpaths) - 1].frp_weight = weight;
-	}
-      else if (unformat (line_input, "preference %u", &preference))
-	{
-	  ASSERT (vec_len (rpaths));
-	  rpaths[vec_len (rpaths) - 1].frp_preference = preference;
-	}
-      else if (unformat (line_input, "via %U next-hop-table %d",
-			 unformat_ip4_address,
-			 &rpath.frp_addr.ip4, &rpath.frp_fib_index))
-	{
-	  rpath.frp_weight = 1;
-	  rpath.frp_sw_if_index = ~0;
-	  rpath.frp_proto = DPO_PROTO_IP4;
-	  vec_add1 (rpaths, rpath);
-	}
-      else if (unformat (line_input, "via %U next-hop-table %d",
-			 unformat_ip6_address,
-			 &rpath.frp_addr.ip6, &rpath.frp_fib_index))
-	{
-	  rpath.frp_weight = 1;
-	  rpath.frp_sw_if_index = ~0;
-	  rpath.frp_proto = DPO_PROTO_IP6;
-	  vec_add1 (rpaths, rpath);
-	}
       else if (unformat (line_input, "via %U",
-			 unformat_ip4_address, &rpath.frp_addr.ip4))
+			 unformat_fib_route_path, &rpath, &payload_proto))
 	{
-	  /*
-	   * the recursive next-hops are by default in the same table
-	   * as the prefix
-	   */
-	  rpath.frp_fib_index = table_id;
-	  rpath.frp_weight = 1;
-	  rpath.frp_sw_if_index = ~0;
-	  rpath.frp_proto = DPO_PROTO_IP4;
-	  vec_add1 (rpaths, rpath);
-	}
-      else if (unformat (line_input, "via %U",
-			 unformat_ip6_address, &rpath.frp_addr.ip6))
-	{
-	  rpath.frp_fib_index = table_id;
-	  rpath.frp_weight = 1;
-	  rpath.frp_sw_if_index = ~0;
-	  rpath.frp_proto = DPO_PROTO_IP6;
-	  vec_add1 (rpaths, rpath);
-	}
-      else if (unformat (line_input,
-			 "lookup in table %d", &rpath.frp_fib_index))
-	{
-	  rpath.frp_proto = fib_proto_to_dpo (pfx.fp_proto);
-	  rpath.frp_sw_if_index = ~0;
-	  vec_add1 (rpaths, rpath);
-	}
-      else if (vec_len (prefixs) > 0 &&
-	       unformat (line_input, "via %U",
-			 unformat_vnet_sw_interface, vnm,
-			 &rpath.frp_sw_if_index))
-	{
-	  rpath.frp_weight = 1;
-	  rpath.frp_proto = fib_proto_to_dpo (prefixs[0].fp_proto);
 	  vec_add1 (rpaths, rpath);
 	}
       else if (vec_len (prefixs) > 0 &&
@@ -626,22 +452,6 @@ vnet_ip_route_cmd (vlib_main_t * vm,
 	    {
 	      for (j = 0; j < vec_len (rpaths); j++)
 		{
-		  u32 fi;
-		  /*
-		   * the CLI parsing stored table Ids, swap to FIB indicies
-		   */
-		  fi = fib_table_find (prefixs[i].fp_proto,
-				       rpaths[i].frp_fib_index);
-
-		  if (~0 == fi)
-		    {
-		      error =
-			clib_error_return (0, "Via table %d does not exist",
-					   rpaths[i].frp_fib_index);
-		      goto done;
-		    }
-		  rpaths[i].frp_fib_index = fi;
-
 		  fib_prefix_t rpfx = {
 		    .fp_len = prefixs[i].fp_len,
 		    .fp_proto = prefixs[i].fp_proto,
@@ -830,7 +640,7 @@ VLIB_CLI_COMMAND (vlib_cli_show_ip6_command, static) = {
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (ip_route_command, static) = {
   .path = "ip route",
-  .short_help = "ip route [add|del] [count <n>] <dst-ip-addr>/<width> [table <table-id>] [via <next-hop-ip-addr> [<interface>] [weight <weight>]] | [via arp <interface> <adj-hop-ip-addr>] | [via drop|punt|local<id>|arp|classify <classify-idx>] [lookup in table <out-table-id>]",
+  .short_help = "ip route [add|del] [count <n>] <dst-ip-addr>/<width> [table <table-id>] via [next-hop-address] [next-hop-interface] [next-hop-table <value>] [weight <value>] [preference <value>] [udp-encap-id <value>] [ip4-lookup-in-table <value>] [ip6-lookup-in-table <value>] [mpls-lookup-in-table <value>] [resolve-via-host] [resolve-via-connected] [rx-ip4 <interface>] [out-labels <value value value>]",
   .function = vnet_ip_route_cmd,
   .is_mp_safe = 1,
 };
@@ -935,7 +745,7 @@ ip6_table_bind_cmd (vlib_main_t * vm,
 
 /*?
  * Place the indicated interface into the supplied IPv4 FIB table (also known
- * as a VRF). If the FIB table does not exist, this command creates it. To
+ * as a VRF). The FIB table must be created using "ip table add" already. To
  * display the current IPv4 FIB table, use the command '<em>show ip fib</em>'.
  * FIB table will only be displayed if a route has been added to the table, or
  * an IP Address is assigned to an interface in the table (which adds a route
@@ -963,7 +773,7 @@ VLIB_CLI_COMMAND (set_interface_ip_table_command, static) =
 
 /*?
  * Place the indicated interface into the supplied IPv6 FIB table (also known
- * as a VRF). If the FIB table does not exist, this command creates it. To
+ * as a VRF). The FIB table must be created using "ip6 table add" already. To
  * display the current IPv6 FIB table, use the command '<em>show ip6 fib</em>'.
  * FIB table will only be displayed if a route has been added to the table, or
  * an IP Address is assigned to an interface in the table (which adds a route
@@ -1004,13 +814,14 @@ vnet_ip_mroute_cmd (vlib_main_t * vm,
   mfib_entry_flags_t eflags = 0;
   u32 gcount, scount, ss, gg, incr;
   f64 timet[2];
+  u32 rpf_id = MFIB_RPF_ID_NONE;
 
   gcount = scount = 1;
   vnm = vnet_get_main ();
   is_del = 0;
   table_id = 0;
-  memset (&pfx, 0, sizeof (pfx));
-  memset (&rpath, 0, sizeof (rpath));
+  clib_memset (&pfx, 0, sizeof (pfx));
+  clib_memset (&rpath, 0, sizeof (rpath));
   rpath.frp_sw_if_index = ~0;
 
   /* Get a line of input. */
@@ -1025,6 +836,8 @@ vnet_ip_mroute_cmd (vlib_main_t * vm,
 	is_del = 1;
       else if (unformat (line_input, "add"))
 	is_del = 0;
+      else if (unformat (line_input, "rpf-id %d", &rpf_id))
+	;
       else if (unformat (line_input, "scount %d", &scount))
 	;
       else if (unformat (line_input, "gcount %d", &gcount))
@@ -1049,44 +862,87 @@ vnet_ip_mroute_cmd (vlib_main_t * vm,
 			 unformat_ip4_address,
 			 &pfx.fp_grp_addr.ip4, &pfx.fp_len))
 	{
-	  memset (&pfx.fp_src_addr.ip4, 0, sizeof (pfx.fp_src_addr.ip4));
+	  clib_memset (&pfx.fp_src_addr.ip4, 0, sizeof (pfx.fp_src_addr.ip4));
 	  pfx.fp_proto = FIB_PROTOCOL_IP4;
 	}
       else if (unformat (line_input, "%U/%d",
 			 unformat_ip6_address,
 			 &pfx.fp_grp_addr.ip6, &pfx.fp_len))
 	{
-	  memset (&pfx.fp_src_addr.ip6, 0, sizeof (pfx.fp_src_addr.ip6));
+	  clib_memset (&pfx.fp_src_addr.ip6, 0, sizeof (pfx.fp_src_addr.ip6));
 	  pfx.fp_proto = FIB_PROTOCOL_IP6;
 	}
       else if (unformat (line_input, "%U",
 			 unformat_ip4_address, &pfx.fp_grp_addr.ip4))
 	{
-	  memset (&pfx.fp_src_addr.ip4, 0, sizeof (pfx.fp_src_addr.ip4));
+	  clib_memset (&pfx.fp_src_addr.ip4, 0, sizeof (pfx.fp_src_addr.ip4));
 	  pfx.fp_proto = FIB_PROTOCOL_IP4;
 	  pfx.fp_len = 32;
 	}
       else if (unformat (line_input, "%U",
 			 unformat_ip6_address, &pfx.fp_grp_addr.ip6))
 	{
-	  memset (&pfx.fp_src_addr.ip6, 0, sizeof (pfx.fp_src_addr.ip6));
+	  clib_memset (&pfx.fp_src_addr.ip6, 0, sizeof (pfx.fp_src_addr.ip6));
 	  pfx.fp_proto = FIB_PROTOCOL_IP6;
 	  pfx.fp_len = 128;
 	}
-      else if (unformat (line_input, "via %U",
+      else if (unformat (line_input, "via %U %U %U",
+			 unformat_ip4_address, &rpath.frp_addr.ip4,
+			 unformat_vnet_sw_interface, vnm,
+			 &rpath.frp_sw_if_index,
+			 unformat_mfib_itf_flags, &iflags))
+	{
+	  rpath.frp_weight = 1;
+	}
+      else if (unformat (line_input, "via %U %U %U",
+			 unformat_ip6_address, &rpath.frp_addr.ip6,
+			 unformat_vnet_sw_interface, vnm,
+			 &rpath.frp_sw_if_index,
+			 unformat_mfib_itf_flags, &iflags))
+	{
+	  rpath.frp_weight = 1;
+	}
+      else if (unformat (line_input, "via %U %U",
+			 unformat_vnet_sw_interface, vnm,
+			 &rpath.frp_sw_if_index,
+			 unformat_mfib_itf_flags, &iflags))
+	{
+	  clib_memset (&rpath.frp_addr, 0, sizeof (rpath.frp_addr));
+	  rpath.frp_weight = 1;
+	}
+      else if (unformat (line_input, "via %U %U",
+			 unformat_ip4_address, &rpath.frp_addr.ip4,
 			 unformat_vnet_sw_interface, vnm,
 			 &rpath.frp_sw_if_index))
 	{
 	  rpath.frp_weight = 1;
 	}
-      else if (unformat (line_input, "via local"))
+      else if (unformat (line_input, "via %U %U",
+			 unformat_ip6_address, &rpath.frp_addr.ip6,
+			 unformat_vnet_sw_interface, vnm,
+			 &rpath.frp_sw_if_index))
 	{
+	  rpath.frp_weight = 1;
+	}
+      else if (unformat (line_input, "via %U",
+			 unformat_vnet_sw_interface, vnm,
+			 &rpath.frp_sw_if_index))
+	{
+	  clib_memset (&rpath.frp_addr, 0, sizeof (rpath.frp_addr));
+	  rpath.frp_weight = 1;
+	}
+      else if (unformat (line_input, "via local Forward"))
+	{
+	  clib_memset (&rpath.frp_addr, 0, sizeof (rpath.frp_addr));
 	  rpath.frp_sw_if_index = ~0;
 	  rpath.frp_weight = 1;
 	  rpath.frp_flags |= FIB_ROUTE_PATH_LOCAL;
+	  /*
+	   * set the path proto appropriately for the prefix
+	   */
+	  rpath.frp_proto = fib_proto_to_dpo (pfx.fp_proto);
+	  iflags = MFIB_ITF_FLAG_FORWARD;
 	}
-      else if (unformat (line_input, "%U", unformat_mfib_itf_flags, &iflags))
-	;
       else if (unformat (line_input, "%U",
 			 unformat_mfib_entry_flags, &eflags))
 	;
@@ -1135,10 +991,10 @@ vnet_ip_mroute_cmd (vlib_main_t * vm,
 	      /* no path provided => route delete */
 	      mfib_table_entry_delete (fib_index, &pfx, MFIB_SOURCE_CLI);
 	    }
-	  else if (eflags)
+	  else if (eflags || (MFIB_RPF_ID_NONE != rpf_id))
 	    {
 	      mfib_table_entry_update (fib_index, &pfx, MFIB_SOURCE_CLI,
-				       MFIB_RPF_ID_NONE, eflags);
+				       rpf_id, eflags);
 	    }
 	  else
 	    {
@@ -1223,7 +1079,7 @@ done:
 VLIB_CLI_COMMAND (ip_mroute_command, static) =
 {
   .path = "ip mroute",
-  .short_help = "ip mroute [add|del] <dst-ip-addr>/<width> [table <table-id>] [via <next-hop-ip-addr> [<interface>],",
+  .short_help = "ip mroute [add|del] <dst-ip-addr>/<width> [table <table-id>] [rpf-id <ID>] [via <next-hop-ip-addr> [<interface>],",
   .function = vnet_ip_mroute_cmd,
   .is_mp_safe = 1,
 };
@@ -1255,7 +1111,7 @@ ip6_probe_neighbor_wait (vlib_main_t * vm, ip6_address_t * a, u32 sw_if_index,
   for (i = 0; i < retry_count; i++)
     {
       /* The interface may be down, etc. */
-      e = ip6_probe_neighbor (vm, a, sw_if_index);
+      e = ip6_probe_neighbor (vm, a, sw_if_index, 0);
 
       if (e)
 	return e;
@@ -1307,7 +1163,7 @@ ip4_probe_neighbor_wait (vlib_main_t * vm, ip4_address_t * a, u32 sw_if_index,
   for (i = 0; i < retry_count; i++)
     {
       /* The interface may be down, etc. */
-      e = ip4_probe_neighbor (vm, a, sw_if_index);
+      e = ip4_probe_neighbor (vm, a, sw_if_index, 0);
 
       if (e)
 	return e;
@@ -1429,6 +1285,251 @@ VLIB_CLI_COMMAND (ip_probe_neighbor_command, static) = {
   .path = "ip probe-neighbor",
   .function = probe_neighbor_address,
   .short_help = "ip probe-neighbor <interface> <ip4-addr> | <ip6-addr> [retry nn]",
+  .is_mp_safe = 1,
+};
+/* *INDENT-ON* */
+
+clib_error_t *
+vnet_ip_container_proxy_add_del (vnet_ip_container_proxy_args_t * args)
+{
+  u32 fib_index;
+
+  if (!vnet_sw_interface_is_api_valid (vnet_get_main (), args->sw_if_index))
+    return clib_error_return_code (0, VNET_API_ERROR_INVALID_INTERFACE, 0,
+				   "invalid sw_if_index");
+
+  fib_index = fib_table_get_table_id_for_sw_if_index (args->prefix.fp_proto,
+						      args->sw_if_index);
+  if (args->is_add)
+    {
+      dpo_id_t proxy_dpo = DPO_INVALID;
+      l3_proxy_dpo_add_or_lock (fib_proto_to_dpo (args->prefix.fp_proto),
+				args->sw_if_index, &proxy_dpo);
+      fib_table_entry_special_dpo_add (fib_index,
+				       &args->prefix,
+				       FIB_SOURCE_PROXY,
+				       FIB_ENTRY_FLAG_EXCLUSIVE, &proxy_dpo);
+      dpo_reset (&proxy_dpo);
+    }
+  else
+    {
+      fib_table_entry_special_remove (fib_index, &args->prefix,
+				      FIB_SOURCE_PROXY);
+    }
+  return 0;
+}
+
+u8
+ip_container_proxy_is_set (fib_prefix_t * pfx, u32 sw_if_index)
+{
+  u32 fib_index;
+  fib_node_index_t fei;
+  const dpo_id_t *dpo;
+  l3_proxy_dpo_t *l3p;
+  load_balance_t *lb0;
+
+  fib_index = fib_table_get_table_id_for_sw_if_index (pfx->fp_proto,
+						      sw_if_index);
+  if (fib_index == ~0)
+    return 0;
+
+  fei = fib_table_lookup_exact_match (fib_index, pfx);
+  if (fei == FIB_NODE_INDEX_INVALID)
+    return 0;
+
+  dpo = fib_entry_contribute_ip_forwarding (fei);
+  lb0 = load_balance_get (dpo->dpoi_index);
+  dpo = load_balance_get_bucket_i (lb0, 0);
+  if (dpo->dpoi_type != DPO_L3_PROXY)
+    return 0;
+
+  l3p = l3_proxy_dpo_get (dpo->dpoi_index);
+  return (l3p->l3p_sw_if_index == sw_if_index);
+}
+
+typedef struct ip_container_proxy_walk_ctx_t_
+{
+  ip_container_proxy_cb_t cb;
+  void *ctx;
+} ip_container_proxy_walk_ctx_t;
+
+static fib_table_walk_rc_t
+ip_container_proxy_fib_table_walk (fib_node_index_t fei, void *arg)
+{
+  ip_container_proxy_walk_ctx_t *ctx = arg;
+  const fib_prefix_t *pfx;
+  const dpo_id_t *dpo;
+  load_balance_t *lb;
+  l3_proxy_dpo_t *l3p;
+
+  pfx = fib_entry_get_prefix (fei);
+  if (fib_entry_is_sourced (fei, FIB_SOURCE_PROXY))
+    {
+      dpo = fib_entry_contribute_ip_forwarding (fei);
+      lb = load_balance_get (dpo->dpoi_index);
+      dpo = load_balance_get_bucket_i (lb, 0);
+      l3p = l3_proxy_dpo_get (dpo->dpoi_index);
+      ctx->cb (pfx, l3p->l3p_sw_if_index, ctx->ctx);
+    }
+
+  return FIB_TABLE_WALK_CONTINUE;
+}
+
+void
+ip_container_proxy_walk (ip_container_proxy_cb_t cb, void *ctx)
+{
+  fib_table_t *fib_table;
+  ip_container_proxy_walk_ctx_t wctx = {
+    .cb = cb,
+    .ctx = ctx,
+  };
+
+  /* *INDENT-OFF* */
+  pool_foreach (fib_table, ip4_main.fibs,
+  ({
+    fib_table_walk(fib_table->ft_index,
+                   FIB_PROTOCOL_IP4,
+                   ip_container_proxy_fib_table_walk,
+                   &wctx);
+  }));
+  pool_foreach (fib_table, ip6_main.fibs,
+  ({
+    fib_table_walk(fib_table->ft_index,
+                   FIB_PROTOCOL_IP6,
+                   ip_container_proxy_fib_table_walk,
+                   &wctx);
+  }));
+  /* *INDENT-ON* */
+}
+
+clib_error_t *
+ip_container_cmd (vlib_main_t * vm,
+		  unformat_input_t * main_input, vlib_cli_command_t * cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  fib_prefix_t pfx;
+  u32 is_del, addr_set = 0;
+  vnet_main_t *vnm;
+  u32 sw_if_index;
+
+  vnm = vnet_get_main ();
+  is_del = 0;
+  sw_if_index = ~0;
+  clib_memset (&pfx, 0, sizeof (pfx));
+
+  /* Get a line of input. */
+  if (!unformat_user (main_input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "%U", unformat_ip4_address, &pfx.fp_addr.ip4))
+	{
+	  pfx.fp_proto = FIB_PROTOCOL_IP4;
+	  pfx.fp_len = 32;
+	  addr_set = 1;
+	}
+      else if (unformat (line_input, "%U",
+			 unformat_ip6_address, &pfx.fp_addr.ip6))
+	{
+	  pfx.fp_proto = FIB_PROTOCOL_IP6;
+	  pfx.fp_len = 128;
+	  addr_set = 1;
+	}
+      else if (unformat (line_input, "%U",
+			 unformat_vnet_sw_interface, vnm, &sw_if_index))
+	;
+      else if (unformat (line_input, "del"))
+	is_del = 1;
+      else
+	{
+	  unformat_free (line_input);
+	  return (clib_error_return (0, "unknown input '%U'",
+				     format_unformat_error, line_input));
+	}
+    }
+
+  if (~0 == sw_if_index || !addr_set)
+    {
+      unformat_free (line_input);
+      vlib_cli_output (vm, "interface and address must be set");
+      return 0;
+    }
+
+  vnet_ip_container_proxy_args_t args = {
+    .prefix = pfx,
+    .sw_if_index = sw_if_index,
+    .is_add = !is_del,
+  };
+  vnet_ip_container_proxy_add_del (&args);
+  unformat_free (line_input);
+  return (NULL);
+}
+
+/* *INDENT-OFF* */
+VLIB_CLI_COMMAND (ip_container_command_node, static) = {
+  .path = "ip container",
+  .function = ip_container_cmd,
+  .short_help = "ip container <address> <interface>",
+  .is_mp_safe = 1,
+};
+/* *INDENT-ON* */
+
+clib_error_t *
+show_ip_container_cmd_fn (vlib_main_t * vm, unformat_input_t * main_input,
+			  vlib_cli_command_t * cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  vnet_main_t *vnm = vnet_get_main ();
+  fib_prefix_t pfx;
+  u32 sw_if_index = ~0;
+  u8 has_proxy;
+
+  if (!unformat_user (main_input, unformat_line_input, line_input))
+    return 0;
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "%U", unformat_ip4_address, &pfx.fp_addr.ip4))
+	{
+	  pfx.fp_proto = FIB_PROTOCOL_IP4;
+	  pfx.fp_len = 32;
+	}
+      else if (unformat (line_input, "%U",
+			 unformat_ip6_address, &pfx.fp_addr.ip6))
+	{
+	  pfx.fp_proto = FIB_PROTOCOL_IP6;
+	  pfx.fp_len = 128;
+	}
+      else if (unformat (line_input, "%U",
+			 unformat_vnet_sw_interface, vnm, &sw_if_index))
+	;
+      else
+	{
+	  unformat_free (line_input);
+	  return (clib_error_return (0, "unknown input '%U'",
+				     format_unformat_error, line_input));
+	}
+    }
+
+  if (~0 == sw_if_index)
+    {
+      unformat_free (line_input);
+      vlib_cli_output (vm, "no interface");
+      return (clib_error_return (0, "no interface"));
+    }
+
+  has_proxy = ip_container_proxy_is_set (&pfx, sw_if_index);
+  vlib_cli_output (vm, "ip container proxy is: %s", has_proxy ? "on" : "off");
+
+  unformat_free (line_input);
+  return 0;
+}
+
+/* *INDENT-OFF* */
+VLIB_CLI_COMMAND (show_ip_container_command, static) = {
+  .path = "show ip container",
+  .function = show_ip_container_cmd_fn,
+  .short_help = "show ip container <address> <interface>",
   .is_mp_safe = 1,
 };
 /* *INDENT-ON* */

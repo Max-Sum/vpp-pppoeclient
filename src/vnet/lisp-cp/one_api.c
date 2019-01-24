@@ -68,22 +68,22 @@
 
 #include <vlibapi/api_helper_macros.h>
 
-#define REPLY_DETAILS(t, body)                                  \
-do {                                                            \
-    unix_shared_memory_queue_t * q;                             \
-    rv = vl_msg_api_pd_handler (mp, rv);                        \
-    q = vl_api_client_index_to_input_queue (mp->client_index);  \
-    if (!q)                                                     \
-        return;                                                 \
-                                                                \
-    rmp = vl_msg_api_alloc (sizeof (*rmp));                     \
-    rmp->_vl_msg_id = ntohs((t));                               \
-    rmp->context = mp->context;                                 \
-    do {body;} while (0);                                       \
-    vl_msg_api_send_shmem (q, (u8 *)&rmp);                      \
+#define REPLY_DETAILS(t, body)                                  	\
+do {                                                            	\
+    vl_api_registration_t * reg;                             		\
+    rv = vl_msg_api_pd_handler (mp, rv);                        	\
+    reg = vl_api_client_index_to_registration (mp->client_index);	\
+    if (!reg)								\
+      return;								\
+								  \
+    rmp = vl_msg_api_alloc (sizeof (*rmp));                     	\
+    rmp->_vl_msg_id = ntohs((t));                               	\
+    rmp->context = mp->context;                                 	\
+    do {body;} while (0);                                       	\
+    vl_api_send_msg (reg, (u8 *)&rmp);                      		\
 } while(0);
 
-#define foreach_vpe_api_msg                             \
+#define foreach_vpe_api_msg                             			\
 _(ONE_ADD_DEL_LOCATOR_SET, one_add_del_locator_set)                     \
 _(ONE_ADD_DEL_LOCATOR, one_add_del_locator)                             \
 _(ONE_ADD_DEL_LOCAL_EID, one_add_del_local_eid)                         \
@@ -134,7 +134,14 @@ _(ONE_ADD_DEL_NDP_ENTRY, one_add_del_ndp_entry)                         \
 _(ONE_NDP_BD_GET, one_ndp_bd_get)                                       \
 _(ONE_NDP_ENTRIES_GET, one_ndp_entries_get)                             \
 _(ONE_SET_TRANSPORT_PROTOCOL, one_set_transport_protocol)               \
-_(ONE_GET_TRANSPORT_PROTOCOL, one_get_transport_protocol)
+_(ONE_GET_TRANSPORT_PROTOCOL, one_get_transport_protocol)               \
+_(ONE_ENABLE_DISABLE_XTR_MODE, one_enable_disable_xtr_mode)             \
+_(ONE_SHOW_XTR_MODE, one_show_xtr_mode)                                 \
+_(ONE_ENABLE_DISABLE_PITR_MODE, one_enable_disable_pitr_mode)           \
+_(ONE_SHOW_PITR_MODE, one_show_pitr_mode)                               \
+_(ONE_ENABLE_DISABLE_PETR_MODE, one_enable_disable_petr_mode)           \
+_(ONE_SHOW_PETR_MODE, one_show_petr_mode)                               \
+
 
 static locator_t *
 unformat_one_locs (vl_api_one_remote_locator_t * rmt_locs, u32 rloc_num)
@@ -147,7 +154,7 @@ unformat_one_locs (vl_api_one_remote_locator_t * rmt_locs, u32 rloc_num)
     {
       /* remote locators */
       r = &rmt_locs[i];
-      memset (&loc, 0, sizeof (loc));
+      clib_memset (&loc, 0, sizeof (loc));
       gid_address_ip_set (&loc.address, &r->addr, r->is_ip4 ? IP4 : IP6);
 
       loc.priority = r->priority;
@@ -200,16 +207,18 @@ vl_api_one_add_del_locator_set_t_handler (vl_api_one_add_del_locator_set_t *
   u8 *locator_name = NULL;
   int i;
 
-  memset (a, 0, sizeof (a[0]));
+  clib_memset (a, 0, sizeof (a[0]));
 
+  mp->locator_set_name[sizeof (mp->locator_set_name) - 1] = 0;
   locator_name = format (0, "%s", mp->locator_set_name);
+  vec_terminate_c_string (locator_name);
 
   a->name = locator_name;
   a->is_add = mp->is_add;
   a->local = 1;
   locator_num = clib_net_to_host_u32 (mp->locator_num);
 
-  memset (&locator, 0, sizeof (locator));
+  clib_memset (&locator, 0, sizeof (locator));
   for (i = 0; i < locator_num; i++)
     {
       ls_loc = &mp->locators[i];
@@ -247,8 +256,8 @@ vl_api_one_add_del_locator_t_handler (vl_api_one_add_del_locator_t * mp)
   u32 ls_index = ~0;
   u8 *locator_name = NULL;
 
-  memset (&locator, 0, sizeof (locator));
-  memset (a, 0, sizeof (a[0]));
+  clib_memset (&locator, 0, sizeof (locator));
+  clib_memset (a, 0, sizeof (a[0]));
 
   locator.sw_if_index = ntohl (mp->sw_if_index);
   locator.priority = mp->priority;
@@ -256,7 +265,9 @@ vl_api_one_add_del_locator_t_handler (vl_api_one_add_del_locator_t * mp)
   locator.local = 1;
   vec_add1 (locators, locator);
 
+  mp->locator_set_name[sizeof (mp->locator_set_name) - 1] = 0;
   locator_name = format (0, "%s", mp->locator_set_name);
+  vec_terminate_c_string (locator_name);
 
   a->name = locator_name;
   a->locators = locators;
@@ -328,8 +339,8 @@ vl_api_one_add_del_local_eid_t_handler (vl_api_one_add_del_local_eid_t * mp)
   u32 locator_set_index = ~0, map_index = ~0;
   vnet_lisp_add_del_mapping_args_t _a, *a = &_a;
   u8 *name = NULL, *key = NULL;
-  memset (a, 0, sizeof (a[0]));
-  memset (eid, 0, sizeof (eid[0]));
+  clib_memset (a, 0, sizeof (a[0]));
+  clib_memset (eid, 0, sizeof (eid[0]));
 
   rv = unformat_one_eid_api (eid, clib_net_to_host_u32 (mp->vni),
 			     mp->eid_type, mp->eid, mp->prefix_len);
@@ -342,7 +353,9 @@ vl_api_one_add_del_local_eid_t_handler (vl_api_one_add_del_local_eid_t * mp)
       goto out;
     }
 
+  mp->locator_set_name[sizeof (mp->locator_set_name) - 1] = 0;
   name = format (0, "%s", mp->locator_set_name);
+  vec_terminate_c_string (name);
   p = hash_get_mem (lcm->locator_set_index_by_name, name);
   if (!p)
     {
@@ -390,7 +403,7 @@ vl_api_one_add_del_map_server_t_handler (vl_api_one_add_del_map_server_t * mp)
   int rv = 0;
   ip_address_t addr;
 
-  memset (&addr, 0, sizeof (addr));
+  clib_memset (&addr, 0, sizeof (addr));
 
   ip_address_set (&addr, mp->ip_address, mp->is_ipv6 ? IP6 : IP4);
   rv = vnet_lisp_add_del_map_server (&addr, mp->is_add);
@@ -406,7 +419,7 @@ vl_api_one_add_del_map_resolver_t_handler (vl_api_one_add_del_map_resolver_t
   int rv = 0;
   vnet_lisp_add_del_map_resolver_args_t _a, *a = &_a;
 
-  memset (a, 0, sizeof (a[0]));
+  clib_memset (a, 0, sizeof (a[0]));
 
   a->is_add = mp->is_add;
   ip_address_set (&a->address, mp->ip_address, mp->is_ipv6 ? IP6 : IP4);
@@ -482,7 +495,9 @@ vl_api_one_nsh_set_locator_set_t_handler (vl_api_one_nsh_set_locator_set_t
   int rv = 0;
   u8 *ls_name = 0;
 
+  mp->ls_name[sizeof (mp->ls_name) - 1] = 0;
   ls_name = format (0, "%s", mp->ls_name);
+  vec_terminate_c_string (ls_name);
   rv = vnet_lisp_nsh_set_locator_set (ls_name, mp->is_add);
   vec_free (ls_name);
 
@@ -497,7 +512,9 @@ vl_api_one_pitr_set_locator_set_t_handler (vl_api_one_pitr_set_locator_set_t
   int rv = 0;
   u8 *ls_name = 0;
 
+  mp->ls_name[sizeof (mp->ls_name) - 1] = 0;
   ls_name = format (0, "%s", mp->ls_name);
+  vec_terminate_c_string (ls_name);
   rv = vnet_lisp_pitr_set_locator_set (ls_name, mp->is_add);
   vec_free (ls_name);
 
@@ -520,7 +537,6 @@ vl_api_one_use_petr_t_handler (vl_api_one_use_petr_t * mp)
 static void
 vl_api_show_one_use_petr_t_handler (vl_api_show_one_use_petr_t * mp)
 {
-  unix_shared_memory_queue_t *q = NULL;
   vl_api_show_one_use_petr_reply_t *rmp = NULL;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
   mapping_t *m;
@@ -530,13 +546,7 @@ vl_api_show_one_use_petr_t_handler (vl_api_show_one_use_petr_t * mp)
   u8 status = 0;
   gid_address_t addr;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
-
-  memset (&addr, 0, sizeof (addr));
+  clib_memset (&addr, 0, sizeof (addr));
   status = lcm->flags & LISP_FLAG_USE_PETR;
   if (status)
     {
@@ -584,7 +594,9 @@ static void
   u8 *locator_set_name = NULL;
   vnet_lisp_add_del_mreq_itr_rloc_args_t _a, *a = &_a;
 
+  mp->locator_set_name[sizeof (mp->locator_set_name) - 1] = 0;
   locator_set_name = format (0, "%s", mp->locator_set_name);
+  vec_terminate_c_string (locator_set_name);
 
   a->is_add = mp->is_add;
   a->locator_set_name = locator_set_name;
@@ -606,7 +618,7 @@ static void
   gid_address_t _eid, *eid = &_eid;
   u32 rloc_num = clib_net_to_host_u32 (mp->rloc_num);
 
-  memset (eid, 0, sizeof (eid[0]));
+  clib_memset (eid, 0, sizeof (eid[0]));
 
   rv = unformat_one_eid_api (eid, clib_net_to_host_u32 (mp->vni),
 			     mp->eid_type, mp->eid, mp->eid_len);
@@ -618,6 +630,7 @@ static void
   if (!mp->is_add)
     {
       vnet_lisp_add_del_adjacency_args_t _a, *a = &_a;
+      clib_memset (a, 0, sizeof (a[0]));
       gid_address_copy (&a->reid, eid);
       a->is_add = 0;
       rv = vnet_lisp_add_del_adjacency (a);
@@ -632,7 +645,7 @@ static void
   if (mp->is_add)
     {
       vnet_lisp_add_del_mapping_args_t _m_args, *m_args = &_m_args;
-      memset (m_args, 0, sizeof (m_args[0]));
+      clib_memset (m_args, 0, sizeof (m_args[0]));
       gid_address_copy (&m_args->eid, eid);
       m_args->action = mp->action;
       m_args->is_static = 1;
@@ -659,7 +672,7 @@ vl_api_one_add_del_adjacency_t_handler (vl_api_one_add_del_adjacency_t * mp)
   vnet_lisp_add_del_adjacency_args_t _a, *a = &_a;
 
   int rv = 0;
-  memset (a, 0, sizeof (a[0]));
+  clib_memset (a, 0, sizeof (a[0]));
 
   rv = unformat_one_eid_api (&a->leid, clib_net_to_host_u32 (mp->vni),
 			     mp->eid_type, mp->leid, mp->leid_len);
@@ -678,13 +691,13 @@ send_reply:
 
 static void
 send_one_locator_details (lisp_cp_main_t * lcm,
-			  locator_t * loc,
-			  unix_shared_memory_queue_t * q, u32 context)
+			  locator_t * loc, vl_api_registration_t * reg,
+			  u32 context)
 {
   vl_api_one_locator_details_t *rmp;
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  memset (rmp, 0, sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
   rmp->_vl_msg_id = ntohs (VL_API_ONE_LOCATOR_DETAILS);
   rmp->context = context;
 
@@ -701,25 +714,23 @@ send_one_locator_details (lisp_cp_main_t * lcm,
   rmp->priority = loc->priority;
   rmp->weight = loc->weight;
 
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void
 vl_api_one_locator_dump_t_handler (vl_api_one_locator_dump_t * mp)
 {
   u8 *ls_name = 0;
-  unix_shared_memory_queue_t *q = 0;
+  vl_api_registration_t *reg;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
   locator_set_t *lsit = 0;
   locator_t *loc = 0;
   u32 ls_index = ~0, *locit = 0;
   uword *p = 0;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
 
   if (mp->is_index_set)
     ls_index = htonl (mp->ls_index);
@@ -728,6 +739,7 @@ vl_api_one_locator_dump_t_handler (vl_api_one_locator_dump_t * mp)
       /* make sure we get a proper C-string */
       mp->ls_name[sizeof (mp->ls_name) - 1] = 0;
       ls_name = format (0, "%s", mp->ls_name);
+      vec_terminate_c_string (ls_name);
       p = hash_get_mem (lcm->locator_set_index_by_name, ls_name);
       if (!p)
 	goto out;
@@ -742,7 +754,7 @@ vl_api_one_locator_dump_t_handler (vl_api_one_locator_dump_t * mp)
   vec_foreach (locit, lsit->locator_indices)
   {
     loc = pool_elt_at_index (lcm->locator_pool, locit[0]);
-    send_one_locator_details (lcm, loc, q, mp->context);
+    send_one_locator_details (lcm, loc, reg, mp->context);
   };
 out:
   vec_free (ls_name);
@@ -751,14 +763,14 @@ out:
 static void
 send_one_locator_set_details (lisp_cp_main_t * lcm,
 			      locator_set_t * lsit,
-			      unix_shared_memory_queue_t * q,
-			      u32 context, u32 ls_index)
+			      vl_api_registration_t * reg, u32 context,
+			      u32 ls_index)
 {
   vl_api_one_locator_set_details_t *rmp;
   u8 *str = 0;
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  memset (rmp, 0, sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
   rmp->_vl_msg_id = ntohs (VL_API_ONE_LOCATOR_SET_DETAILS);
   rmp->context = context;
 
@@ -776,22 +788,20 @@ send_one_locator_set_details (lisp_cp_main_t * lcm,
       vec_free (str);
     }
 
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void
 vl_api_one_locator_set_dump_t_handler (vl_api_one_locator_set_dump_t * mp)
 {
-  unix_shared_memory_queue_t *q = NULL;
+  vl_api_registration_t *reg;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
   locator_set_t *lsit = NULL;
   u8 filter;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
 
   filter = mp->filter;
   /* *INDENT-OFF* */
@@ -802,7 +812,7 @@ vl_api_one_locator_set_dump_t_handler (vl_api_one_locator_set_dump_t * mp)
       {
         continue;
       }
-    send_one_locator_set_details (lcm, lsit, q, mp->context,
+    send_one_locator_set_details (lcm, lsit, reg, mp->context,
                                    lsit - lcm->locator_set_pool);
   }));
   /* *INDENT-ON* */
@@ -862,8 +872,8 @@ fid_type_to_api_type (fid_address_t * fid)
 
 static void
 send_one_eid_table_details (mapping_t * mapit,
-			    unix_shared_memory_queue_t * q,
-			    u32 context, u8 filter)
+			    vl_api_registration_t * reg, u32 context,
+			    u8 filter)
 {
   fid_address_t *fid;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
@@ -899,7 +909,7 @@ send_one_eid_table_details (mapping_t * mapit,
   mac = gid_address_mac (gid);
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  memset (rmp, 0, sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
   rmp->_vl_msg_id = ntohs (VL_API_ONE_EID_TABLE_DETAILS);
 
   ls = pool_elt_at_index (lcm->locator_set_pool, mapit->locator_set_index);
@@ -957,27 +967,25 @@ send_one_eid_table_details (mapping_t * mapit,
   rmp->vni = clib_host_to_net_u32 (gid_address_vni (gid));
   rmp->key_id = clib_host_to_net_u16 (mapit->key_id);
   memcpy (rmp->key, mapit->key, vec_len (mapit->key));
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void
 vl_api_one_eid_table_dump_t_handler (vl_api_one_eid_table_dump_t * mp)
 {
   u32 mi;
-  unix_shared_memory_queue_t *q = NULL;
+  vl_api_registration_t *reg;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
   mapping_t *mapit = NULL;
   gid_address_t _eid, *eid = &_eid;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
 
   if (mp->eid_set)
     {
-      memset (eid, 0, sizeof (*eid));
+      clib_memset (eid, 0, sizeof (*eid));
 
       unformat_one_eid_api (eid, clib_net_to_host_u32 (mp->vni),
 			    mp->eid_type, mp->eid, mp->prefix_length);
@@ -987,7 +995,7 @@ vl_api_one_eid_table_dump_t_handler (vl_api_one_eid_table_dump_t * mp)
 	return;
 
       mapit = pool_elt_at_index (lcm->mapping_pool, mi);
-      send_one_eid_table_details (mapit, q, mp->context,
+      send_one_eid_table_details (mapit, reg, mp->context,
 				  0 /* ignore filter */ );
     }
   else
@@ -995,7 +1003,7 @@ vl_api_one_eid_table_dump_t_handler (vl_api_one_eid_table_dump_t * mp)
       /* *INDENT-OFF* */
       pool_foreach (mapit, lcm->mapping_pool,
       ({
-        send_one_eid_table_details(mapit, q, mp->context,
+        send_one_eid_table_details(mapit, reg, mp->context,
                                     mp->filter);
       }));
       /* *INDENT-ON* */
@@ -1003,13 +1011,13 @@ vl_api_one_eid_table_dump_t_handler (vl_api_one_eid_table_dump_t * mp)
 }
 
 static void
-send_one_map_server_details (ip_address_t * ip,
-			     unix_shared_memory_queue_t * q, u32 context)
+send_one_map_server_details (ip_address_t * ip, vl_api_registration_t * reg,
+			     u32 context)
 {
   vl_api_one_map_server_details_t *rmp = NULL;
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  memset (rmp, 0, sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
   rmp->_vl_msg_id = ntohs (VL_API_ONE_MAP_SERVER_DETAILS);
 
   switch (ip_addr_version (ip))
@@ -1031,36 +1039,34 @@ send_one_map_server_details (ip_address_t * ip,
     }
   rmp->context = context;
 
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void
 vl_api_one_map_server_dump_t_handler (vl_api_one_map_server_dump_t * mp)
 {
-  unix_shared_memory_queue_t *q = NULL;
+  vl_api_registration_t *reg;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
   lisp_msmr_t *mr;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
 
   vec_foreach (mr, lcm->map_servers)
   {
-    send_one_map_server_details (&mr->address, q, mp->context);
+    send_one_map_server_details (&mr->address, reg, mp->context);
   }
 }
 
 static void
 send_one_map_resolver_details (ip_address_t * ip,
-			       unix_shared_memory_queue_t * q, u32 context)
+			       vl_api_registration_t * reg, u32 context)
 {
   vl_api_one_map_resolver_details_t *rmp = NULL;
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  memset (rmp, 0, sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
   rmp->_vl_msg_id = ntohs (VL_API_ONE_MAP_RESOLVER_DETAILS);
 
   switch (ip_addr_version (ip))
@@ -1082,57 +1088,53 @@ send_one_map_resolver_details (ip_address_t * ip,
     }
   rmp->context = context;
 
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void
 vl_api_one_map_resolver_dump_t_handler (vl_api_one_map_resolver_dump_t * mp)
 {
-  unix_shared_memory_queue_t *q = NULL;
+  vl_api_registration_t *reg;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
   lisp_msmr_t *mr;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
 
   vec_foreach (mr, lcm->map_resolvers)
   {
-    send_one_map_resolver_details (&mr->address, q, mp->context);
+    send_one_map_resolver_details (&mr->address, reg, mp->context);
   }
 }
 
 static void
-send_eid_table_map_pair (hash_pair_t * p,
-			 unix_shared_memory_queue_t * q, u32 context)
+send_eid_table_map_pair (hash_pair_t * p, vl_api_registration_t * reg,
+			 u32 context)
 {
   vl_api_one_eid_table_map_details_t *rmp = NULL;
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  memset (rmp, 0, sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
   rmp->_vl_msg_id = ntohs (VL_API_ONE_EID_TABLE_MAP_DETAILS);
 
   rmp->vni = clib_host_to_net_u32 (p->key);
   rmp->dp_table = clib_host_to_net_u32 (p->value[0]);
   rmp->context = context;
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void
 vl_api_one_eid_table_map_dump_t_handler (vl_api_one_eid_table_map_dump_t * mp)
 {
-  unix_shared_memory_queue_t *q = NULL;
+  vl_api_registration_t *reg;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
   hash_pair_t *p;
   uword *vni_table = 0;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
 
   if (mp->is_l2)
     {
@@ -1146,22 +1148,22 @@ vl_api_one_eid_table_map_dump_t_handler (vl_api_one_eid_table_map_dump_t * mp)
   /* *INDENT-OFF* */
   hash_foreach_pair (p, vni_table,
   ({
-    send_eid_table_map_pair (p, q, mp->context);
+    send_eid_table_map_pair (p, reg, mp->context);
   }));
   /* *INDENT-ON* */
 }
 
 static void
-send_eid_table_vni (u32 vni, unix_shared_memory_queue_t * q, u32 context)
+send_eid_table_vni (u32 vni, vl_api_registration_t * reg, u32 context)
 {
   vl_api_one_eid_table_vni_details_t *rmp = 0;
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  memset (rmp, 0, sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
   rmp->_vl_msg_id = ntohs (VL_API_ONE_EID_TABLE_VNI_DETAILS);
   rmp->context = context;
   rmp->vni = clib_host_to_net_u32 (vni);
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void
@@ -1175,7 +1177,7 @@ one_adjacency_copy (vl_api_one_adjacency_t * dst, lisp_adjacency_t * adjs)
   for (i = 0; i < n; i++)
     {
       adj = vec_elt_at_index (adjs, i);
-      memset (&a, 0, sizeof (a));
+      clib_memset (&a, 0, sizeof (a));
 
       switch (gid_address_type (&adj->reid))
 	{
@@ -1275,14 +1277,12 @@ vl_api_one_eid_table_vni_dump_t_handler (vl_api_one_eid_table_vni_dump_t * mp)
 {
   hash_pair_t *p;
   u32 *vnis = 0;
-  unix_shared_memory_queue_t *q = 0;
+  vl_api_registration_t *reg;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
 
   /* *INDENT-OFF* */
   hash_foreach_pair (p, lcm->table_id_by_vni,
@@ -1297,7 +1297,7 @@ vl_api_one_eid_table_vni_dump_t_handler (vl_api_one_eid_table_vni_dump_t * mp)
 
   hash_foreach_pair (p, vnis,
   ({
-    send_eid_table_vni (p->key, q, mp->context);
+    send_eid_table_vni (p->key, reg, mp->context);
   }));
   /* *INDENT-ON* */
 
@@ -1307,15 +1307,8 @@ vl_api_one_eid_table_vni_dump_t_handler (vl_api_one_eid_table_vni_dump_t * mp)
 static void
 vl_api_show_one_status_t_handler (vl_api_show_one_status_t * mp)
 {
-  unix_shared_memory_queue_t *q = NULL;
   vl_api_show_one_status_reply_t *rmp = NULL;
   int rv = 0;
-
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
 
   /* *INDENT-OFF* */
   REPLY_MACRO2(VL_API_SHOW_ONE_STATUS_REPLY,
@@ -1330,18 +1323,11 @@ static void
   vl_api_one_get_map_request_itr_rlocs_t_handler
   (vl_api_one_get_map_request_itr_rlocs_t * mp)
 {
-  unix_shared_memory_queue_t *q = NULL;
   vl_api_one_get_map_request_itr_rlocs_reply_t *rmp = NULL;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
   locator_set_t *loc_set = 0;
   u8 *tmp_str = 0;
   int rv = 0;
-
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
 
   if (~0 == lcm->mreq_itr_rlocs)
     {
@@ -1368,7 +1354,6 @@ static void
 static void
 vl_api_show_one_nsh_mapping_t_handler (vl_api_show_one_nsh_mapping_t * mp)
 {
-  unix_shared_memory_queue_t *q = NULL;
   vl_api_show_one_nsh_mapping_reply_t *rmp = NULL;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
   mapping_t *m;
@@ -1376,12 +1361,6 @@ vl_api_show_one_nsh_mapping_t_handler (vl_api_show_one_nsh_mapping_t * mp)
   u8 *tmp_str = 0;
   u8 is_set = 0;
   int rv = 0;
-
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
 
   if (lcm->nsh_map_index == (u32) ~ 0)
     {
@@ -1417,7 +1396,6 @@ vl_api_show_one_nsh_mapping_t_handler (vl_api_show_one_nsh_mapping_t * mp)
 static void
 vl_api_show_one_pitr_t_handler (vl_api_show_one_pitr_t * mp)
 {
-  unix_shared_memory_queue_t *q = NULL;
   vl_api_show_one_pitr_reply_t *rmp = NULL;
   lisp_cp_main_t *lcm = vnet_lisp_cp_get_main ();
   mapping_t *m;
@@ -1425,13 +1403,10 @@ vl_api_show_one_pitr_t_handler (vl_api_show_one_pitr_t * mp)
   u8 *tmp_str = 0;
   int rv = 0;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
+  u8 is_enabled = (lcm->flags & LISP_FLAG_PITR_MODE)
+    && lcm->pitr_map_index != ~0;
 
-  if (!lcm->lisp_pitr)
+  if (!is_enabled)
     {
       tmp_str = format (0, "N/A");
     }
@@ -1454,7 +1429,7 @@ vl_api_show_one_pitr_t_handler (vl_api_show_one_pitr_t * mp)
   /* *INDENT-OFF* */
   REPLY_MACRO2(VL_API_SHOW_ONE_PITR_REPLY,
   ({
-    rmp->status = lcm->lisp_pitr;
+    rmp->status = lcm->flags & LISP_FLAG_PITR_MODE;
     strncpy((char *) rmp->locator_set_name, (char *) tmp_str,
             ARRAY_LEN(rmp->locator_set_name) - 1);
   }));
@@ -1561,7 +1536,7 @@ static void
   vl_api_one_add_del_l2_arp_entry_reply_t *rmp;
   int rv = 0;
   gid_address_t _arp, *arp = &_arp;
-  memset (arp, 0, sizeof (*arp));
+  clib_memset (arp, 0, sizeof (*arp));
 
   gid_address_type (arp) = GID_ADDR_ARP;
   gid_address_arp_bd (arp) = clib_net_to_host_u32 (mp->bd);
@@ -1580,7 +1555,7 @@ vl_api_one_add_del_ndp_entry_t_handler (vl_api_one_add_del_ndp_entry_t * mp)
   vl_api_one_add_del_ndp_entry_reply_t *rmp;
   int rv = 0;
   gid_address_t _g, *g = &_g;
-  memset (g, 0, sizeof (*g));
+  clib_memset (g, 0, sizeof (*g));
 
   gid_address_type (g) = GID_ADDR_NDP;
   gid_address_ndp_bd (g) = clib_net_to_host_u32 (mp->bd);
@@ -1756,10 +1731,82 @@ vl_api_one_ndp_entries_get_t_handler (vl_api_one_ndp_entries_get_t * mp)
   vec_free (entries);
 }
 
+static void
+  vl_api_one_enable_disable_xtr_mode_t_handler
+  (vl_api_one_enable_disable_xtr_mode_t * mp)
+{
+  vl_api_one_enable_disable_xtr_mode_reply_t *rmp = 0;
+  int rv = vnet_lisp_enable_disable_xtr_mode (mp->is_en);
+
+  REPLY_MACRO (VL_API_ONE_ENABLE_DISABLE_XTR_MODE_REPLY);
+}
+
+static void
+vl_api_one_show_xtr_mode_t_handler (vl_api_one_show_xtr_mode_t * mp)
+{
+  vl_api_one_show_xtr_mode_reply_t *rmp = 0;
+  int rv = 0;
+
+  /* *INDENT-OFF* */
+  REPLY_MACRO2 (VL_API_ONE_SHOW_XTR_MODE_REPLY,
+  {
+    rmp->is_en = vnet_lisp_get_xtr_mode ();
+  });
+  /* *INDENT-ON* */
+}
+
+static void
+  vl_api_one_enable_disable_pitr_mode_t_handler
+  (vl_api_one_enable_disable_pitr_mode_t * mp)
+{
+  vl_api_one_enable_disable_pitr_mode_reply_t *rmp = 0;
+  int rv = vnet_lisp_enable_disable_pitr_mode (mp->is_en);
+
+  REPLY_MACRO (VL_API_ONE_ENABLE_DISABLE_PITR_MODE_REPLY);
+}
+
+static void
+vl_api_one_show_pitr_mode_t_handler (vl_api_one_show_pitr_mode_t * mp)
+{
+  vl_api_one_show_pitr_mode_reply_t *rmp = 0;
+  int rv = 0;
+
+  /* *INDENT-OFF* */
+  REPLY_MACRO2 (VL_API_ONE_SHOW_PITR_MODE_REPLY,
+  {
+    rmp->is_en = vnet_lisp_get_pitr_mode ();
+  });
+  /* *INDENT-ON* */
+}
+
+static void
+  vl_api_one_enable_disable_petr_mode_t_handler
+  (vl_api_one_enable_disable_petr_mode_t * mp)
+{
+  vl_api_one_enable_disable_petr_mode_reply_t *rmp = 0;
+  int rv = vnet_lisp_enable_disable_petr_mode (mp->is_en);
+
+  REPLY_MACRO (VL_API_ONE_ENABLE_DISABLE_PETR_MODE_REPLY);
+}
+
+static void
+vl_api_one_show_petr_mode_t_handler (vl_api_one_show_petr_mode_t * mp)
+{
+  vl_api_one_show_petr_mode_reply_t *rmp = 0;
+  int rv = 0;
+
+  /* *INDENT-OFF* */
+  REPLY_MACRO2 (VL_API_ONE_SHOW_PETR_MODE_REPLY,
+  {
+    rmp->is_en = vnet_lisp_get_petr_mode ();
+  });
+  /* *INDENT-ON* */
+}
+
 /*
  * one_api_hookup
  * Add vpe's API message handlers to the table.
- * vlib has alread mapped shared memory and
+ * vlib has already mapped shared memory and
  * added the client registration handlers.
  * See .../vlib-api/vlibmemory/memclnt_vlib.c:memclnt_process()
  */

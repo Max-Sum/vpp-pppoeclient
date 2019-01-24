@@ -26,6 +26,7 @@
 
 #include <vppinfra/clib.h>
 #include <vppinfra/mem.h>
+#include <vppinfra/time.h>
 #include <vppinfra/format.h>
 #include <vppinfra/clib_error.h>
 #include <vppinfra/linux/syscall.h>
@@ -45,13 +46,147 @@
 #define F_SEAL_WRITE    0x0008	/* prevent writes */
 #endif
 
-int
-clib_mem_vm_get_log2_page_size (int fd)
+
+uword
+clib_mem_get_page_size (void)
+{
+  return getpagesize ();
+}
+
+uword
+clib_mem_get_default_hugepage_size (void)
+{
+  unformat_input_t input;
+  static u32 size = 0;
+  int fd;
+
+  if (size)
+    goto done;
+
+  /*
+   * If the kernel doesn't support hugepages, /proc/meminfo won't
+   * say anything about it. Use the regular page size as a default.
+   */
+  size = clib_mem_get_page_size () / 1024;
+
+  if ((fd = open ("/proc/meminfo", 0)) == -1)
+    return 0;
+
+  unformat_init_clib_file (&input, fd);
+
+  while (unformat_check_input (&input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (&input, "Hugepagesize:%_%u kB", &size))
+	;
+      else
+	unformat_skip_line (&input);
+    }
+  unformat_free (&input);
+  close (fd);
+done:
+  return 1024ULL * size;
+}
+
+u64
+clib_mem_get_fd_page_size (int fd)
 {
   struct stat st = { 0 };
   if (fstat (fd, &st) == -1)
     return 0;
-  return min_log2 (st.st_blksize);
+  return st.st_blksize;
+}
+
+int
+clib_mem_get_fd_log2_page_size (int fd)
+{
+  return min_log2 (clib_mem_get_fd_page_size (fd));
+}
+
+void
+clib_mem_vm_randomize_va (uword * requested_va, u32 log2_page_size)
+{
+  u8 bit_mask = 15;
+
+  if (log2_page_size <= 12)
+    bit_mask = 15;
+  else if (log2_page_size > 12 && log2_page_size <= 16)
+    bit_mask = 3;
+  else
+    bit_mask = 0;
+
+  *requested_va +=
+    (clib_cpu_time_now () & bit_mask) * (1ull << log2_page_size);
+}
+
+#ifndef MFD_HUGETLB
+#define MFD_HUGETLB 0x0004U
+#endif
+
+clib_error_t *
+clib_mem_create_fd (char *name, int *fdp)
+{
+  int fd;
+
+  ASSERT (name);
+
+  if ((fd = memfd_create (name, MFD_ALLOW_SEALING)) == -1)
+    return clib_error_return_unix (0, "memfd_create");
+
+  if ((fcntl (fd, F_ADD_SEALS, F_SEAL_SHRINK)) == -1)
+    {
+      close (fd);
+      return clib_error_return_unix (0, "fcntl (F_ADD_SEALS)");
+    }
+
+  *fdp = fd;
+  return 0;
+}
+
+clib_error_t *
+clib_mem_create_hugetlb_fd (char *name, int *fdp)
+{
+  clib_error_t *err = 0;
+  int fd = -1;
+  static int memfd_hugetlb_supported = 1;
+  char *mount_dir;
+  char template[] = "/tmp/hugepage_mount.XXXXXX";
+  u8 *filename;
+
+  ASSERT (name);
+
+  if (memfd_hugetlb_supported)
+    {
+      if ((fd = memfd_create (name, MFD_HUGETLB)) != -1)
+	goto done;
+
+      /* avoid further tries if memfd MFD_HUGETLB is not supported */
+      if (errno == EINVAL && strnlen (name, 256) <= 249)
+	memfd_hugetlb_supported = 0;
+    }
+
+  mount_dir = mkdtemp (template);
+  if (mount_dir == 0)
+    return clib_error_return_unix (0, "mkdtemp \'%s\'", template);
+
+  if (mount ("none", (char *) mount_dir, "hugetlbfs", 0, NULL))
+    {
+      rmdir ((char *) mount_dir);
+      err = clib_error_return_unix (0, "mount hugetlb directory '%s'",
+				    mount_dir);
+    }
+
+  filename = format (0, "%s/%s%c", mount_dir, name, 0);
+  fd = open ((char *) filename, O_CREAT | O_RDWR, 0755);
+  umount2 ((char *) mount_dir, MNT_DETACH);
+  rmdir ((char *) mount_dir);
+
+  if (fd == -1)
+    err = clib_error_return_unix (0, "open");
+
+done:
+  if (fd != -1)
+    fdp[0] = fd;
+  return err;
 }
 
 clib_error_t *
@@ -61,22 +196,22 @@ clib_mem_vm_ext_alloc (clib_mem_vm_alloc_t * a)
   clib_error_t *err = 0;
   void *addr = 0;
   u8 *filename = 0;
-  int mmap_flags = MAP_SHARED;
+  int mmap_flags = 0;
   int log2_page_size;
   int n_pages;
   int old_mpol = -1;
-  u64 old_mask[16] = { 0 };
+  long unsigned int old_mask[16] = { 0 };
 
   /* save old numa mem policy if needed */
   if (a->flags & (CLIB_MEM_VM_F_NUMA_PREFER | CLIB_MEM_VM_F_NUMA_FORCE))
     {
       int rv;
-      rv =
-	get_mempolicy (&old_mpol, old_mask, sizeof (old_mask) * 8 + 1, 0, 0);
+      rv = get_mempolicy (&old_mpol, old_mask, sizeof (old_mask) * 8 + 1,
+			  0, 0);
 
       if (rv == -1)
 	{
-	  if ((a->flags & CLIB_MEM_VM_F_NUMA_FORCE) != 0)
+	  if (a->numa_node != 0 && (a->flags & CLIB_MEM_VM_F_NUMA_FORCE) != 0)
 	    {
 	      err = clib_error_return_unix (0, "get_mempolicy");
 	      goto error;
@@ -86,80 +221,59 @@ clib_mem_vm_ext_alloc (clib_mem_vm_alloc_t * a)
 	}
     }
 
+  if (a->flags & CLIB_MEM_VM_F_LOCKED)
+    mmap_flags |= MAP_LOCKED;
+
   /* if we are creating shared segment, we need file descriptor */
   if (a->flags & CLIB_MEM_VM_F_SHARED)
     {
+      mmap_flags |= MAP_SHARED;
       /* if hugepages are needed we need to create mount point */
       if (a->flags & CLIB_MEM_VM_F_HUGETLB)
 	{
-	  char *mount_dir;
-	  char template[] = "/tmp/hugepage_mount.XXXXXX";
+	  if ((err = clib_mem_create_hugetlb_fd (a->name, &fd)))
+	    goto error;
 
-	  mount_dir = mkdtemp (template);
-	  if (mount_dir == 0)
-	    return clib_error_return_unix (0, "mkdtemp \'%s\'", template);
-
-	  if (mount ("none", (char *) mount_dir, "hugetlbfs", 0, NULL))
-	    {
-	      err = clib_error_return_unix (0, "mount hugetlb directory '%s'",
-					    mount_dir);
-	      goto error;
-	    }
-
-	  filename = format (0, "%s/%s%c", mount_dir, a->name, 0);
-
-	  if ((fd = open ((char *) filename, O_CREAT | O_RDWR, 0755)) == -1)
-	    {
-	      err = clib_error_return_unix (0, "open");
-	      goto error;
-	    }
-	  umount2 ((char *) mount_dir, MNT_DETACH);
-	  rmdir ((char *) mount_dir);
 	  mmap_flags |= MAP_LOCKED;
 	}
       else
 	{
-	  if ((fd = memfd_create (a->name, MFD_ALLOW_SEALING)) == -1)
-	    {
-	      err = clib_error_return_unix (0, "memfd_create");
-	      goto error;
-	    }
-
-	  if ((fcntl (fd, F_ADD_SEALS, F_SEAL_SHRINK)) == -1)
-	    {
-	      err = clib_error_return_unix (0, "fcntl (F_ADD_SEALS)");
-	      goto error;
-	    }
+	  if ((err = clib_mem_create_fd (a->name, &fd)))
+	    goto error;
 	}
-      log2_page_size = clib_mem_vm_get_log2_page_size (fd);
 
+      log2_page_size = clib_mem_get_fd_log2_page_size (fd);
       if (log2_page_size == 0)
 	{
 	  err = clib_error_return_unix (0, "cannot determine page size");
 	  goto error;
 	}
+
+      if (a->requested_va)
+	{
+	  clib_mem_vm_randomize_va (&a->requested_va, log2_page_size);
+	  mmap_flags |= MAP_FIXED;
+	}
     }
   else				/* not CLIB_MEM_VM_F_SHARED */
     {
+      mmap_flags |= MAP_PRIVATE | MAP_ANONYMOUS;
       if (a->flags & CLIB_MEM_VM_F_HUGETLB)
 	{
-	  mmap_flags |= MAP_HUGETLB | MAP_PRIVATE | MAP_ANONYMOUS;
+	  mmap_flags |= MAP_HUGETLB;
 	  log2_page_size = 21;
 	}
       else
 	{
-	  mmap_flags |= MAP_PRIVATE | MAP_ANONYMOUS;
 	  log2_page_size = min_log2 (sysconf (_SC_PAGESIZE));
 	}
     }
 
   n_pages = ((a->size - 1) >> log2_page_size) + 1;
 
-
   if (a->flags & CLIB_MEM_VM_F_HUGETLB_PREALLOC)
     {
-      err = clib_sysfs_prealloc_hugepages (a->numa_node,
-					   1 << (log2_page_size - 10),
+      err = clib_sysfs_prealloc_hugepages (a->numa_node, log2_page_size,
 					   n_pages);
       if (err)
 	goto error;
@@ -167,7 +281,7 @@ clib_mem_vm_ext_alloc (clib_mem_vm_alloc_t * a)
     }
 
   if (fd != -1)
-    if ((ftruncate (fd, a->size)) == -1)
+    if ((ftruncate (fd, (u64) n_pages * (1 << log2_page_size))) == -1)
       {
 	err = clib_error_return_unix (0, "ftruncate");
 	goto error;
@@ -176,24 +290,26 @@ clib_mem_vm_ext_alloc (clib_mem_vm_alloc_t * a)
   if (old_mpol != -1)
     {
       int rv;
-      u64 mask[16] = { 0 };
+      long unsigned int mask[16] = { 0 };
       mask[0] = 1 << a->numa_node;
       rv = set_mempolicy (MPOL_BIND, mask, sizeof (mask) * 8 + 1);
-      if (rv)
+      if (rv == -1 && a->numa_node != 0 &&
+	  (a->flags & CLIB_MEM_VM_F_NUMA_FORCE) != 0)
 	{
 	  err = clib_error_return_unix (0, "set_mempolicy");
 	  goto error;
 	}
     }
 
-  addr = mmap (0, a->size, (PROT_READ | PROT_WRITE), mmap_flags, fd, 0);
+  addr = mmap (uword_to_pointer (a->requested_va, void *), a->size,
+	       (PROT_READ | PROT_WRITE), mmap_flags, fd, 0);
   if (addr == MAP_FAILED)
     {
       err = clib_error_return_unix (0, "mmap");
       goto error;
     }
 
-  /* re-apply ole numa memory policy */
+  /* re-apply old numa memory policy */
   if (old_mpol != -1 &&
       set_mempolicy (old_mpol, old_mask, sizeof (old_mask) * 8 + 1) == -1)
     {
@@ -214,6 +330,17 @@ error:
 done:
   vec_free (filename);
   return err;
+}
+
+void
+clib_mem_vm_ext_free (clib_mem_vm_alloc_t * a)
+{
+  if (a != 0)
+    {
+      clib_mem_vm_free (a->addr, 1ull << a->log2_page_size);
+      if (a->fd != -1)
+	close (a->fd);
+    }
 }
 
 u64 *
@@ -255,7 +382,24 @@ done:
   return r;
 }
 
+clib_error_t *
+clib_mem_vm_ext_map (clib_mem_vm_map_t * a)
+{
+  int mmap_flags = MAP_SHARED;
+  void *addr;
 
+  if (a->requested_va)
+    mmap_flags |= MAP_FIXED;
+
+  addr = (void *) mmap (uword_to_pointer (a->requested_va, void *), a->size,
+			PROT_READ | PROT_WRITE, mmap_flags, a->fd, 0);
+
+  if (addr == MAP_FAILED)
+    return clib_error_return_unix (0, "mmap");
+
+  a->addr = addr;
+  return 0;
+}
 
 /*
  * fd.io coding-style-patch-verification: ON

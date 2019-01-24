@@ -157,7 +157,7 @@ main (int argc, char *argv[])
   argc--;
   argv++;
 
-  if (argc > 1 && strcmp (argv[0], "-s") == 0)
+  if (argc > 1 && strncmp (argv[0], "-s", 2) == 0)
     {
       s->config = argv[1];
       argc -= 2;
@@ -180,7 +180,7 @@ main (int argc, char *argv[])
   if (is_interactive)
     {
       /* Capture terminal resize events */
-      memset (&sa, 0, sizeof (struct sigaction));
+      clib_memset (&sa, 0, sizeof (struct sigaction));
       sa.sa_handler = signal_handler_winch;
       if (sigaction (SIGWINCH, &sa, 0) < 0)
 	{

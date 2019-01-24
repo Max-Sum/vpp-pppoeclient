@@ -66,6 +66,7 @@ add_type (ethernet_main_t * em, ethernet_type_t type, char *type_name)
 VNET_FEATURE_ARC_INIT (ethernet_output, static) =
 {
   .arc_name  = "ethernet-output",
+  .last_in_arc = "error-drop",
   .start_nodes = VNET_FEATURES ("adj-l2-midchain"),
   .arc_index_ptr = &ethernet_main.output_feature_arc_index,
 };
@@ -115,7 +116,6 @@ VLIB_INIT_FUNCTION (ethernet_init);
 ethernet_main_t *
 ethernet_get_main (vlib_main_t * vm)
 {
-  vlib_call_init_function (vm, ethernet_init);
   return &ethernet_main;
 }
 

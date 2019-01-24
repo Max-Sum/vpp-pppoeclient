@@ -22,6 +22,7 @@ nil
      (setq plugin-name (read-string "Plugin name: ")))
 '(setq PLUGIN-NAME (upcase plugin-name))
 '(setq capital-oh-en "ON")
+'(setq main-p (concat (substring plugin-name 0 1) "mp"))
 "/*
  * " plugin-name ".c - skeleton vpp engine plug-in
  *
@@ -45,7 +46,6 @@ nil
 
 #include <vlibapi/api.h>
 #include <vlibmemory/api.h>
-#include <vlibsocket/api.h>
 #include <vpp/app/version.h>
 
 /* define message IDs */
@@ -72,29 +72,10 @@ nil
 #include <" plugin-name "/" plugin-name "_all_api_h.h>
 #undef vl_api_version
 
-/*
- * A handy macro to set up a message reply.
- * Assumes that the following variables are available:
- * mp - pointer to request message
- * rmp - pointer to reply message type
- * rv - return value
- */
+#define REPLY_MSG_ID_BASE " main-p "->msg_id_base
+#include <vlibapi/api_helper_macros.h>
 
-#define REPLY_MACRO(t)                                          \\
-do {                                                            \\
-    unix_shared_memory_queue_t * q =                            \\
-    vl_api_client_index_to_input_queue (mp->client_index);      \\
-    if (!q)                                                     \\
-        return;                                                 \\
-                                                                \\
-    rmp = vl_msg_api_alloc (sizeof (*rmp));                     \\
-    rmp->_vl_msg_id = ntohs((t)+sm->msg_id_base);               \\
-    rmp->context = mp->context;                                 \\
-    rmp->retval = ntohl(rv);                                    \\
-                                                                \\
-    vl_msg_api_send_shmem (q, (u8 *)&rmp);                      \\
-} while(0);
-
+" plugin-name "_main_t " plugin-name "_main;
 
 /* List of message types that this plugin understands */
 
@@ -103,24 +84,29 @@ _(" PLUGIN-NAME "_ENABLE_DISABLE, " plugin-name "_enable_disable)
 
 /* Action function shared between message handler and debug CLI */
 
-int " plugin-name "_enable_disable (" plugin-name "_main_t * sm, u32 sw_if_index,
+int " plugin-name "_enable_disable (" plugin-name "_main_t * " main-p ", u32 sw_if_index,
                                    int enable_disable)
 {
   vnet_sw_interface_t * sw;
   int rv = 0;
 
   /* Utterly wrong? */
-  if (pool_is_free_index (sm->vnet_main->interface_main.sw_interfaces,
+  if (pool_is_free_index (" main-p "->vnet_main->interface_main.sw_interfaces,
                           sw_if_index))
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
   /* Not a physical port? */
-  sw = vnet_get_sw_interface (sm->vnet_main, sw_if_index);
+  sw = vnet_get_sw_interface (" main-p "->vnet_main, sw_if_index);
   if (sw->type != VNET_SW_INTERFACE_TYPE_HARDWARE)
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
   vnet_feature_enable_disable (\"device-input\", \"" plugin-name "\",
                                sw_if_index, enable_disable, 0, 0);
+
+  /* Send an event to enable/disable the periodic scanner process */
+  vlib_process_signal_event (" main-p "->vlib_main, " plugin-name"_periodic_node.index, 
+                            " PLUGIN-NAME"_EVENT_PERIODIC_ENABLE_DISABLE, 
+                            (uword)enable_disable);
 
   return rv;
 }
@@ -130,7 +116,7 @@ static clib_error_t *
                                    unformat_input_t * input,
                                    vlib_cli_command_t * cmd)
 {
-  " plugin-name "_main_t * sm = &" plugin-name "_main;
+  " plugin-name "_main_t * " main-p " = &" plugin-name "_main;
   u32 sw_if_index = ~0;
   int enable_disable = 1;
 
@@ -141,7 +127,7 @@ static clib_error_t *
       if (unformat (input, \"disable\"))
         enable_disable = 0;
       else if (unformat (input, \"%U\", unformat_vnet_sw_interface,
-                         sm->vnet_main, &sw_if_index))
+                         " main-p "->vnet_main, &sw_if_index))
         ;
       else
         break;
@@ -150,7 +136,7 @@ static clib_error_t *
   if (sw_if_index == ~0)
     return clib_error_return (0, \"Please specify an interface...\");
 
-  rv = " plugin-name "_enable_disable (sm, sw_if_index, enable_disable);
+  rv = " plugin-name "_enable_disable (" main-p ", sw_if_index, enable_disable);
 
   switch(rv) 
     {
@@ -188,10 +174,10 @@ static void vl_api_" plugin-name "_enable_disable_t_handler
 (vl_api_" plugin-name "_enable_disable_t * mp)
 {
   vl_api_" plugin-name "_enable_disable_reply_t * rmp;
-  " plugin-name "_main_t * sm = &" plugin-name "_main;
+  " plugin-name "_main_t * " main-p " = &" plugin-name "_main;
   int rv;
 
-  rv = " plugin-name "_enable_disable (sm, ntohl(mp->sw_if_index),
+  rv = " plugin-name "_enable_disable (" main-p ", ntohl(mp->sw_if_index),
                                       (int) (mp->enable_disable));
 
   REPLY_MACRO(VL_API_" PLUGIN-NAME "_ENABLE_DISABLE_REPLY);
@@ -201,9 +187,9 @@ static void vl_api_" plugin-name "_enable_disable_t_handler
 static clib_error_t *
 " plugin-name "_plugin_api_hookup (vlib_main_t *vm)
 {
-  " plugin-name "_main_t * sm = &" plugin-name "_main;
+  " plugin-name "_main_t * " main-p " = &" plugin-name "_main;
 #define _(N,n)                                                  \\
-    vl_msg_api_set_handlers((VL_API_##N + sm->msg_id_base),     \\
+    vl_msg_api_set_handlers((VL_API_##N + " main-p "->msg_id_base),     \\
                            #n,					\\
                            vl_api_##n##_t_handler,              \\
                            vl_noop_handler,                     \\
@@ -221,30 +207,33 @@ static clib_error_t *
 #undef vl_msg_name_crc_list
 
 static void
-setup_message_id_table (" plugin-name "_main_t * sm, api_main_t * am)
+setup_message_id_table (" plugin-name "_main_t * " main-p ", api_main_t * am)
 {
 #define _(id,n,crc) \
-  vl_msg_api_add_msg_name_crc (am, #n "_" #crc, id + sm->msg_id_base);
+  vl_msg_api_add_msg_name_crc (am, #n "_" #crc, id + " main-p "->msg_id_base);
   foreach_vl_msg_name_crc_" plugin-name" ;
 #undef _
 }
 
 static clib_error_t * " plugin-name "_init (vlib_main_t * vm)
 {
-  " plugin-name "_main_t * sm = &" plugin-name "_main;
+  " plugin-name "_main_t * " main-p " = &" plugin-name "_main;
   clib_error_t * error = 0;
   u8 * name;
+
+  " main-p "->vlib_main = vm;
+  " main-p "->vnet_main = vnet_get_main();
 
   name = format (0, \"" plugin-name "_%08x%c\", api_version, 0);
 
   /* Ask for a correctly-sized block of API message decode slots */
-  sm->msg_id_base = vl_msg_api_get_msg_ids
+  " main-p "->msg_id_base = vl_msg_api_get_msg_ids
       ((char *) name, VL_MSG_FIRST_AVAILABLE);
 
   error = " plugin-name "_plugin_api_hookup (vm);
 
   /* Add our API messages to the global name_crc hash table */
-  setup_message_id_table (sm, &api_main);
+  setup_message_id_table (" main-p ", &api_main);
 
   vec_free(name);
 
@@ -266,6 +255,7 @@ VNET_FEATURE_INIT (" plugin-name ", static) =
 VLIB_PLUGIN_REGISTER () = 
 {
   .version = VPP_BUILD_VER,
+  .description = \"" plugin-name " plugin description goes here\",
 };
 /* *INDENT-ON* */
 

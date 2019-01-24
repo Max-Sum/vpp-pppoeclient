@@ -26,6 +26,7 @@
 typedef struct
 {
   u8 *name;
+  u8 *filename;
   struct stat file_info;
   void *handle;
 } plugin_info_t;
@@ -45,7 +46,7 @@ typedef struct
 
 } plugin_main_t;
 
-plugin_main_t vat_plugin_main;
+extern plugin_main_t vat_plugin_main;
 
 int vat_plugin_init (vat_main_t * vam);
 int vat_load_new_plugins (plugin_main_t * pm);

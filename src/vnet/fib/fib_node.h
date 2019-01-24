@@ -43,30 +43,39 @@ typedef enum fib_node_type_t_ {
     FIB_NODE_TYPE_VXLAN_TUNNEL,
     FIB_NODE_TYPE_MAP_E,
     FIB_NODE_TYPE_VXLAN_GPE_TUNNEL,
+    FIB_NODE_TYPE_GENEVE_TUNNEL,
+    FIB_NODE_TYPE_UDP_ENCAP,
+    FIB_NODE_TYPE_BIER_FMASK,
+    FIB_NODE_TYPE_BIER_ENTRY,
+    FIB_NODE_TYPE_VXLAN_GBP_TUNNEL,
     /**
      * Marker. New types before this one. leave the test last.
      */
     FIB_NODE_TYPE_TEST,
     FIB_NODE_TYPE_LAST = FIB_NODE_TYPE_TEST,
-} fib_node_type_t;
+} __attribute__ ((packed)) fib_node_type_t;
 
 #define FIB_NODE_TYPE_MAX (FIB_NODE_TYPE_LAST + 1)
 
-#define FIB_NODE_TYPES {                          \
-    [FIB_NODE_TYPE_ENTRY]     = "entry",          \
-    [FIB_NODE_TYPE_MFIB_ENTRY] = "mfib-entry",    \
-    [FIB_NODE_TYPE_WALK]      = "walk",           \
-    [FIB_NODE_TYPE_PATH_LIST] = "path-list",      \
-    [FIB_NODE_TYPE_PATH]      = "path",           \
-    [FIB_NODE_TYPE_MPLS_ENTRY] = "mpls-entry",    \
-    [FIB_NODE_TYPE_MPLS_TUNNEL] = "mpls-tunnel",  \
-    [FIB_NODE_TYPE_ADJ] = "adj",                  \
-    [FIB_NODE_TYPE_LISP_GPE_FWD_ENTRY] = "lisp-gpe-fwd-entry", \
-    [FIB_NODE_TYPE_LISP_ADJ] = "lisp-adj", \
-    [FIB_NODE_TYPE_GRE_TUNNEL] = "gre-tunnel", \
-    [FIB_NODE_TYPE_VXLAN_TUNNEL] = "vxlan-tunnel", \
-    [FIB_NODE_TYPE_MAP_E] = "map-e", \
-    [FIB_NODE_TYPE_VXLAN_GPE_TUNNEL] = "vxlan-gpe-tunnel", \
+#define FIB_NODE_TYPES {					\
+    [FIB_NODE_TYPE_ENTRY]     = "entry",			\
+    [FIB_NODE_TYPE_MFIB_ENTRY] = "mfib-entry",			\
+    [FIB_NODE_TYPE_WALK]      = "walk",				\
+    [FIB_NODE_TYPE_PATH_LIST] = "path-list",			\
+    [FIB_NODE_TYPE_PATH]      = "path",				\
+    [FIB_NODE_TYPE_MPLS_ENTRY] = "mpls-entry",			\
+    [FIB_NODE_TYPE_MPLS_TUNNEL] = "mpls-tunnel",		\
+    [FIB_NODE_TYPE_ADJ] = "adj",				\
+    [FIB_NODE_TYPE_LISP_GPE_FWD_ENTRY] = "lisp-gpe-fwd-entry",	\
+    [FIB_NODE_TYPE_LISP_ADJ] = "lisp-adj",			\
+    [FIB_NODE_TYPE_GRE_TUNNEL] = "gre-tunnel",			\
+    [FIB_NODE_TYPE_VXLAN_TUNNEL] = "vxlan-tunnel",		\
+    [FIB_NODE_TYPE_MAP_E] = "map-e",				\
+    [FIB_NODE_TYPE_VXLAN_GPE_TUNNEL] = "vxlan-gpe-tunnel",	\
+    [FIB_NODE_TYPE_UDP_ENCAP] = "udp-encap",			\
+    [FIB_NODE_TYPE_BIER_FMASK] = "bier-fmask",			\
+    [FIB_NODE_TYPE_BIER_ENTRY] = "bier-entry",			\
+    [FIB_NODE_TYPE_VXLAN_GBP_TUNNEL] = "vxlan-gbp-tunnel"	\
 }
 
 /**
@@ -147,11 +156,14 @@ typedef enum fib_node_bw_reason_flag_t_ {
 STATIC_ASSERT(sizeof(fib_node_bw_reason_flag_t) < 2,
 	      "BW Reason enum < 2 byte. Consequences for cover_upd_res_t");
 
+extern u8 *format_fib_node_bw_reason(u8 *s, va_list *args);
+
 /**
  * Flags on the walk
  */
 typedef enum fib_node_bw_flags_t_
 {
+    FIB_NODE_BW_FLAG_NONE = 0,
     /**
      * Force the walk to be synchronous
      */
@@ -277,18 +289,15 @@ typedef struct fib_node_vft_t_ {
  * Objects in the FIB form a graph.
  */
 typedef struct fib_node_t_ {
-#if CLIB_DEBUG > 0
     /**
      * The node's type. make sure we are dynamic/down casting correctly
      */
     fib_node_type_t fn_type;
-#endif
+
     /**
-     * The node's VFT.
-     * we could store the type here instead, and lookup the VFT using that. But
-     * I like this better,
+     * Some pad space the concrete/derived type is free to use
      */
-    const fib_node_vft_t *fn_vft;
+    u16 fn_pad;
 
     /**
      * Vector of nodes that depend upon/use/share this node
@@ -301,6 +310,8 @@ typedef struct fib_node_t_ {
      */
     u32 fn_locks;
 } fib_node_t;
+
+STATIC_ASSERT(sizeof(fib_node_t) == 12, "FIB node type is growing");
 
 /**
  * @brief

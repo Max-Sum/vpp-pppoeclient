@@ -42,8 +42,8 @@ typedef enum lookup_table_t_ {
 } __attribute__ ((packed)) lookup_table_t;
 
 #define LOOKUP_TABLES {                                   \
-    [LOOKUP_INPUT_SRC_ADDR] = "table-input-interface",    \
-    [LOOKUP_INPUT_DST_ADDR] = "table-configured",         \
+    [LOOKUP_TABLE_FROM_INPUT_INTERFACE] = "table-input-interface",    \
+    [LOOKUP_TABLE_FROM_CONFIG] = "table-configured",         \
 }
 
 /**
@@ -64,6 +64,12 @@ typedef enum lookup_cast_t_ {
  */
 typedef struct lookup_dpo_t
 {
+    /**
+     * required for pool_get_aligned.
+     *  memebers used in the switch path come first!
+     */
+    CLIB_CACHE_LINE_ALIGN_MARK(cacheline0);
+
     /**
      * The FIB, or interface from which to get a FIB, in which to perform
      * the next lookup;

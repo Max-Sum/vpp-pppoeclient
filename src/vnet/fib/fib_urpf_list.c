@@ -22,13 +22,13 @@
 fib_urpf_list_t *fib_urpf_list_pool;
 
 u8 *
-format_fib_urpf_list (u8 *s, va_list args)
+format_fib_urpf_list (u8 *s, va_list *args)
 {
     fib_urpf_list_t *urpf;
     index_t ui;
     u32 *swi;
 
-    ui = va_arg(args, index_t);
+    ui = va_arg(*args, index_t);
 
     if (INDEX_INVALID != ui)
     {
@@ -57,7 +57,7 @@ fib_urpf_list_alloc_and_lock (void)
     fib_urpf_list_t *urpf;
 
     pool_get(fib_urpf_list_pool, urpf);
-    memset(urpf, 0, sizeof(*urpf));
+    clib_memset(urpf, 0, sizeof(*urpf));
 
     urpf->furpf_locks++;
 

@@ -39,7 +39,7 @@
 #define included_clib_vec_bootstrap_h
 
 /** \file
-    Vector bootsrap header file
+    Vector bootstrap header file
 */
 
 /* Bootstrap include so that #include <vppinfra/mem.h> can include e.g.
@@ -47,7 +47,7 @@
 
 /** \brief vector header structure
 
-   Bookeeping header preceding vector elements in memory.
+   Bookkeeping header preceding vector elements in memory.
    User header information may preceed standard vec header.
    If you change u32 len -> u64 len, single vectors can
    exceed 2**32 elements. Clib heaps are vectors. */
@@ -58,6 +58,7 @@ typedef struct
   u64 len;
 #else
   u32 len; /**< Number of elements in vector (NOT its allocated length). */
+  u32 dlmalloc_header_offset;	/**< offset to memory allocator offset  */
 #endif
   u8 vector_data[0];  /**< Vector data . */
 } vec_header_t;
@@ -189,6 +190,10 @@ for (var = vec_end (vec) - 1; var >= (vec); var--)
 
 /** \brief Iterate over vector indices. */
 #define vec_foreach_index(var,v) for ((var) = 0; (var) < vec_len (v); (var)++)
+
+/** \brief Iterate over vector indices (reverse). */
+#define vec_foreach_index_backwards(var,v) \
+  for ((var) = vec_len((v)) - 1; (var) >= 0; (var)--)
 
 #endif /* included_clib_vec_bootstrap_h */
 

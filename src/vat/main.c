@@ -15,6 +15,7 @@
 #include "vat.h"
 #include "plugin.h"
 #include <signal.h>
+#include <limits.h>
 
 vat_main_t vat_main;
 
@@ -24,17 +25,6 @@ void
 vat_suspend (vlib_main_t * vm, f64 interval)
 {
   /* do nothing in the standalone version, just return */
-}
-
-void
-fformat_append_cr (FILE * ofp, const char *fmt, ...)
-{
-  va_list va;
-
-  va_start (va, fmt);
-  (void) va_fformat (ofp, (char *) fmt, &va);
-  va_end (va);
-  fformat (ofp, "\n");
 }
 
 int
@@ -117,7 +107,7 @@ do_one_file (vat_main_t * vam)
       vec_free (this_cmd);
 
       this_cmd =
-	(u8 *) clib_macro_eval (&vam->macro_main, (char *) vam->inbuf,
+	(u8 *) clib_macro_eval (&vam->macro_main, (i8 *) vam->inbuf,
 				1 /* complain */ );
 
       if (vam->exec_mode == 0)
@@ -190,6 +180,17 @@ do_one_file (vat_main_t * vam)
 	  vam->regenerate_interface_table = 0;
 	  api_sw_interface_dump (vam);
 	}
+
+      /* Hack to pick up new client index after memfd_segment_create pivot */
+      if (vam->client_index_invalid)
+	{
+	  vat_main_t *vam = &vat_main;
+	  api_main_t *am = &api_main;
+
+	  vam->vl_input_queue = am->shmem_hdr->vl_input_queue;
+	  vam->my_client_index = am->my_client_index;
+	  vam->client_index_invalid = 0;
+	}
     }
 }
 
@@ -253,7 +254,7 @@ setup_signal_handlers (void)
 
   for (i = 1; i < 32; i++)
     {
-      memset (&sa, 0, sizeof (sa));
+      clib_memset (&sa, 0, sizeof (sa));
       sa.sa_sigaction = (void *) signal_handler;
       sa.sa_flags = SA_SIGINFO;
 
@@ -283,6 +284,37 @@ setup_signal_handlers (void)
     }
 }
 
+static void
+vat_find_plugin_path ()
+{
+  extern char *vat_plugin_path;
+  char *p, path[PATH_MAX];
+  int rv;
+  u8 *s;
+
+  /* find executable path */
+  if ((rv = readlink ("/proc/self/exe", path, PATH_MAX - 1)) == -1)
+    return;
+
+  /* readlink doesn't provide null termination */
+  path[rv] = 0;
+
+  /* strip filename */
+  if ((p = strrchr (path, '/')) == 0)
+    return;
+  *p = 0;
+
+  /* strip bin/ */
+  if ((p = strrchr (path, '/')) == 0)
+    return;
+  *p = 0;
+
+  s = format (0, "%s/lib/" CLIB_TARGET_TRIPLET "/vpp_api_test_plugins:"
+	      "%s/lib/vpp_api_test_plugins", path, path);
+  vec_add1 (s, 0);
+  vat_plugin_path = (char *) s;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -294,18 +326,10 @@ main (int argc, char **argv)
   u8 *this_input_file;
   u8 interactive = 1;
   u8 json_output = 0;
-  u8 *heap;
-  mheap_t *h;
   int i;
   f64 timeout;
 
-  clib_mem_init (0, 128 << 20);
-
-  heap = clib_mem_get_per_cpu_heap ();
-  h = mheap_header (heap);
-
-  /* make the main heap thread-safe */
-  h->flags |= MHEAP_FLAG_THREAD_SAFE;
+  clib_mem_init_thread_safe (0, 128 << 20);
 
   clib_macro_init (&vam->macro_main);
   clib_macro_add_builtin (&vam->macro_main, "current_file",
@@ -314,6 +338,10 @@ main (int argc, char **argv)
 			  eval_current_line);
 
   init_error_string_table (vam);
+  vec_validate (vam->cmd_reply, 0);
+  vec_reset_length (vam->cmd_reply);
+
+  vat_find_plugin_path ();
 
   unformat_init_command_line (a, argv);
 
@@ -327,6 +355,12 @@ main (int argc, char **argv)
 	interactive = 0;
       else if (unformat (a, "json"))
 	json_output = 1;
+      else if (unformat (a, "socket-name %s", &vam->socket_name))
+	;
+      else if (unformat (a, "default-socket"))
+	{
+	  vam->socket_name = format (0, "%s%c", API_SOCKET_FILE, 0);
+	}
       else if (unformat (a, "plugin_path %s", (u8 *) & vat_plugin_path))
 	vec_add1 (vat_plugin_path, 0);
       else if (unformat (a, "plugin_name_filter %s",
@@ -338,9 +372,12 @@ main (int argc, char **argv)
 	}
       else
 	{
-	  fformat (stderr,
-		   "%s: usage [in <f1> ... in <fn>] [out <fn>] [script] [json]\n",
-		   argv[0]);
+	  fformat
+	    (stderr,
+	     "%s: usage [in <f1> ... in <fn>] [out <fn>] [script] [json]\n"
+	     "[plugin_path <path>][default-socket][socket-name <name>]\n"
+	     "[plugin_name_filter <filter>][chroot prefix <path>]\n",
+	     argv[0]);
 	  exit (1);
 	}
     }
@@ -364,7 +401,11 @@ main (int argc, char **argv)
 
   setup_signal_handlers ();
 
-  if (connect_to_vpe ("vpp_api_test") < 0)
+  if (vam->socket_name && vat_socket_connect (vam))
+    fformat (stderr, "WARNING: socket connection failed");
+
+  if ((!vam->socket_client_main || vam->socket_client_main->socket_fd == 0)
+      && connect_to_vpe ("vpp_api_test") < 0)
     {
       svm_region_exit ();
       fformat (stderr, "Couldn't connect to vpe, exiting...\n");
@@ -374,9 +415,7 @@ main (int argc, char **argv)
   vam->json_output = json_output;
 
   if (!json_output)
-    {
-      api_sw_interface_dump (vam);
-    }
+    api_sw_interface_dump (vam);
 
   vec_validate (vam->inbuf, 4096);
 

@@ -102,6 +102,9 @@ typedef struct
   /* Store the original state of stdin when it's a tty */
   struct termios tio_stdin;
   int tio_isset;
+
+  u32 poll_sleep_usec;
+
 } unix_main_t;
 
 /* Global main structure. */
@@ -122,8 +125,6 @@ unix_save_error (unix_main_t * um, clib_error_t * error)
 
 /* Main function for Unix VLIB. */
 int vlib_unix_main (int argc, char *argv[]);
-
-clib_error_t *unix_physmem_init (vlib_main_t * vm);
 
 /* Set prompt for CLI. */
 void vlib_unix_cli_set_prompt (char *prompt);

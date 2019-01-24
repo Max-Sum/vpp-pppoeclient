@@ -63,6 +63,7 @@ typedef enum dpo_proto_t_
     DPO_PROTO_IP6,
     DPO_PROTO_MPLS,
     DPO_PROTO_ETHERNET,
+    DPO_PROTO_BIER,
     DPO_PROTO_NSH,
 } __attribute__((packed)) dpo_proto_t;
 
@@ -75,6 +76,7 @@ typedef enum dpo_proto_t_
     [DPO_PROTO_ETHERNET]  = "ethernet", \
     [DPO_PROTO_MPLS] = "mpls",	\
     [DPO_PROTO_NSH] = "nsh",    \
+    [DPO_PROTO_BIER] = "bier",	\
 }
 
 #define FOR_EACH_DPO_PROTO(_proto)    \
@@ -109,11 +111,19 @@ typedef enum dpo_type_t_ {
     DPO_LOOKUP,
     DPO_LISP_CP,
     DPO_CLASSIFY,
-    DPO_MPLS_LABEL,
-    DPO_MPLS_DISPOSITION,
+    DPO_MPLS_DISPOSITION_PIPE,
+    DPO_MPLS_DISPOSITION_UNIFORM,
     DPO_MFIB_ENTRY,
     DPO_INTERFACE_RX,
     DPO_INTERFACE_TX,
+    DPO_DVR,
+    DPO_L3_PROXY,
+    DPO_BIER_TABLE,
+    DPO_BIER_FMASK,
+    DPO_BIER_IMP,
+    DPO_BIER_DISP_TABLE,
+    DPO_BIER_DISP_ENTRY,
+    DPO_IP6_LL,
     DPO_LAST,
 } __attribute__((packed)) dpo_type_t;
 
@@ -136,11 +146,19 @@ typedef enum dpo_type_t_ {
     [DPO_REPLICATE] = "dpo-replicate",	\
     [DPO_LISP_CP] = "dpo-lisp-cp",	\
     [DPO_CLASSIFY] = "dpo-classify",	\
-    [DPO_MPLS_LABEL] = "dpo-mpls-label", \
-    [DPO_MPLS_DISPOSITION] = "dpo-mpls-diposition", \
-    [DPO_MFIB_ENTRY] = "dpo-mfib_entry", \
+    [DPO_MPLS_DISPOSITION_PIPE] = "dpo-mpls-diposition-pipe", \
+    [DPO_MPLS_DISPOSITION_UNIFORM] = "dpo-mpls-diposition-uniform", \
+    [DPO_MFIB_ENTRY] = "dpo-mfib-entry", \
     [DPO_INTERFACE_RX] = "dpo-interface-rx",	\
-    [DPO_INTERFACE_TX] = "dpo-interface-tx"	\
+    [DPO_INTERFACE_TX] = "dpo-interface-tx",	\
+    [DPO_DVR] = "dpo-dvr",	\
+    [DPO_L3_PROXY] = "dpo-l3-proxy",	\
+    [DPO_BIER_TABLE] = "bier-table",	\
+    [DPO_BIER_FMASK] = "bier-fmask",	\
+    [DPO_BIER_IMP] = "bier-imposition",	\
+    [DPO_BIER_DISP_ENTRY] = "bier-disp-entry",	\
+    [DPO_BIER_DISP_TABLE] = "bier-disp-table",	\
+    [DPO_IP6_LL] = "ip6-link-local",	\
 }
 
 /**
@@ -205,6 +223,14 @@ extern void dpo_lock(dpo_id_t *dpo);
  *  Release a reference counting lock on the DPO
  */
 extern void dpo_unlock(dpo_id_t *dpo);
+
+/**
+ * @brief
+ *  Make an interpose DPO from an original
+ */
+extern void dpo_mk_interpose(const dpo_id_t *original,
+                             const dpo_id_t *parent,
+                             dpo_id_t *clone);
 
 /**
  * @brief Set/create a DPO ID
@@ -308,15 +334,25 @@ extern void dpo_stack(dpo_type_t child_type,
  * @param child_node
  *  The VLIB grpah node index to create an arc from to the parent
  *
- * @parem dpo
+ * @param dpo
  *  This is the DPO to stack and set.
  *
- * @paren parent_dpo
+ * @param parent_dpo
  *  The parent DPO to stack onto.
  */ 
 extern void dpo_stack_from_node(u32 child_node,
                                 dpo_id_t *dpo,
                                 const dpo_id_t *parent);
+
+/**
+ * Get a uRPF interface for the DPO
+ *
+ * @param dpo
+ *  The DPO from which to get the uRPF interface
+ *
+ * @return valid SW interface index or ~0
+ */
+extern u32 dpo_get_urpf(const dpo_id_t *dpo);
 
 /**
  * @brief  A lock function registered for a DPO type
@@ -338,6 +374,24 @@ typedef void (*dpo_mem_show_t)(void);
  * the type/instance will use.
  */
 typedef u32* (*dpo_get_next_node_t)(const dpo_id_t *dpo);
+
+/**
+ * @brief Given a DPO instance return an interface that can
+ * be used in an uRPF check
+ */
+typedef u32 (*dpo_get_urpf_t)(const dpo_id_t *dpo);
+
+/**
+ * @brief Called during FIB interposition when the originally
+ * registered DPO is used to 'clone' an instance for interposition
+ * at a particular location in the FIB graph.
+ * The parent is the next DPO in the chain that the clone will
+ * be used instead of. The clone may then choose to stack itself
+ * on the parent.
+ */
+typedef void (*dpo_mk_interpose_t)(const dpo_id_t *original,
+                                   const dpo_id_t *parent,
+                                   dpo_id_t *clone);
 
 /**
  * @brief A virtual function table regisitered for a DPO type
@@ -367,6 +421,14 @@ typedef struct dpo_vft_t_
      * function
      */
     dpo_get_next_node_t dv_get_next_node;
+    /**
+     * Get uRPF interface
+     */
+    dpo_get_urpf_t dv_get_urpf;
+    /**
+     * Signal on an interposed child that the parent has changed
+     */
+    dpo_mk_interpose_t dv_mk_interpose;
 } dpo_vft_t;
 
 
@@ -408,4 +470,29 @@ extern void dpo_register(dpo_type_t type,
 extern dpo_type_t dpo_register_new_type(const dpo_vft_t *vft,
 					const char * const * const * nodes);
 
+/**
+ * @brief Return already stacked up next node index for a given
+ *        child_type/child_proto and parent_type/patent_proto.
+ *        The VLIB graph arc used is taken from the parent and child types
+ *        passed.
+ *
+ * @param child_type
+ *  Child DPO type.
+ *
+ * @param child_proto
+ *  Child DPO proto
+ *
+ * @param parent_type
+ *  Parent DPO type.
+ *
+ * @param parent_proto
+ *  Parent DPO proto
+ *
+ * @return The VLIB Graph node index
+ */
+extern u32
+dpo_get_next_node_by_type_and_proto (dpo_type_t   child_type,
+                                     dpo_proto_t  child_proto,
+                                     dpo_type_t   parent_type,
+                                     dpo_proto_t  parent_proto);
 #endif

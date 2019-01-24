@@ -184,7 +184,7 @@ free_elt_vector (timing_wheel_t * w, timing_wheel_elt_t * ev)
 {
   /* Poison free elements so we never use them by mistake. */
   if (CLIB_DEBUG > 0)
-    memset (ev, ~0, vec_len (ev) * sizeof (ev[0]));
+    clib_memset (ev, ~0, vec_len (ev) * sizeof (ev[0]));
   _vec_len (ev) = 0;
   vec_add1 (w->free_elt_vectors, ev);
 }
@@ -720,7 +720,7 @@ format_timing_wheel (u8 * s, va_list * va)
 {
   timing_wheel_t *w = va_arg (*va, timing_wheel_t *);
   int verbose = va_arg (*va, int);
-  uword indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
 
   s = format (s, "level 0: %.4e - %.4e secs, 2^%d - 2^%d clocks",
 	      (f64) (1 << w->log2_clocks_per_bin) / w->cpu_clocks_per_second,

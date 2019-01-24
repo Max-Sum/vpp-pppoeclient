@@ -102,7 +102,7 @@ graph_del_node (graph_t * g, u32 src)
 
   index = src_node - g->nodes;
   pool_put (g->nodes, src_node);
-  memset (src_node, ~0, sizeof (src_node[0]));
+  clib_memset (src_node, ~0, sizeof (src_node[0]));
 
   return index;
 }
@@ -156,7 +156,7 @@ format_graph (u8 * s, va_list * args)
   graph_t *g = va_arg (*args, graph_t *);
   graph_node_t *n;
   graph_link_t *l;
-  uword indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
 
   s = format (s, "graph %d nodes", pool_elts (g->nodes));
   /* *INDENT-OFF* */

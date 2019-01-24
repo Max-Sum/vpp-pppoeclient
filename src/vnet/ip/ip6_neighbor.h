@@ -40,9 +40,18 @@ typedef struct
   ip6_neighbor_key_t key;
   u8 link_layer_address[8];
   ip6_neighbor_flags_t flags;
-  u64 cpu_time_last_updated;
+  f64 time_last_updated;
   fib_node_index_t fib_entry_index;
 } ip6_neighbor_t;
+
+extern ip6_address_t ip6_neighbor_get_link_local_address (u32 sw_if_index);
+
+extern clib_error_t *ip6_neighbor_set_link_local_address (vlib_main_t * vm,
+							  u32 sw_if_index,
+							  ip6_address_t *
+							  address);
+
+extern ip6_neighbor_t *ip6_neighbors_pool (void);
 
 extern ip6_neighbor_t *ip6_neighbors_entries (u32 sw_if_index);
 
@@ -71,18 +80,15 @@ extern void vnet_register_ip6_neighbor_resolution_event (vnet_main_t * vnm,
 
 extern int vnet_set_ip6_ethernet_neighbor (vlib_main_t * vm,
 					   u32 sw_if_index,
-					   ip6_address_t * a,
-					   u8 * link_layer_address,
+					   const ip6_address_t * a,
+					   const u8 * link_layer_address,
 					   uword n_bytes_link_layer_address,
 					   int is_static,
 					   int is_no_fib_entry);
 
 extern int vnet_unset_ip6_ethernet_neighbor (vlib_main_t * vm,
 					     u32 sw_if_index,
-					     ip6_address_t * a,
-					     u8 * link_layer_address,
-					     uword
-					     n_bytes_link_layer_address);
+					     const ip6_address_t * a);
 
 extern int ip6_neighbor_proxy_add_del (u32 sw_if_index,
 				       ip6_address_t * addr, u8 is_add);
@@ -97,6 +103,104 @@ typedef struct
 } wc_nd_report_t;
 
 void wc_nd_set_publisher_node (uword node_index, uword event_type);
+
+typedef struct
+{
+  u32 irt;
+  u32 mrt;
+  u32 mrc;
+  u32 mrd;
+} icmp6_send_router_solicitation_params_t;
+
+void icmp6_send_router_solicitation (vlib_main_t * vm, u32 sw_if_index,
+				     u8 stop,
+				     icmp6_send_router_solicitation_params_t *
+				     params);
+
+typedef struct
+{
+  ip6_address_t dst_address;
+  u8 dst_address_length;
+  u8 flags;
+  u32 valid_time;
+  u32 preferred_time;
+} ra_report_prefix_info_t;
+
+typedef struct
+{
+  u32 sw_if_index;
+  u8 router_address[16];
+  u8 current_hop_limit;
+  u8 flags;
+  u16 router_lifetime_in_sec;
+  u32 neighbor_reachable_time_in_msec;
+  u32 time_in_msec_between_retransmitted_neighbor_solicitations;
+  u8 slla[6];
+  u32 mtu;
+  ra_report_prefix_info_t *prefixes;
+} ra_report_t;
+
+void ra_set_publisher_node (uword node_index, uword event_type);
+
+typedef struct _vnet_ip6_neighbor_function_list_elt
+{
+  struct _vnet_ip6_neighbor_function_list_elt *next_ip6_neighbor_function;
+  clib_error_t *(*fp) (void *data);
+} _vnet_ip6_neighbor_function_list_elt_t;
+
+typedef struct
+{
+  _vnet_ip6_neighbor_function_list_elt_t *ra_report_functions;
+} ip6_neighbor_public_main_t;
+
+extern ip6_neighbor_public_main_t ip6_neighbor_public_main;
+
+#define _VNET_IP6_NEIGHBOR_FUNCTION_DECL(f,tag)                           \
+                                                                          \
+static void __vnet_ip6_neighbor_function_init_##tag##_##f (void)          \
+    __attribute__((__constructor__)) ;                                    \
+                                                                          \
+static void __vnet_ip6_neighbor_function_init_##tag##_##f (void)          \
+{                                                                         \
+ ip6_neighbor_public_main_t * nm = &ip6_neighbor_public_main;             \
+ static _vnet_ip6_neighbor_function_list_elt_t init_function;             \
+ init_function.next_ip6_neighbor_function = nm->tag##_functions;          \
+ nm->tag##_functions = &init_function;                                    \
+ init_function.fp = (void *) &f;                                          \
+}                                                                         \
+                                                                          \
+static void __vnet_ip6_neighbor_function_deinit_##tag##_##f (void)        \
+    __attribute__((__destructor__)) ;                                     \
+                                                                          \
+static void __vnet_ip6_neighbor_function_deinit_##tag##_##f (void)        \
+{                                                                         \
+ ip6_neighbor_public_main_t * nm = &ip6_neighbor_public_main;             \
+ _vnet_ip6_neighbor_function_list_elt_t *next;                            \
+ if (nm->tag##_functions->fp == (void *) &f)                              \
+    {                                                                     \
+      nm->tag##_functions =                                               \
+        nm->tag##_functions->next_ip6_neighbor_function;                  \
+      return;                                                             \
+    }                                                                     \
+  next = nm->tag##_functions;                                             \
+  while (next->next_ip6_neighbor_function)                                \
+    {                                                                     \
+      if (next->next_ip6_neighbor_function->fp == (void *) &f)            \
+        {                                                                 \
+          next->next_ip6_neighbor_function =                              \
+            next->next_ip6_neighbor_function->next_ip6_neighbor_function; \
+          return;                                                         \
+        }                                                                 \
+      next = next->next_ip6_neighbor_function;                            \
+    }                                                                     \
+}
+
+#define VNET_IP6_NEIGHBOR_RA_FUNCTION(f) \
+  _VNET_IP6_NEIGHBOR_FUNCTION_DECL(f,ra_report)
+
+clib_error_t *call_ip6_neighbor_callbacks (void *data,
+					   _vnet_ip6_neighbor_function_list_elt_t
+					   * elt);
 
 #endif /* included_ip6_neighbor_h */
 

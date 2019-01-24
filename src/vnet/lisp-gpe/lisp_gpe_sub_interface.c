@@ -51,7 +51,7 @@ lisp_gpe_sub_interface_db_find (const ip_address_t * lrloc, u32 vni)
 
   lisp_gpe_sub_interface_key_t key;
 
-  memset (&key, 0, sizeof (key));
+  clib_memset (&key, 0, sizeof (key));
   ip_address_copy (&key.local_rloc, lrloc);
   key.vni = vni;
   p = hash_get_mem (lisp_gpe_sub_interfaces, &key);
@@ -135,7 +135,8 @@ lisp_gpe_sub_interface_find_or_create_and_lock (const ip_address_t * lrloc,
        * find the main interface from the VNI
        */
       main_sw_if_index =
-	lisp_gpe_tenant_l3_iface_add_or_lock (vni, overlay_table_id);
+	lisp_gpe_tenant_l3_iface_add_or_lock (vni, overlay_table_id,
+					      1 /* with_default_route */ );
 
       vnet_sw_interface_t sub_itf_template = {
 	.type = VNET_SW_INTERFACE_TYPE_SUB,
@@ -150,9 +151,9 @@ lisp_gpe_sub_interface_find_or_create_and_lock (const ip_address_t * lrloc,
 	return (INDEX_INVALID);
 
       pool_get (lisp_gpe_sub_interface_pool, l3s);
-      memset (l3s, 0, sizeof (*l3s));
+      clib_memset (l3s, 0, sizeof (*l3s));
       l3s->key = clib_mem_alloc (sizeof (*l3s->key));
-      memset (l3s->key, 0, sizeof (*l3s->key));
+      clib_memset (l3s->key, 0, sizeof (*l3s->key));
 
       ip_address_copy (&l3s->key->local_rloc, lrloc);
       l3s->key->vni = vni;
@@ -217,9 +218,9 @@ lisp_gpe_sub_interface_get (index_t l3si)
 }
 
 u8 *
-format_lisp_gpe_sub_interface (u8 * s, va_list ap)
+format_lisp_gpe_sub_interface (u8 * s, va_list * ap)
 {
-  lisp_gpe_sub_interface_t *l3s = va_arg (ap, lisp_gpe_sub_interface_t *);
+  lisp_gpe_sub_interface_t *l3s = va_arg (*ap, lisp_gpe_sub_interface_t *);
   vnet_main_t *vnm = vnet_get_main ();
 
   s = format (s, "%-16U",

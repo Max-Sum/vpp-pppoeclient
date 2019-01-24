@@ -105,7 +105,8 @@ public:
 
 private:
   Connection &con;
-  Common_req (Connection &con) : con{con}, response_state{RESPONSE_NOT_READY}
+  Common_req (Connection &con)
+      : con (con), context{0}, response_state{RESPONSE_NOT_READY}
   {
   }
 
@@ -194,15 +195,17 @@ public:
    * @param name application name
    * @param chroot_prefix shared memory prefix
    * @param max_queued_request max number of outstanding requests queued
+   * @param handle_keepalives handle memclnt_keepalive automatically
    *
    * @return VAPI_OK on success, other error code on error
    */
   vapi_error_e connect (const char *name, const char *chroot_prefix,
-                        int max_outstanding_requests, int response_queue_size)
+                        int max_outstanding_requests, int response_queue_size,
+                        bool handle_keepalives = true)
   {
     return vapi_connect (vapi_ctx, name, chroot_prefix,
                          max_outstanding_requests, response_queue_size,
-                         VAPI_MODE_BLOCKING);
+                         VAPI_MODE_BLOCKING, handle_keepalives);
   }
 
   /**
@@ -244,7 +247,7 @@ public:
    *
    * @return VAPI_OK on success, other error code on error
    */
-  vapi_error_e dispatch (const Common_req *limit = nullptr)
+  vapi_error_e dispatch (const Common_req *limit = nullptr, u32 time = 5)
   {
     std::lock_guard<std::mutex> lock (dispatch_mutex);
     vapi_error_e rv = VAPI_OK;
@@ -253,7 +256,8 @@ public:
       {
         void *shm_data;
         size_t shm_data_size;
-        rv = vapi_recv (vapi_ctx, &shm_data, &shm_data_size);
+        rv = vapi_recv (vapi_ctx, &shm_data, &shm_data_size, SVM_Q_TIMEDWAIT,
+                        time);
         if (VAPI_OK != rv)
           {
             return rv;
@@ -577,18 +581,18 @@ private:
 
   static void set_msg_id (vapi_msg_id_t id)
   {
-    assert ((~0 == *msg_id_holder ()) || (id == *msg_id_holder ()));
+    assert ((VAPI_INVALID_MSG_ID == *msg_id_holder ()) ||
+            (id == *msg_id_holder ()));
     *msg_id_holder () = id;
   }
 
   static vapi_msg_id_t *msg_id_holder ()
   {
-    static vapi_msg_id_t my_id{~0};
+    static vapi_msg_id_t my_id{VAPI_INVALID_MSG_ID};
     return &my_id;
   }
 
-  Msg (Connection &con, void *shm_data) throw (Msg_not_available_exception)
-      : con{con}
+  Msg (Connection &con, void *shm_data) : con{con}
   {
     if (!con.is_msg_available (get_msg_id ()))
       {
@@ -599,8 +603,7 @@ private:
               this, shm_data);
   }
 
-  void assign_response (vapi_msg_id_t resp_id,
-                        void *shm_data) throw (Unexpected_msg_id_exception)
+  void assign_response (vapi_msg_id_t resp_id, void *shm_data)
   {
     assert (nullptr == this->shm_data);
     if (resp_id != get_msg_id ())
@@ -745,8 +748,7 @@ private:
     complete = true;
   }
 
-  void assign_response (vapi_msg_id_t resp_id,
-                        void *shm_data) throw (Unexpected_msg_id_exception)
+  void assign_response (vapi_msg_id_t resp_id, void *shm_data)
   {
     if (resp_id != Msg<M>::get_msg_id ())
       {
@@ -762,7 +764,7 @@ private:
       }
   }
 
-  Result_set (Connection &con) : con{con}, complete{false}
+  Result_set (Connection &con) : con (con), complete{false}
   {
   }
 
@@ -852,8 +854,7 @@ template <typename M> class Event_registration : public Common_req
 public:
   Event_registration (
       Connection &con,
-      std::function<vapi_error_e (Event_registration<M> &)> callback =
-          nullptr) throw (Msg_not_available_exception)
+      std::function<vapi_error_e (Event_registration<M> &)> callback = nullptr)
       : Common_req{con}, result_set{con}, callback{callback}
   {
     if (!con.is_msg_available (M::get_msg_id ()))

@@ -21,6 +21,7 @@
 #include <vnet/ip/ip.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/l2tp/l2tp.h>
+#include <vnet/l2/l2_input.h>
 
 /* Statistics (not really errors) */
 #define foreach_l2t_decap_error                                 \
@@ -56,18 +57,16 @@ typedef enum
 #define NSTAGES 3
 
 static inline void
-stage0 (vlib_main_t * vm, vlib_node_runtime_t * node, u32 buffer_index)
+stage0 (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_buffer_t * b)
 {
-  vlib_buffer_t *b = vlib_get_buffer (vm, buffer_index);
   vlib_prefetch_buffer_header (b, STORE);
   /* l2tpv3 header is a long way away, need 2 cache lines */
   CLIB_PREFETCH (b->data, 2 * CLIB_CACHE_LINE_BYTES, STORE);
 }
 
 static inline void
-stage1 (vlib_main_t * vm, vlib_node_runtime_t * node, u32 bi)
+stage1 (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_buffer_t * b)
 {
-  vlib_buffer_t *b = vlib_get_buffer (vm, bi);
   l2t_main_t *lm = &l2t_main;
   ip6_header_t *ip6 = vlib_buffer_get_current (b);
   u32 session_index;
@@ -116,9 +115,8 @@ stage1 (vlib_main_t * vm, vlib_node_runtime_t * node, u32 bi)
 }
 
 static inline u32
-last_stage (vlib_main_t * vm, vlib_node_runtime_t * node, u32 bi)
+last_stage (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_buffer_t * b)
 {
-  vlib_buffer_t *b = vlib_get_buffer (vm, bi);
   l2t_main_t *lm = &l2t_main;
   ip6_header_t *ip6 = vlib_buffer_get_current (b);
   vlib_node_t *n = vlib_get_node (vm, node->node_index);
@@ -219,7 +217,7 @@ done:
 	{
 	  /* Go to next node on the ip6 configuration chain */
 	  if (PREDICT_TRUE (session != 0))
-	    vnet_feature_next (session->sw_if_index, &next_index, b);
+	    vnet_feature_next (&next_index, b);
 	}
     }
 

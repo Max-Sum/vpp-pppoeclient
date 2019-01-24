@@ -23,24 +23,21 @@
 /**
  * Debug macro
  */
-#ifdef FIB_DEBUG
+extern vlib_log_class_t fib_entry_logger;
+
 #define FIB_ENTRY_DBG(_e, _fmt, _args...)		\
 {   		          				\
-    u8*__tmp = NULL;					\
-    __tmp = format(__tmp, "e:[%d:%U",			\
-		   fib_entry_get_index(_e),		\
-		   format_ip46_address,			\
-		   &_e->fe_prefix.fp_addr,		\
-		   IP46_TYPE_ANY);			\
-    __tmp = format(__tmp, "/%d]:",			\
-		   _e->fe_prefix.fp_len);		\
-    __tmp = format(__tmp, _fmt, ##_args);		\
-    clib_warning("%s", __tmp);				\
-    vec_free(__tmp);					\
+    vlib_log_debug(fib_entry_logger,                    \
+                   "[@%d:[%U]:%U:%U]: " _fmt,           \
+                   fib_entry_get_index(_e),		\
+                   format_fib_prefix,                   \
+                   &_e->fe_prefix,                      \
+                   format_fib_entry_flags,              \
+                    _e->fe_srcs[0].fes_entry_flags,     \
+                   format_fib_source,                   \
+                   _e->fe_srcs[0].fes_src,              \
+                   ##_args);                            \
 }
-#else
-#define FIB_ENTRY_DBG(_e, _fmt, _args...)
-#endif
 
 /**
  * Source initialisation Function 
@@ -58,6 +55,13 @@ typedef void (*fib_entry_src_deinit_t)(fib_entry_src_t *src);
  */
 typedef int (*fib_entry_src_activate_t)(fib_entry_src_t *src,
 					 const fib_entry_t *fib_entry);
+
+/**
+ * Source re-activation. Called when the source is updated and remains
+ * the best source.
+ */
+typedef int (*fib_entry_src_reactivate_t)(fib_entry_src_t *src,
+                                          const fib_entry_t *fib_entry);
 
 /**
  * Source Deactivate. 
@@ -166,6 +170,26 @@ typedef const void* (*fib_entry_src_get_data_t)(fib_entry_src_t *src,
                                                 const fib_entry_t *fib_entry);
 
 /**
+ * Contribute forwarding to interpose inthe chain
+ */
+typedef const dpo_id_t* (*fib_entry_src_contribute_interpose_t)(const fib_entry_src_t *src,
+                                                         const fib_entry_t *fib_entry);
+
+/**
+ * The fib entry flags for this source are changing
+ */
+typedef void (*fib_entry_src_flag_change_t)(fib_entry_src_t *src,
+                                            const fib_entry_t *fib_entry,
+                                            fib_entry_flag_t new_flags);
+
+/**
+ * The fib entry flags for this source are changing
+ */
+typedef void (*fib_entry_src_copy_t)(const fib_entry_src_t *orig_src,
+                                     const fib_entry_t *fib_entry,
+                                     fib_entry_src_t *copy_src);
+
+/**
  * Virtual function table each FIB entry source will register
  */
 typedef struct fib_entry_src_vft_t_ {
@@ -173,6 +197,7 @@ typedef struct fib_entry_src_vft_t_ {
     fib_entry_src_deinit_t fesv_deinit;
     fib_entry_src_activate_t fesv_activate;
     fib_entry_src_deactivate_t fesv_deactivate;
+    fib_entry_src_reactivate_t fesv_reactivate;
     fib_entry_src_add_t fesv_add;
     fib_entry_src_remove_t fesv_remove;
     fib_entry_src_path_swap_t fesv_path_swap;
@@ -185,20 +210,47 @@ typedef struct fib_entry_src_vft_t_ {
     fib_entry_src_fwd_update_t fesv_fwd_update;
     fib_entry_src_get_data_t fesv_get_data;
     fib_entry_src_set_data_t fesv_set_data;
+    fib_entry_src_contribute_interpose_t fesv_contribute_interpose;
+    fib_entry_src_flag_change_t fesv_flags_change;
+    fib_entry_src_copy_t fesv_copy;
 } fib_entry_src_vft_t;
 
 #define FOR_EACH_SRC_ADDED(_entry, _src, _source, action)	\
 {								\
-    vec_foreach(_src, _entry->fe_srcs)				\
+    vec_foreach(_src, (_entry)->fe_srcs)                        \
     {								\
 	if (_src->fes_flags & FIB_ENTRY_SRC_FLAG_ADDED) {	\
-	    _source = _src->fes_src;				\
-	    do {						\
-		action;						\
-	    } while(0);						\
+	    _source = (_src)->fes_src;				\
+            action;						\
 	}							\
     }								\
 }
+
+#define FIB_ENTRY_SRC_VFT_INVOKE(esrc, func, args)  \
+{                                                   \
+    const fib_entry_src_vft_t *_vft;                \
+    _vft = fib_entry_src_get_vft(esrc);             \
+    if (_vft->func)                                 \
+        _vft->func args;                            \
+}
+
+#define FIB_ENTRY_SRC_VFT_INVOKE_AND_RETURN(esrc, func, args)  \
+{                                                   \
+    const fib_entry_src_vft_t *_vft;                \
+    _vft = fib_entry_src_get_vft(esrc);             \
+    if (_vft->func)                                 \
+        return (_vft->func args);                   \
+}
+
+#define FIB_ENTRY_SRC_VFT_EXISTS(esrc, func)        \
+{                                                   \
+    const fib_entry_src_vft_t *_vft;                \
+    _vft = fib_entry_src_get_vft(esrc);             \
+    (_vft->func);                                   \
+}
+
+extern const fib_entry_src_vft_t*fib_entry_src_get_vft(
+    const fib_entry_src_t *esrc);
 
 extern u8* fib_entry_src_format(fib_entry_t *entry,
 				fib_source_t source,
@@ -207,19 +259,13 @@ extern u8* fib_entry_src_format(fib_entry_t *entry,
 extern void fib_entry_src_register(fib_source_t source,
 				   const fib_entry_src_vft_t *vft);
 
-extern void fib_entry_src_action_init(fib_entry_t *entry,
-				      fib_source_t source);
-
-extern void fib_entry_src_action_deinit(fib_entry_t *fib_entry,
-					fib_source_t source);
-
 extern fib_entry_src_cover_res_t fib_entry_src_action_cover_change(
     fib_entry_t *entry,
-    fib_source_t source);
+    fib_entry_src_t *esrc);
 
 extern fib_entry_src_cover_res_t fib_entry_src_action_cover_update(
     fib_entry_t *fib_entry,
-    fib_source_t source);
+    fib_entry_src_t *esrc);
 
 extern void fib_entry_src_action_activate(fib_entry_t *fib_entry,
 					  fib_source_t source);
@@ -240,6 +286,9 @@ extern fib_entry_t* fib_entry_src_action_update(fib_entry_t *fib_entry,
 
 extern fib_entry_src_flag_t fib_entry_src_action_remove(fib_entry_t *fib_entry,
 							fib_source_t source);
+extern fib_entry_src_flag_t
+fib_entry_src_action_remove_or_update_inherit(fib_entry_t *fib_entry,
+                                              fib_source_t source);
 
 extern void fib_entry_src_action_install(fib_entry_t *fib_entry,
 					 fib_source_t source);
@@ -262,10 +311,13 @@ extern fib_entry_src_flag_t fib_entry_src_action_path_remove(fib_entry_t *fib_en
 
 extern void fib_entry_src_action_installed(const fib_entry_t *fib_entry,
 					   fib_source_t source);
+extern void fib_entry_src_inherit (const fib_entry_t *cover,
+                                   fib_entry_t *covered);
 
 extern fib_forward_chain_type_t fib_entry_get_default_chain_type(
     const fib_entry_t *fib_entry);
 extern fib_entry_flag_t fib_entry_get_flags_i(const fib_entry_t *fib_entry);
+
 extern fib_path_list_flags_t fib_entry_src_flags_2_path_list_flags(
     fib_entry_flag_t eflags);
 
@@ -280,12 +332,17 @@ extern void fib_entry_src_mk_lb (fib_entry_t *fib_entry,
 extern fib_protocol_t fib_entry_get_proto(const fib_entry_t * fib_entry);
 extern dpo_proto_t fib_entry_get_dpo_proto(const fib_entry_t * fib_entry);
 
+extern void fib_entry_source_change(fib_entry_t *fib_entry,
+                                    fib_source_t old_source,
+                                    fib_source_t new_source);
+
 /*
  * Per-source registration. declared here so we save a separate .h file for each
  */
 extern void fib_entry_src_default_register(void);
 extern void fib_entry_src_rr_register(void);
 extern void fib_entry_src_interface_register(void);
+extern void fib_entry_src_interpose_register(void);
 extern void fib_entry_src_default_route_register(void);
 extern void fib_entry_src_special_register(void);
 extern void fib_entry_src_api_register(void);

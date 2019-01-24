@@ -63,7 +63,7 @@ mheap_maybe_lock (void *v)
 	  return;
 	}
 
-      while (__sync_lock_test_and_set (&h->lock, 1))
+      while (clib_atomic_test_and_set (&h->lock))
 	;
 
       h->owner_cpu = my_cpu;
@@ -311,7 +311,7 @@ mheap_small_object_cache_mask (mheap_small_object_cache_t * c, uword bin)
 
   ASSERT (bin < 256);
 
-#define _(i) ((uword) u8x16_compare_byte_mask (u8x16_is_equal (b, c->bins.as_u8x16[i])) << (uword) ((i)*16))
+#define _(i) ((uword) u8x16_compare_byte_mask ((b == c->bins.as_u8x16[i])) << (uword) ((i)*16))
   mask = _(0) | _(1);
   if (BITS (uword) > 32)
     mask |= _(2) | _(3);
@@ -663,12 +663,28 @@ mheap_get_aligned (void *v,
       return v;
     }
 
-  /* Round requested size. */
+  /*
+   * Round requested size.
+   *
+   * Step 1: round up to the minimum object size.
+   * Step 2: round up to a multiple of the user data size (e.g. 4)
+   * Step 3: if non-trivial alignment requested, round up
+   *         so that the object precisely fills a chunk
+   *         as big as the alignment request.
+   *
+   * Step 3 prevents the code from going into "bin search hyperspace":
+   * looking at a huge number of fractional remainder chunks, none of which
+   * will satisfy the alignment constraint. This fixes an allocator
+   * performance issue when one requests a large number of 16 byte objects
+   * aligned to 64 bytes, to name one variation on the theme.
+   */
   n_user_data_bytes = clib_max (n_user_data_bytes, MHEAP_MIN_USER_DATA_BYTES);
   n_user_data_bytes =
     round_pow2 (n_user_data_bytes,
 		STRUCT_SIZE_OF (mheap_elt_t, user_data[0]));
-
+  if (align > MHEAP_ELT_OVERHEAD_BYTES)
+    n_user_data_bytes = clib_max (n_user_data_bytes,
+				  align - MHEAP_ELT_OVERHEAD_BYTES);
   if (!v)
     v = mheap_alloc (0, 64 << 20);
 
@@ -919,7 +935,7 @@ mheap_alloc_with_flags (void *memory, uword memory_size, uword flags)
     clib_mem_vm_map (h, sizeof (h[0]));
 
   /* Zero vector header: both heap header and vector length. */
-  memset (h, 0, sizeof (h[0]));
+  clib_memset (h, 0, sizeof (h[0]));
   _vec_len (v) = 0;
 
   h->vm_alloc_offset_from_header = (void *) h - memory;
@@ -937,8 +953,8 @@ mheap_alloc_with_flags (void *memory, uword memory_size, uword flags)
 	      (clib_address_t) v, h->max_size);
 
   /* Initialize free list heads to empty. */
-  memset (h->first_free_elt_uoffset_by_bin, 0xFF,
-	  sizeof (h->first_free_elt_uoffset_by_bin));
+  clib_memset (h->first_free_elt_uoffset_by_bin, 0xFF,
+	       sizeof (h->first_free_elt_uoffset_by_bin));
 
   return v;
 }
@@ -956,6 +972,29 @@ mheap_alloc (void *memory, uword size)
 #endif
 
   return mheap_alloc_with_flags (memory, size, flags);
+}
+
+void *
+mheap_alloc_with_lock (void *memory, uword size, int locked)
+{
+  uword flags = 0;
+  void *rv;
+
+  if (memory != 0)
+    flags |= MHEAP_FLAG_DISABLE_VM;
+
+#ifdef CLIB_HAVE_VEC128
+  flags |= MHEAP_FLAG_SMALL_OBJECT_CACHE;
+#endif
+
+  rv = mheap_alloc_with_flags (memory, size, flags);
+
+  if (rv && locked)
+    {
+      mheap_t *h = mheap_header (rv);
+      h->flags |= MHEAP_FLAG_THREAD_SAFE;
+    }
+  return rv;
 }
 
 void *
@@ -1120,7 +1159,7 @@ format_mheap_stats (u8 * s, va_list * va)
 {
   mheap_t *h = va_arg (*va, mheap_t *);
   mheap_stats_t *st = &h->stats;
-  uword indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
 
   s =
     format (s,
@@ -1165,7 +1204,8 @@ format_mheap (u8 * s, va_list * va)
   int verbose = va_arg (*va, int);
 
   mheap_t *h;
-  uword i, size, indent;
+  uword i, size;
+  u32 indent;
   clib_mem_usage_t usage;
   mheap_elt_t *first_corrupt;
 
@@ -1196,7 +1236,7 @@ format_mheap (u8 * s, va_list * va)
       mheap_elt_t *e;
       uword i, n_hist;
 
-      memset (hist, 0, sizeof (hist));
+      clib_memset (hist, 0, sizeof (hist));
 
       n_hist = 0;
       for (e = v;
@@ -1236,7 +1276,7 @@ format_mheap (u8 * s, va_list * va)
     {
       /* Make a copy of traces since we'll be sorting them. */
       mheap_trace_t *t, *traces_copy;
-      uword indent, total_objects_traced;
+      u32 indent, total_objects_traced;
 
       traces_copy = vec_dup (h->trace_main.traces);
       qsort (traces_copy, vec_len (traces_copy), sizeof (traces_copy[0]),
@@ -1496,7 +1536,7 @@ mheap_get_trace (void *v, uword offset, uword size)
   mheap_trace_t trace;
 
   /* Spurious Coverity warnings be gone. */
-  memset (&trace, 0, sizeof (trace));
+  clib_memset (&trace, 0, sizeof (trace));
 
   n_callers = clib_backtrace (trace.callers, ARRAY_LEN (trace.callers),
 			      /* Skip mheap_get_aligned's frame */ 1);
@@ -1511,7 +1551,7 @@ mheap_get_trace (void *v, uword offset, uword size)
 
   if (!tm->trace_by_callers)
     tm->trace_by_callers =
-      hash_create_mem (0, sizeof (trace.callers), sizeof (uword));
+      hash_create_shmem (0, sizeof (trace.callers), sizeof (uword));
 
   p = hash_get_mem (tm->trace_by_callers, &trace.callers);
   if (p)
@@ -1590,7 +1630,7 @@ mheap_put_trace (void *v, uword offset, uword size)
     {
       hash_unset_mem (tm->trace_by_callers, t->callers);
       vec_add1 (tm->trace_free_list, trace_index);
-      memset (t, 0, sizeof (t[0]));
+      clib_memset (t, 0, sizeof (t[0]));
     }
 }
 

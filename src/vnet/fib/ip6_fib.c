@@ -15,6 +15,10 @@
 
 #include <vnet/fib/ip6_fib.h>
 #include <vnet/fib/fib_table.h>
+#include <vnet/dpo/ip6_ll_dpo.h>
+
+#include <vppinfra/bihash_24_8.h>
+#include <vppinfra/bihash_template.c>
 
 static void
 vnet_ip6_fib_init (u32 fib_index)
@@ -38,29 +42,32 @@ vnet_ip6_fib_init (u32 fib_index)
 				FIB_ENTRY_FLAG_DROP);
 
     /*
-     * all link local for us
+     * all link local via the link local lookup DPO
      */
     pfx.fp_addr.ip6.as_u64[0] = clib_host_to_net_u64 (0xFE80000000000000ULL);
     pfx.fp_addr.ip6.as_u64[1] = 0;
     pfx.fp_len = 10;
-    fib_table_entry_special_add(fib_index,
-				&pfx,
-				FIB_SOURCE_SPECIAL,
-				FIB_ENTRY_FLAG_LOCAL);
+    fib_table_entry_special_dpo_add(fib_index,
+                                    &pfx,
+                                    FIB_SOURCE_SPECIAL,
+                                    FIB_ENTRY_FLAG_NONE,
+                                    ip6_ll_dpo_get());
 }
 
 static u32
 create_fib_with_table_id (u32 table_id,
-                          fib_source_t src)
+                          fib_source_t src,
+                          fib_table_flags_t flags,
+                          u8 *desc)
 {
     fib_table_t *fib_table;
     ip6_fib_t *v6_fib;
 
-    pool_get_aligned(ip6_main.fibs, fib_table, CLIB_CACHE_LINE_BYTES);
+    pool_get(ip6_main.fibs, fib_table);
     pool_get_aligned(ip6_main.v6_fibs, v6_fib, CLIB_CACHE_LINE_BYTES);
 
-    memset(fib_table, 0, sizeof(*fib_table));
-    memset(v6_fib, 0, sizeof(*v6_fib));
+    clib_memset(fib_table, 0, sizeof(*fib_table));
+    clib_memset(v6_fib, 0, sizeof(*v6_fib));
 
     ASSERT((fib_table - ip6_main.fibs) ==
            (v6_fib - ip6_main.v6_fibs));
@@ -76,6 +83,8 @@ create_fib_with_table_id (u32 table_id,
 	v6_fib->table_id =
 	    table_id;
     fib_table->ft_flow_hash_config = IP_FLOW_HASH_DEFAULT;
+    fib_table->ft_flags = flags;
+    fib_table->ft_desc = desc;
 
     vnet_ip6_fib_init(fib_table->ft_index);
     fib_table_lock(fib_table->ft_index, FIB_PROTOCOL_IP6, src);
@@ -91,95 +100,57 @@ ip6_fib_table_find_or_create_and_lock (u32 table_id,
 
     p = hash_get (ip6_main.fib_index_by_table_id, table_id);
     if (NULL == p)
-	return create_fib_with_table_id(table_id, src);
-    
+	return create_fib_with_table_id(table_id, src,
+                                        FIB_TABLE_FLAG_NONE,
+                                        NULL);
+
     fib_table_lock(p[0], FIB_PROTOCOL_IP6, src);
 
     return (p[0]);
 }
 
 u32
-ip6_fib_table_create_and_lock (fib_source_t src)
+ip6_fib_table_create_and_lock (fib_source_t src,
+                               fib_table_flags_t flags,
+                               u8 *desc)
 {
-    return (create_fib_with_table_id(~0, src));
+    return (create_fib_with_table_id(~0, src, flags, desc));
 }
 
 void
 ip6_fib_table_destroy (u32 fib_index)
 {
+    /*
+     * all link local first ...
+     */
     fib_prefix_t pfx = {
 	.fp_proto = FIB_PROTOCOL_IP6,
-	.fp_len = 0,
+	.fp_len = 10,
 	.fp_addr = {
 	    .ip6 = {
-		{ 0, 0, },
+                .as_u8 = {
+                    [0] = 0xFE,
+                    [1] = 0x80,
+                },
 	    },
 	}
     };
+    fib_table_entry_delete(fib_index,
+                           &pfx,
+                           FIB_SOURCE_SPECIAL);
 
     /*
-     * the default route.
+     * ... then the default route.
      */
+    pfx.fp_addr.ip6.as_u64[0] = 0;
+    pfx.fp_len = 00;
     fib_table_entry_special_remove(fib_index,
 				   &pfx,
 				   FIB_SOURCE_DEFAULT_ROUTE);
 
-
-    /*
-     * ff02::1:ff00:0/104
-     */
-    ip6_set_solicited_node_multicast_address(&pfx.fp_addr.ip6, 0);
-    pfx.fp_len = 104;
-    fib_table_entry_special_remove(fib_index,
-				   &pfx,
-				   FIB_SOURCE_SPECIAL);
-
-    /*
-     * all-routers multicast address
-     */
-    ip6_set_reserved_multicast_address (&pfx.fp_addr.ip6,
-					IP6_MULTICAST_SCOPE_link_local,
-					IP6_MULTICAST_GROUP_ID_all_routers);
-    pfx.fp_len = 128;
-    fib_table_entry_special_remove(fib_index,
-				   &pfx,
-				   FIB_SOURCE_SPECIAL);
-
-    /*
-     * all-nodes multicast address
-     */
-    ip6_set_reserved_multicast_address (&pfx.fp_addr.ip6,
-					IP6_MULTICAST_SCOPE_link_local,
-					IP6_MULTICAST_GROUP_ID_all_hosts);
-    pfx.fp_len = 128;
-    fib_table_entry_special_remove(fib_index,
-				   &pfx,
-				   FIB_SOURCE_SPECIAL);
-
-    /*
-     * all-mldv2 multicast address
-     */
-    ip6_set_reserved_multicast_address (&pfx.fp_addr.ip6,
-					IP6_MULTICAST_SCOPE_link_local,
-					IP6_MULTICAST_GROUP_ID_mldv2_routers);
-    pfx.fp_len = 128;
-    fib_table_entry_special_remove(fib_index,
-				   &pfx,
-				   FIB_SOURCE_SPECIAL);
-
-    /*
-     * all link local 
-     */
-    pfx.fp_addr.ip6.as_u64[0] = clib_host_to_net_u64 (0xFE80000000000000ULL);
-    pfx.fp_addr.ip6.as_u64[1] = 0;
-    pfx.fp_len = 10;
-    fib_table_entry_special_remove(fib_index,
-				   &pfx,
-				   FIB_SOURCE_SPECIAL);
-
     fib_table_t *fib_table = fib_table_get(fib_index, FIB_PROTOCOL_IP6);
     fib_source_t source;
-    
+
      /*
      * validate no more routes.
      */
@@ -203,7 +174,7 @@ ip6_fib_table_lookup (u32 fib_index,
 		      u32 len)
 {
     ip6_fib_table_instance_t *table;
-    BVT(clib_bihash_kv) kv, value;
+    clib_bihash_kv_24_8_t kv, value;
     int i, n_p, rv;
     u64 fib;
 
@@ -235,7 +206,7 @@ ip6_fib_table_lookup (u32 fib_index,
 	kv.key[1] &= mask->as_u64[1];
 	kv.key[2] = fib | dst_address_length;
       
-	rv = BV(clib_bihash_search_inline_2)(&table->ip6_hash, &kv, &value);
+	rv = clib_bihash_search_inline_2_24_8(&table->ip6_hash, &kv, &value);
 	if (rv == 0)
 	    return value.value;
     }
@@ -249,7 +220,7 @@ ip6_fib_table_lookup_exact_match (u32 fib_index,
 				  u32 len)
 {
     ip6_fib_table_instance_t *table;
-    BVT(clib_bihash_kv) kv, value;
+    clib_bihash_kv_24_8_t kv, value;
     ip6_address_t *mask;
     u64 fib;
     int rv;
@@ -262,7 +233,7 @@ ip6_fib_table_lookup_exact_match (u32 fib_index,
     kv.key[1] = addr->as_u64[1] & mask->as_u64[1];
     kv.key[2] = fib | len;
       
-    rv = BV(clib_bihash_search_inline_2)(&table->ip6_hash, &kv, &value);
+    rv = clib_bihash_search_inline_2_24_8(&table->ip6_hash, &kv, &value);
     if (rv == 0)
 	return value.value;
 
@@ -288,7 +259,7 @@ ip6_fib_table_entry_remove (u32 fib_index,
 			    u32 len)
 {
     ip6_fib_table_instance_t *table;
-    BVT(clib_bihash_kv) kv;
+    clib_bihash_kv_24_8_t kv;
     ip6_address_t *mask;
     u64 fib;
 
@@ -300,7 +271,7 @@ ip6_fib_table_entry_remove (u32 fib_index,
     kv.key[1] = addr->as_u64[1] & mask->as_u64[1];
     kv.key[2] = fib | len;
 
-    BV(clib_bihash_add_del)(&table->ip6_hash, &kv, 0);
+    clib_bihash_add_del_24_8(&table->ip6_hash, &kv, 0);
 
     /* refcount accounting */
     ASSERT (table->dst_address_length_refcounts[len] > 0);
@@ -320,7 +291,7 @@ ip6_fib_table_entry_insert (u32 fib_index,
 			    fib_node_index_t fib_entry_index)
 {
     ip6_fib_table_instance_t *table;
-    BVT(clib_bihash_kv) kv;
+    clib_bihash_kv_24_8_t kv;
     ip6_address_t *mask;
     u64 fib;
 
@@ -333,7 +304,7 @@ ip6_fib_table_entry_insert (u32 fib_index,
     kv.key[2] = fib | len;
     kv.value = fib_entry_index;
 
-    BV(clib_bihash_add_del)(&table->ip6_hash, &kv, 1);
+    clib_bihash_add_del_24_8(&table->ip6_hash, &kv, 1);
 
     table->dst_address_length_refcounts[len]++;
 
@@ -372,7 +343,7 @@ ip6_fib_table_fwding_dpo_update (u32 fib_index,
 				 const dpo_id_t *dpo)
 {
     ip6_fib_table_instance_t *table;
-    BVT(clib_bihash_kv) kv;
+    clib_bihash_kv_24_8_t kv;
     ip6_address_t *mask;
     u64 fib;
 
@@ -385,7 +356,7 @@ ip6_fib_table_fwding_dpo_update (u32 fib_index,
     kv.key[2] = fib | len;
     kv.value = dpo->dpoi_index;
 
-    BV(clib_bihash_add_del)(&table->ip6_hash, &kv, 1);
+    clib_bihash_add_del_24_8(&table->ip6_hash, &kv, 1);
 
     table->dst_address_length_refcounts[len]++;
 
@@ -402,7 +373,7 @@ ip6_fib_table_fwding_dpo_remove (u32 fib_index,
 				 const dpo_id_t *dpo)
 {
     ip6_fib_table_instance_t *table;
-    BVT(clib_bihash_kv) kv;
+    clib_bihash_kv_24_8_t kv;
     ip6_address_t *mask;
     u64 fib;
 
@@ -415,7 +386,7 @@ ip6_fib_table_fwding_dpo_remove (u32 fib_index,
     kv.key[2] = fib | len;
     kv.value = dpo->dpoi_index;
 
-    BV(clib_bihash_add_del)(&table->ip6_hash, &kv, 0);
+    clib_bihash_add_del_24_8(&table->ip6_hash, &kv, 0);
 
     /* refcount accounting */
     ASSERT (table->dst_address_length_refcounts[len] > 0);
@@ -437,6 +408,8 @@ typedef struct ip6_fib_walk_ctx_t_
     u32 i6w_fib_index;
     fib_table_walk_fn_t i6w_fn;
     void *i6w_ctx;
+    fib_prefix_t i6w_root;
+    fib_prefix_t *i6w_sub_trees;
 } ip6_fib_walk_ctx_t;
 
 static int
@@ -444,11 +417,58 @@ ip6_fib_walk_cb (clib_bihash_kv_24_8_t * kvp,
                  void *arg)
 {
     ip6_fib_walk_ctx_t *ctx = arg;
+    ip6_address_t key;
 
     if ((kvp->key[2] >> 32) == ctx->i6w_fib_index)
     {
-        ctx->i6w_fn(kvp->value, ctx->i6w_ctx);
+        key.as_u64[0] = kvp->key[0];
+        key.as_u64[1] = kvp->key[1];
+
+        if (ip6_destination_matches_route(&ip6_main,
+                                          &key,
+                                          &ctx->i6w_root.fp_addr.ip6,
+                                          ctx->i6w_root.fp_len))
+        {
+            const fib_prefix_t *sub_tree;
+            int skip = 0;
+
+            /*
+             * exclude sub-trees the walk does not want to explore
+             */
+            vec_foreach(sub_tree, ctx->i6w_sub_trees)
+            {
+                if (ip6_destination_matches_route(&ip6_main,
+                                                  &key,
+                                                  &sub_tree->fp_addr.ip6,
+                                                  sub_tree->fp_len))
+                {
+                    skip = 1;
+                    break;
+                }
+            }
+
+            if (!skip)
+            {
+                switch (ctx->i6w_fn(kvp->value, ctx->i6w_ctx))
+                {
+                case FIB_TABLE_WALK_CONTINUE:
+                    break;
+                case FIB_TABLE_WALK_SUB_TREE_STOP: {
+                    fib_prefix_t pfx = {
+                        .fp_proto = FIB_PROTOCOL_IP6,
+                        .fp_len = kvp->key[2] & 0xffffffff,
+                        .fp_addr.ip6 = key,
+                    };
+                    vec_add1(ctx->i6w_sub_trees, pfx);
+                    break;
+                }
+                case FIB_TABLE_WALK_STOP:
+                    goto done;
+                }
+            }
+        }
     }
+done:
 
     return (1);
 }
@@ -462,20 +482,44 @@ ip6_fib_table_walk (u32 fib_index,
         .i6w_fib_index = fib_index,
         .i6w_fn = fn,
         .i6w_ctx = arg,
+        .i6w_root = {
+            .fp_proto = FIB_PROTOCOL_IP6,
+        },
+        .i6w_sub_trees = NULL,
     };
-    ip6_main_t *im = &ip6_main;
 
-    BV(clib_bihash_foreach_key_value_pair)(&im->ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash,
-					   ip6_fib_walk_cb,
-					   &ctx);
+    clib_bihash_foreach_key_value_pair_24_8(
+        &ip6_main.ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash,
+        ip6_fib_walk_cb,
+        &ctx);
 
+    vec_free(ctx.i6w_sub_trees);
+}
+
+void
+ip6_fib_table_sub_tree_walk (u32 fib_index,
+                             const fib_prefix_t *root,
+                             fib_table_walk_fn_t fn,
+                             void *arg)
+{
+    ip6_fib_walk_ctx_t ctx = {
+        .i6w_fib_index = fib_index,
+        .i6w_fn = fn,
+        .i6w_ctx = arg,
+        .i6w_root = *root,
+    };
+
+    clib_bihash_foreach_key_value_pair_24_8(
+        &ip6_main.ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash,
+        ip6_fib_walk_cb,
+        &ctx);
 }
 
 typedef struct ip6_fib_show_ctx_t_ {
     fib_node_index_t *entries;
 } ip6_fib_show_ctx_t;
 
-static int
+static fib_table_walk_rc_t
 ip6_fib_table_show_walk (fib_node_index_t fib_entry_index,
                          void *arg)
 {
@@ -483,7 +527,7 @@ ip6_fib_table_show_walk (fib_node_index_t fib_entry_index,
 
     vec_add1(ctx->entries, fib_entry_index);
 
-    return (1);
+    return (FIB_TABLE_WALK_CONTINUE);
 }
 
 static void
@@ -524,13 +568,34 @@ ip6_fib_table_show_one (ip6_fib_t *fib,
                      FIB_ENTRY_FORMAT_DETAIL));
 }
 
+u8 *
+format_ip6_fib_table_memory (u8 * s, va_list * args)
+{
+    uword bytes_inuse;
+
+    bytes_inuse = 
+        alloc_arena_next 
+        (&(ip6_main.ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash))
+        - alloc_arena (&(ip6_main.ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash));
+
+    bytes_inuse += 
+        alloc_arena_next(&(ip6_main.ip6_table[IP6_FIB_TABLE_FWDING].ip6_hash))
+        - alloc_arena(&(ip6_main.ip6_table[IP6_FIB_TABLE_FWDING].ip6_hash));
+
+    s = format(s, "%=30s %=6d %=8ld\n",
+               "IPv6 unicast",
+               pool_elts(ip6_main.fibs),
+               bytes_inuse);
+    return (s);
+}
+
 typedef struct {
   u32 fib_index;
   u64 count_by_prefix_length[129];
 } count_routes_in_fib_at_prefix_length_arg_t;
 
 static void
-count_routes_in_fib_at_prefix_length (BVT(clib_bihash_kv) * kvp,
+count_routes_in_fib_at_prefix_length (clib_bihash_kv_24_8_t * kvp,
                                       void *arg)
 {
   count_routes_in_fib_at_prefix_length_arg_t * ap = arg;
@@ -598,6 +663,8 @@ ip6_show_fib (vlib_main_t * vm,
 	    continue;
 	if (fib_index != ~0 && fib_index != (int)fib->index)
 	    continue;
+        if (fib_table->ft_flags & FIB_TABLE_FLAG_IP6_LL)
+            continue;
 
 	s = format(s, "%U, fib_index:%d, flow hash:[%U] locks:[",
                    format_fib_table_name, fib->index,
@@ -621,15 +688,15 @@ ip6_show_fib (vlib_main_t * vm,
 	/* Show summary? */
 	if (! verbose)
 	{
-	    BVT(clib_bihash) * h = &im6->ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash;
+	    clib_bihash_24_8_t * h = &im6->ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash;
 	    int len;
 
 	    vlib_cli_output (vm, "%=20s%=16s", "Prefix length", "Count");
 
-	    memset (ca, 0, sizeof(*ca));
+	    clib_memset (ca, 0, sizeof(*ca));
 	    ca->fib_index = fib->index;
 
-	    BV(clib_bihash_foreach_key_value_pair)
+	    clib_bihash_foreach_key_value_pair_24_8
 		(h, count_routes_in_fib_at_prefix_length, ca);
 
 	    for (len = 128; len >= 0; len--)

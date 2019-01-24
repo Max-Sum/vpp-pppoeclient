@@ -5,7 +5,7 @@ from logging import *
 
 from framework import VppTestCase, VppTestRunner
 from vpp_ip_route import VppIpRoute, VppRoutePath
-from vpp_pppoe_interface import VppPppoeInterface, VppPppoe6Interface
+from vpp_pppoe_interface import VppPppoeInterface
 from vpp_papi_provider import L2_VTR_OP
 
 from scapy.packet import Raw
@@ -14,8 +14,7 @@ from scapy.layers.ppp import PPPoE, PPPoED, PPP
 from scapy.layers.inet import IP, UDP
 from scapy.layers.inet6 import IPv6
 from scapy.volatile import RandMAC, RandIP
-
-from util import ppp, ppc, mactobinary
+from util import ppp, ppc
 import socket
 
 
@@ -343,7 +342,7 @@ class TestPPPoE(VppTestCase):
         # and we should still be able to use the original
         #
         try:
-            gre_if.add_vpp_config()
+            pppoe_if.add_vpp_config()
         except Exception:
             pass
         else:
@@ -400,7 +399,7 @@ class TestPPPoE(VppTestCase):
         # and we should still be able to use the original
         #
         try:
-            gre_if.remove_vpp_config()
+            pppoe_if.remove_vpp_config()
         except Exception:
             pass
         else:

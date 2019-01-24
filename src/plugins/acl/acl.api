@@ -19,6 +19,7 @@
     used to control the ACL plugin
 */
 
+option version = "1.0.1";
 
 /** \brief Get the plugin version
     @param client_index - opaque cookie to identify the sender
@@ -66,6 +67,27 @@ define acl_plugin_control_ping_reply
   i32 retval;
   u32 client_index;
   u32 vpe_pid;
+};
+
+/** \brief Get Connection table max entries
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+*/
+
+define acl_plugin_get_conn_table_max_entries
+{
+  u32 client_index;
+  u32 context;
+};
+
+/** \brief Reply to get connection table max entries
+    @param context - sender context, to match reply w/ request
+    @param conn_table_max_entries - the value of maximum entries of connection table
+*/
+define acl_plugin_get_conn_table_max_entries_reply
+{
+  u32 context;
+  u64 conn_table_max_entries;
 };
 
 /** \brief Access List Rule entry
@@ -475,3 +497,53 @@ define macip_acl_interface_list_details
   u8 count;
   u32 acls[count];
 };
+
+/** \brief Set the ethertype whitelists on an interface. Takes effect when applying ACLs on the interface, so must be given prior.
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - the interface to alter the list of ACLs on
+    @param count - total number of whitelisted ethertypes in the vector
+    @param n_input - this many first elements correspond to input whitelisted ethertypes, the rest - output
+    @param whitelist - vector of whitelisted ethertypes
+*/
+
+autoreply manual_print define acl_interface_set_etype_whitelist
+{
+  u32 client_index;
+  u32 context;
+  u32 sw_if_index;
+  u8 count; /* Total number of ethertypes in the whitelist */
+  u8 n_input; /* first n_input ethertypes are input, the rest - output */
+  u16 whitelist[count];
+};
+
+/** \brief Dump the list(s) of Ethertype whitelists applied to specific or all interfaces
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - interface to dump the ethertype whitelist for
+*/
+
+define acl_interface_etype_whitelist_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 sw_if_index; /* ~0 for all interfaces */
+};
+
+/** \brief Details about ethertype whitelist on a single interface
+    @param context - returned sender context, to match reply w/ request
+    @param sw_if_index - interface for which the list of MACIP ACLs is applied
+    @param count - total number of whitelisted ethertypes in the vector
+    @param n_input - this many first elements correspond to input whitelisted ethertypes, the rest - output
+    @param whitelist - vector of whitelisted ethertypes
+*/
+
+define acl_interface_etype_whitelist_details
+{
+  u32 context;
+  u32 sw_if_index;
+  u8 count;
+  u8 n_input; /* first n_input ethertypes are input, the rest - output */
+  u16 whitelist[count];
+};
+

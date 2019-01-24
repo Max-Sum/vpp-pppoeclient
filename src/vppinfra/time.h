@@ -56,6 +56,8 @@ typedef struct
      from clock cycles into seconds. */
   f64 seconds_per_clock;
 
+  f64 round_to_units;
+
   /* Time stamp of call to clib_time_init call. */
   u64 init_cpu_time;
 
@@ -114,6 +116,16 @@ clib_cpu_time_now (void)
   return (u64) lo + ((u64) hi2 << (u64) 32);
 }
 
+#elif defined (__aarch64__)
+always_inline u64
+clib_cpu_time_now (void)
+{
+  u64 vct;
+  /* User access to cntvct_el0 is enabled in Linux kernel since 3.12. */
+  asm volatile ("mrs %0, cntvct_el0":"=r" (vct));
+  return vct;
+}
+
 #elif defined (__arm__)
 #if defined(__ARM_ARCH_8A__)
 always_inline u64
@@ -164,16 +176,14 @@ clib_cpu_time_now (void)
   return ((u64) h << 32) | l;
 }
 
-#elif defined (__aarch64__)
+#elif defined(_mips) && __mips == 64
+
 always_inline u64
 clib_cpu_time_now (void)
 {
-  u64 tsc;
-
-  /* Works on Cavium ThunderX. Other platforms: YMMV */
-  asm volatile ("mrs %0, cntvct_el0":"=r" (tsc));
-
-  return tsc;
+  u64 result;
+  asm volatile ("rdhwr %0,$31\n":"=r" (result));
+  return result;
 }
 
 #else
@@ -197,6 +207,9 @@ clib_time_now_internal (clib_time_t * c, u64 n)
     clib_time_verify_frequency (c);
   return t * c->seconds_per_clock;
 }
+
+/* Maximum f64 value as max clib_time */
+#define CLIB_TIME_MAX (1.7976931348623157e+308)
 
 always_inline f64
 clib_time_now (clib_time_t * c)
@@ -226,10 +239,14 @@ void clib_time_init (clib_time_t * c);
 always_inline f64
 unix_time_now (void)
 {
+  struct timespec ts;
+#ifdef __MACH__
+  clock_gettime (CLOCK_REALTIME, &ts);
+#else
   /* clock_gettime without indirect syscall uses GLIBC wrappers which
      we don't want.  Just the bare metal, please. */
-  struct timespec ts;
   syscall (SYS_clock_gettime, CLOCK_REALTIME, &ts);
+#endif
   return ts.tv_sec + 1e-9 * ts.tv_nsec;
 }
 
@@ -238,7 +255,11 @@ always_inline u64
 unix_time_now_nsec (void)
 {
   struct timespec ts;
+#ifdef __MACH__
+  clock_gettime (CLOCK_REALTIME, &ts);
+#else
   syscall (SYS_clock_gettime, CLOCK_REALTIME, &ts);
+#endif
   return 1e9 * ts.tv_sec + ts.tv_nsec;
 }
 
@@ -246,7 +267,11 @@ always_inline void
 unix_time_now_nsec_fraction (u32 * sec, u32 * nsec)
 {
   struct timespec ts;
+#ifdef __MACH__
+  clock_gettime (CLOCK_REALTIME, &ts);
+#else
   syscall (SYS_clock_gettime, CLOCK_REALTIME, &ts);
+#endif
   *sec = ts.tv_sec;
   *nsec = ts.tv_nsec;
 }
@@ -263,10 +288,12 @@ unix_usage_now (void)
 always_inline void
 unix_sleep (f64 dt)
 {
-  struct timespec t;
-  t.tv_sec = dt;
-  t.tv_nsec = 1e9 * dt;
-  nanosleep (&t, 0);
+  struct timespec ts, tsrem;
+  ts.tv_sec = dt;
+  ts.tv_nsec = 1e9 * (dt - (f64) ts.tv_sec);
+
+  while (nanosleep (&ts, &tsrem) < 0)
+    ts = tsrem;
 }
 
 #else /* ! CLIB_UNIX */

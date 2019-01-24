@@ -16,6 +16,7 @@
 #ifndef __FIB_API_H__
 #define __FIB_API_H__
 
+#include <vnet/fib/fib_types.h>
 
 int
 add_del_route_check (fib_protocol_t table_proto,
@@ -40,19 +41,39 @@ add_del_route_t_handler (u8 is_multipath,
 			 u8 is_resolve_attached,
 			 u8 is_interface_rx,
                          u8 is_rpf_id,
+                         u8 is_dvr,
+                         u8 is_source_lookup,
+                         u8 is_udp_encap,
 			 u32 fib_index,
 			 const fib_prefix_t * prefix,
 			 dpo_proto_t next_hop_proto,
 			 const ip46_address_t * next_hop,
+                         u32 next_hop_id,
 			 u32 next_hop_sw_if_index,
 			 u8 next_hop_fib_index,
 			 u16 next_hop_weight,
 			 u16 next_hop_preference,
 			 mpls_label_t next_hop_via_label,
-			 mpls_label_t * next_hop_out_label_stack);
+			 fib_mpls_label_t * next_hop_out_label_stack);
+
+struct _vl_api_fib_path;
+
+extern void fib_api_path_encode (const fib_route_path_encode_t * api_rpath,
+                                 struct _vl_api_fib_path *out);
 
 void
-copy_fib_next_hop (fib_route_path_encode_t * api_rpath,
-		   void * fp_arg);
+fib_prefix_to_api (const fib_prefix_t *pfx,
+                   u8 address[16],
+                   u8 *length,
+                   u8 *is_ip6);
+
+
+struct _vl_api_fib_path;
+
+extern int fib_path_api_parse(const struct _vl_api_fib_path *in,
+                              fib_route_path_t *out);
+
+extern fib_protocol_t fib_proto_from_api_address_family (int af);
+extern int fib_proto_to_api_address_family (fib_protocol_t fproto);
 
 #endif /* __FIB_API_H__ */

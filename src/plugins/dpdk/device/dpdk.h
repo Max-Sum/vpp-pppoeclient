@@ -18,6 +18,8 @@
 /* $$$$ We should rename always_inline -> clib_always_inline */
 #undef always_inline
 
+#define ALLOW_EXPERIMENTAL_API
+
 #include <rte_config.h>
 
 #include <rte_common.h>
@@ -39,8 +41,10 @@
 #include <rte_eth_bond.h>
 #include <rte_sched.h>
 #include <rte_net.h>
+#include <rte_bus_pci.h>
+#include <rte_flow.h>
 
-#include <vnet/unix/pcap.h>
+#include <vppinfra/pcap.h>
 #include <vnet/devices/devices.h>
 
 #if CLIB_DEBUG > 0
@@ -50,11 +54,13 @@
 #endif
 
 #include <vlib/pci/pci.h>
+#include <vnet/flow/flow.h>
 
 #define NB_MBUF   (16<<10)
 
 extern vnet_device_class_t dpdk_device_class;
 extern vlib_node_registration_t dpdk_input_node;
+extern vlib_node_registration_t admin_up_down_process_node;
 
 #define foreach_dpdk_pmd          \
   _ ("net_thunderx", THUNDERX)    \
@@ -76,7 +82,12 @@ extern vlib_node_registration_t dpdk_input_node;
   _ ("net_mlx5", MLX5)            \
   _ ("net_dpaa2", DPAA2)          \
   _ ("net_virtio_user", VIRTIO_USER) \
-  _ ("net_vhost", VHOST_ETHER)
+  _ ("net_vhost", VHOST_ETHER)    \
+  _ ("net_ena", ENA)              \
+  _ ("net_failsafe", FAILSAFE)    \
+  _ ("net_liovf", LIOVF_ETHER)    \
+  _ ("net_qede", QEDE)		  \
+  _ ("net_netvsc", NETVSC)
 
 typedef enum
 {
@@ -90,10 +101,14 @@ typedef enum
 typedef enum
 {
   VNET_DPDK_PORT_TYPE_ETH_1G,
+  VNET_DPDK_PORT_TYPE_ETH_2_5G,
+  VNET_DPDK_PORT_TYPE_ETH_5G,
   VNET_DPDK_PORT_TYPE_ETH_10G,
+  VNET_DPDK_PORT_TYPE_ETH_20G,
   VNET_DPDK_PORT_TYPE_ETH_25G,
   VNET_DPDK_PORT_TYPE_ETH_40G,
   VNET_DPDK_PORT_TYPE_ETH_50G,
+  VNET_DPDK_PORT_TYPE_ETH_56G,
   VNET_DPDK_PORT_TYPE_ETH_100G,
   VNET_DPDK_PORT_TYPE_ETH_BOND,
   VNET_DPDK_PORT_TYPE_ETH_SWITCH,
@@ -101,22 +116,18 @@ typedef enum
   VNET_DPDK_PORT_TYPE_ETH_VF,
   VNET_DPDK_PORT_TYPE_VIRTIO_USER,
   VNET_DPDK_PORT_TYPE_VHOST_ETHER,
+  VNET_DPDK_PORT_TYPE_FAILSAFE,
+  VNET_DPDK_PORT_TYPE_NETVSC,
   VNET_DPDK_PORT_TYPE_UNKNOWN,
 } dpdk_port_type_t;
 
-/*
- * The header for the tx_vector in dpdk_device_t.
- * Head and tail are indexes into the tx_vector and are of type
- * u64 so they never overflow.
- */
-typedef struct
-{
-  u64 tx_head;
-  u64 tx_tail;
-} tx_ring_hdr_t;
+typedef uint16_t dpdk_portid_t;
 
 typedef struct
 {
+  /* Required for vec_validate_aligned */
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+
   struct rte_ring *swq;
 
   u64 hqos_field0_slabmask;
@@ -133,6 +144,8 @@ typedef struct
 
 typedef struct
 {
+  /* Required for vec_validate_aligned */
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   struct rte_ring **swq;
   struct rte_mbuf **pkts_enq;
   struct rte_mbuf **pkts_deq;
@@ -144,46 +157,68 @@ typedef struct
   u32 flush_count;
 } dpdk_device_hqos_per_hqos_thread_t;
 
+#define foreach_dpdk_device_flags \
+  _( 0, ADMIN_UP, "admin-up") \
+  _( 1, PROMISC, "promisc") \
+  _( 2, PMD, "pmd") \
+  _( 3, PMD_INIT_FAIL, "pmd-init-fail") \
+  _( 4, MAYBE_MULTISEG, "maybe-multiseg") \
+  _( 5, HAVE_SUBIF, "subif") \
+  _( 6, HQOS, "hqos") \
+  _( 7, BOND_SLAVE, "bond-slave") \
+  _( 8, BOND_SLAVE_UP, "bond-slave-up") \
+  _( 9, TX_OFFLOAD, "tx-offload") \
+  _(10, INTEL_PHDR_CKSUM, "intel-phdr-cksum") \
+  _(11, RX_FLOW_OFFLOAD, "rx-flow-offload") \
+  _(12, RX_IP4_CKSUM, "rx-ip4-cksum")
+
+enum
+{
+#define _(a, b, c) DPDK_DEVICE_FLAG_##b = (1 << a),
+  foreach_dpdk_device_flags
+#undef _
+};
+
+typedef struct
+{
+  u32 flow_index;
+  u32 mark;
+  struct rte_flow *handle;
+} dpdk_flow_entry_t;
+
+typedef struct
+{
+  u32 flow_id;
+  u16 next_index;
+  i16 buffer_advance;
+} dpdk_flow_lookup_entry_t;
+
 typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   volatile u32 **lockp;
 
-  /* Instance ID */
-  u32 device_index;
+  /* Instance ID to access internal device array. */
+  dpdk_portid_t device_index;
+
+  /* DPDK device port number */
+  dpdk_portid_t port_id;
 
   u32 hw_if_index;
-  u32 vlib_sw_if_index;
+  u32 sw_if_index;
 
   /* next node index if we decide to steal the rx graph arc */
   u32 per_interface_next_index;
-
-  /* dpdk rte_mbuf rx and tx vectors, VLIB_FRAME_SIZE */
-  struct rte_mbuf ***tx_vectors;	/* one per worker thread */
-  struct rte_mbuf ***rx_vectors;
-
-  /* vector of traced contexts, per device */
-  u32 **d_trace_buffers;
 
   dpdk_pmd_t pmd:8;
   i8 cpu_socket;
 
   u16 flags;
-#define DPDK_DEVICE_FLAG_ADMIN_UP           (1 << 0)
-#define DPDK_DEVICE_FLAG_PROMISC            (1 << 1)
-#define DPDK_DEVICE_FLAG_PMD                (1 << 2)
-#define DPDK_DEVICE_FLAG_PMD_INIT_FAIL      (1 << 3)
-#define DPDK_DEVICE_FLAG_MAYBE_MULTISEG     (1 << 4)
-#define DPDK_DEVICE_FLAG_HAVE_SUBIF         (1 << 5)
-#define DPDK_DEVICE_FLAG_HQOS               (1 << 6)
-#define DPDK_DEVICE_FLAG_BOND_SLAVE         (1 << 7)
-#define DPDK_DEVICE_FLAG_BOND_SLAVE_UP      (1 << 8)
-#define DPDK_DEVICE_FLAG_TX_OFFLOAD         (1 << 9)
-#define DPDK_DEVICE_FLAG_INTEL_PHDR_CKSUM   (1 << 10)
 
   u16 nb_tx_desc;
     CLIB_CACHE_LINE_ALIGN_MARK (cacheline1);
 
+  u8 *name;
   u8 *interface_name_suffix;
 
   /* number of sub-interfaces */
@@ -194,19 +229,29 @@ typedef struct
   u16 rx_q_used;
   u16 nb_rx_desc;
   u16 *cpu_socket_id_by_queue;
+  u8 *buffer_pool_for_queue;
   struct rte_eth_conf port_conf;
   struct rte_eth_txconf tx_conf;
+
+  /* flow related */
+  u32 supported_flow_actions;
+  dpdk_flow_entry_t *flow_entries;	/* pool */
+  dpdk_flow_lookup_entry_t *flow_lookup_entries;	/* pool */
+  u32 *parked_lookup_indexes;	/* vector */
+  u32 parked_loop_count;
+  struct rte_flow_error last_flow_error;
 
   /* HQoS related */
   dpdk_device_hqos_per_worker_thread_t *hqos_wt;
   dpdk_device_hqos_per_hqos_thread_t *hqos_ht;
 
   /* af_packet or BondEthernet instance number */
-  u8 port_id;
+  u16 af_packet_instance_num;
+  u16 bond_instance_num;
 
   /* Bonded interface port# of a slave -
      only valid if DPDK_DEVICE_FLAG_BOND_SLAVE bit is set */
-  u8 bond_port;
+  dpdk_portid_t bond_port;
 
   struct rte_eth_link link;
   f64 time_last_link_update;
@@ -288,6 +333,7 @@ void dpdk_hqos_metadata_set (dpdk_device_hqos_per_worker_thread_t * hqos,
 typedef struct
 {
   vlib_pci_addr_t pci_addr;
+  u8 *name;
   u8 is_blacklisted;
   u8 vlan_strip_offload;
 #define DPDK_DEVICE_VLAN_STRIP_DEFAULT 0
@@ -311,6 +357,7 @@ typedef struct
   u8 *uio_driver_name;
   u8 no_multi_seg;
   u8 enable_tcp_udp_checksum;
+  u8 no_tx_checksum_offload;
 
   /* Required config parameters */
   u8 coremask_set_manually;
@@ -330,9 +377,32 @@ typedef struct
   dpdk_device_config_t *dev_confs;
   uword *device_config_index_by_pci_addr;
 
+  /* devices blacklist by pci vendor_id, device_id */
+  u32 *blacklist_by_pci_vendor_and_device;
+
 } dpdk_config_main_t;
 
-dpdk_config_main_t dpdk_config_main;
+extern dpdk_config_main_t dpdk_config_main;
+
+#define DPDK_RX_BURST_SZ VLIB_FRAME_SIZE
+
+typedef struct
+{
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+  struct rte_mbuf *mbufs[DPDK_RX_BURST_SZ];
+  u32 buffers[DPDK_RX_BURST_SZ];
+  u16 next[DPDK_RX_BURST_SZ];
+  u16 etype[DPDK_RX_BURST_SZ];
+  u8 flags[DPDK_RX_BURST_SZ];
+  vlib_buffer_t buffer_template;
+} dpdk_per_thread_data_t;
+
+typedef struct
+{
+  int pcap_enable;
+  u32 pcap_sw_if_index;
+  pcap_main_t pcap_main;
+} dpdk_pcap_t;
 
 typedef struct
 {
@@ -340,24 +410,15 @@ typedef struct
   /* Devices */
   dpdk_device_t *devices;
   dpdk_device_and_queue_t **devices_by_hqos_cpu;
-
-  /* per-thread recycle lists */
-  u32 **recycle;
-
-  /* per-thread buffer templates */
-  vlib_buffer_t *buffer_templates;
+  dpdk_per_thread_data_t *per_thread_data;
 
   /* buffer flags template, configurable to enable/disable tcp / udp cksum */
   u32 buffer_flags_template;
 
-  /* vlib buffer free list, must be same size as an rte_mbuf */
-  u32 vlib_buffer_free_list_index;
+  /* pcap tracing */
+  dpdk_pcap_t pcap[VLIB_N_RX_TX];
 
-  /* Ethernet input node index */
-  u32 ethernet_input_node_index;
-
-  /* pcap tracing [only works if (CLIB_DEBUG > 0)] */
-  int tx_pcap_enable;
+  int pcap_enable;
   pcap_main_t pcap_main;
   u8 *pcap_filename;
   u32 pcap_sw_if_index;
@@ -369,8 +430,6 @@ typedef struct
    */
   u8 admin_up_down_in_progress;
 
-  u8 use_rss;
-
   /* which cpus are running I/O TX */
   int hqos_cpu_first_index;
   int hqos_cpu_count;
@@ -378,9 +437,6 @@ typedef struct
   /* control interval of dpdk link state and stat polling */
   f64 link_state_poll_interval;
   f64 stat_poll_interval;
-
-  /* Sleep for this many usec after each device poll */
-  u32 poll_sleep_usec;
 
   /* convenience */
   vlib_main_t *vlib_main;
@@ -392,6 +448,9 @@ typedef struct
 
   /* API message ID base */
   u16 msg_id_base;
+
+  /* logging */
+  vlib_log_class_t log_default;
 } dpdk_main_t;
 
 extern dpdk_main_t dpdk_main;
@@ -404,7 +463,8 @@ typedef struct
   struct rte_mbuf mb;
   /* Copy of VLIB buffer; packet data stored in pre_data. */
   vlib_buffer_t buffer;
-} dpdk_tx_dma_trace_t;
+  u8 data[256];			/* First 256 data bytes, used for hexdump */
+} dpdk_tx_trace_t;
 
 typedef struct
 {
@@ -414,20 +474,15 @@ typedef struct
   struct rte_mbuf mb;
   vlib_buffer_t buffer;		/* Copy of VLIB buffer; pkt data stored in pre_data. */
   u8 data[256];			/* First 256 data bytes, used for hexdump */
-} dpdk_rx_dma_trace_t;
+} dpdk_rx_trace_t;
 
 void dpdk_device_setup (dpdk_device_t * xd);
 void dpdk_device_start (dpdk_device_t * xd);
 void dpdk_device_stop (dpdk_device_t * xd);
 
-#if DPDK_VOID_CALLBACK
-void dpdk_port_state_callback (uint8_t port_id,
-			       enum rte_eth_event_type type, void *param);
-#else
-int dpdk_port_state_callback (uint8_t port_id,
+int dpdk_port_state_callback (dpdk_portid_t port_id,
 			      enum rte_eth_event_type type,
 			      void *param, void *ret_param);
-#endif
 
 #define foreach_dpdk_error						\
   _(NONE, "no error")							\
@@ -446,26 +501,37 @@ typedef enum
     DPDK_N_ERROR,
 } dpdk_error_t;
 
+#define dpdk_log_err(...) \
+  vlib_log(VLIB_LOG_LEVEL_ERR, dpdk_main.log_default, __VA_ARGS__)
+#define dpdk_log_warn(...) \
+  vlib_log(VLIB_LOG_LEVEL_WARNING, dpdk_main.log_default, __VA_ARGS__)
+#define dpdk_log_notice(...) \
+  vlib_log(VLIB_LOG_LEVEL_NOTICE, dpdk_main.log_default, __VA_ARGS__)
+#define dpdk_log_info(...) \
+  vlib_log(VLIB_LOG_LEVEL_INFO, dpdk_main.log_default, __VA_ARGS__)
+
 void dpdk_update_link_state (dpdk_device_t * xd, f64 now);
 
 format_function_t format_dpdk_device_name;
 format_function_t format_dpdk_device;
 format_function_t format_dpdk_device_errors;
-format_function_t format_dpdk_tx_dma_trace;
-format_function_t format_dpdk_rx_dma_trace;
+format_function_t format_dpdk_tx_trace;
+format_function_t format_dpdk_rx_trace;
 format_function_t format_dpdk_rte_mbuf;
 format_function_t format_dpdk_rx_rte_mbuf;
+format_function_t format_dpdk_flow;
+format_function_t format_dpdk_rss_hf_name;
+format_function_t format_dpdk_rx_offload_caps;
+format_function_t format_dpdk_tx_offload_caps;
 unformat_function_t unformat_dpdk_log_level;
+vnet_flow_dev_ops_function_t dpdk_flow_ops_fn;
+
 clib_error_t *unformat_rss_fn (unformat_input_t * input, uword * rss_fn);
 clib_error_t *unformat_hqos (unformat_input_t * input,
 			     dpdk_device_config_hqos_t * hqos);
 
-uword
-admin_up_down_process (vlib_main_t * vm,
-		       vlib_node_runtime_t * rt, vlib_frame_t * f);
-
-clib_error_t *dpdk_buffer_pool_create (vlib_main_t * vm, unsigned num_mbufs,
-				       unsigned socket_id);
+struct rte_pci_device *dpdk_get_pci_device (const struct rte_eth_dev_info
+					    *info);
 
 #if CLI_DEBUG
 int dpdk_buffer_validate_trajectory_all (u32 * uninitialized);

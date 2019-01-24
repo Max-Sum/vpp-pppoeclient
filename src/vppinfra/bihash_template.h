@@ -26,9 +26,22 @@
 #include <vppinfra/heap.h>
 #include <vppinfra/format.h>
 #include <vppinfra/pool.h>
+#include <vppinfra/cache.h>
+#include <vppinfra/lock.h>
 
 #ifndef BIHASH_TYPE
 #error BIHASH_TYPE not defined
+#endif
+
+#ifdef BIHASH_32_64_SVM
+#undef HAVE_MEMFD_CREATE
+#include <vppinfra/linux/syscall.h>
+#include <fcntl.h>
+#define F_LINUX_SPECIFIC_BASE 1024
+#define F_ADD_SEALS (F_LINUX_SPECIFIC_BASE + 9)
+#define F_SEAL_SHRINK (2)
+/* Max page size 2**16 due to refcount width  */
+#define BIHASH_FREELIST_LENGTH 17
 #endif
 
 #define _bv(a,b) a##b
@@ -39,18 +52,26 @@
 #define __bvt(a,b) _bvt(a,b)
 #define BVT(a) __bvt(a,BIHASH_TYPE)
 
+#if _LP64 == 0
+#define OVERFLOW_ASSERT(x) ASSERT(((x) & 0xFFFFFFFF00000000ULL) == 0)
+#define u64_to_pointer(x) (void *)(u32)((x))
+#define pointer_to_u64(x) (u64)(u32)((x))
+#else
+#define OVERFLOW_ASSERT(x)
+#define u64_to_pointer(x) (void *)((x))
+#define pointer_to_u64(x) (u64)((x))
+#endif
+
 typedef struct BV (clib_bihash_value)
 {
   union
   {
     BVT (clib_bihash_kv) kvp[BIHASH_KVP_PER_PAGE];
-    struct BV (clib_bihash_value) * next_free;
+    u64 next_free_as_u64;
   };
 } BVT (clib_bihash_value);
 
-#if BIHASH_KVP_CACHE_SIZE > 5
-#error Requested KVP cache LRU data exceeds 16 bits
-#endif
+#define BIHASH_BUCKET_OFFSET_BITS 36
 
 typedef struct
 {
@@ -58,23 +79,44 @@ typedef struct
   {
     struct
     {
-      u32 offset;
-      u8 linear_search;
-      u8 log2_pages;
-      u16 cache_lru;
+      u64 offset:BIHASH_BUCKET_OFFSET_BITS;
+      u64 lock:1;
+      u64 linear_search:1;
+      u64 log2_pages:8;
+      u64 refcnt:16;
     };
     u64 as_u64;
   };
-#if BIHASH_KVP_CACHE_SIZE > 0
-    BVT (clib_bihash_kv) cache[BIHASH_KVP_CACHE_SIZE];
-#endif
 } BVT (clib_bihash_bucket);
+
+STATIC_ASSERT_SIZEOF (BVT (clib_bihash_bucket), sizeof (u64));
+
+/* *INDENT-OFF* */
+typedef CLIB_PACKED (struct {
+  /*
+   * Backing store allocation. Since bihash manages its own
+   * freelists, we simple dole out memory starting from alloc_arena[alloc_arena_next].
+   */
+  u64 alloc_arena_next;	/* Next offset from alloc_arena to allocate, definitely NOT a constant */
+  u64 alloc_arena_size;	/* Size of the arena */
+  /* Two SVM pointers stored as 8-byte integers */
+  u64 alloc_lock_as_u64;
+  u64 buckets_as_u64;
+  /* freelist list-head arrays/vectors */
+  u64 freelists_as_u64;
+  u32 nbuckets;	/* Number of buckets */
+  /* Set when header valid */
+  volatile u32 ready;
+  u64 pad[2];
+}) BVT (clib_bihash_shared_header);
+/* *INDENT-ON* */
+
+STATIC_ASSERT_SIZEOF (BVT (clib_bihash_shared_header), 8 * sizeof (u64));
 
 typedef struct
 {
-  BVT (clib_bihash_value) * values;
   BVT (clib_bihash_bucket) * buckets;
-  volatile u32 *writer_lock;
+  volatile u32 *alloc_lock;
 
     BVT (clib_bihash_value) ** working_copies;
   int *working_copy_lengths;
@@ -82,147 +124,95 @@ typedef struct
 
   u32 nbuckets;
   u32 log2_nbuckets;
-  u32 linear_buckets;
   u8 *name;
 
-  u64 cache_hits;
-  u64 cache_misses;
+  u64 *freelists;
 
-    BVT (clib_bihash_value) ** freelists;
-  void *mheap;
+#if BIHASH_32_64_SVM
+    BVT (clib_bihash_shared_header) * sh;
+  int memfd;
+#else
+    BVT (clib_bihash_shared_header) sh;
+#endif
+
+  u64 alloc_arena;		/* Base of the allocation arena */
+
+  /**
+    * A custom format function to print the Key and Value of bihash_key instead of default hexdump
+    */
+  format_function_t *fmt_fn;
 
 } BVT (clib_bihash);
 
-
-static inline void
-BV (clib_bihash_update_lru) (BVT (clib_bihash_bucket) * b, u8 slot)
-{
-  u16 value, tmp, mask;
-  u8 found_lru_pos;
-  u16 save_hi;
-
-  if (BIHASH_KVP_CACHE_SIZE < 2)
-    return;
-
-  ASSERT (slot < BIHASH_KVP_CACHE_SIZE);
-
-  /* First, find the slot in cache_lru */
-  mask = slot;
-  if (BIHASH_KVP_CACHE_SIZE > 1)
-    mask |= slot << 3;
-  if (BIHASH_KVP_CACHE_SIZE > 2)
-    mask |= slot << 6;
-  if (BIHASH_KVP_CACHE_SIZE > 3)
-    mask |= slot << 9;
-  if (BIHASH_KVP_CACHE_SIZE > 4)
-    mask |= slot << 12;
-
-  value = b->cache_lru;
-  tmp = value ^ mask;
-
-  /* Already the most-recently used? */
-  if ((tmp & 7) == 0)
-    return;
-
-  found_lru_pos = ((tmp & (7 << 3)) == 0) ? 1 : 0;
-  if (BIHASH_KVP_CACHE_SIZE > 2)
-    found_lru_pos = ((tmp & (7 << 6)) == 0) ? 2 : found_lru_pos;
-  if (BIHASH_KVP_CACHE_SIZE > 3)
-    found_lru_pos = ((tmp & (7 << 9)) == 0) ? 3 : found_lru_pos;
-  if (BIHASH_KVP_CACHE_SIZE > 4)
-    found_lru_pos = ((tmp & (7 << 12)) == 0) ? 4 : found_lru_pos;
-
-  ASSERT (found_lru_pos);
-
-  /* create a mask to kill bits in or above slot */
-  mask = 0xFFFF << found_lru_pos;
-  mask <<= found_lru_pos;
-  mask <<= found_lru_pos;
-  mask ^= 0xFFFF;
-  tmp = value & mask;
-
-  /* Save bits above slot */
-  mask ^= 0xFFFF;
-  mask <<= 3;
-  save_hi = value & mask;
-
-  value = save_hi | (tmp << 3) | slot;
-
-  b->cache_lru = value;
-}
-
-void
-BV (clib_bihash_update_lru_not_inline) (BVT (clib_bihash_bucket) * b,
-					u8 slot);
-
-static inline u8 BV (clib_bihash_get_lru) (BVT (clib_bihash_bucket) * b)
-{
-#if BIHASH_KVP_CACHE_SIZE > 0
-  return (b->cache_lru >> (3 * (BIHASH_KVP_CACHE_SIZE - 1))) & 7;
+#if BIHASH_32_64_SVM
+#undef alloc_arena_next
+#undef alloc_arena_size
+#undef alloc_arena
+#undef CLIB_BIHASH_READY_MAGIC
+#define alloc_arena_next(h) (((h)->sh)->alloc_arena_next)
+#define alloc_arena_size(h) (((h)->sh)->alloc_arena_size)
+#define alloc_arena(h) ((h)->alloc_arena)
+#define CLIB_BIHASH_READY_MAGIC 0xFEEDFACE
 #else
-  return 0;
+#undef alloc_arena_next
+#undef alloc_arena_size
+#undef alloc_arena
+#undef CLIB_BIHASH_READY_MAGIC
+#define alloc_arena_next(h) ((h)->sh.alloc_arena_next)
+#define alloc_arena_size(h) ((h)->sh.alloc_arena_size)
+#define alloc_arena(h) ((h)->alloc_arena)
+#define CLIB_BIHASH_READY_MAGIC 0
 #endif
+
+static inline void BV (clib_bihash_alloc_lock) (BVT (clib_bihash) * h)
+{
+  while (__atomic_test_and_set (h->alloc_lock, __ATOMIC_ACQUIRE))
+    CLIB_PAUSE ();
 }
 
-static inline void BV (clib_bihash_reset_cache) (BVT (clib_bihash_bucket) * b)
+static inline void BV (clib_bihash_alloc_unlock) (BVT (clib_bihash) * h)
 {
-#if BIHASH_KVP_CACHE_SIZE > 0
-  u16 initial_lru_value;
-
-  memset (b->cache, 0xff, sizeof (b->cache));
-
-  /*
-   * We'll want the cache to be loaded from slot 0 -> slot N, so
-   * the initial LRU order is reverse index order.
-   */
-  if (BIHASH_KVP_CACHE_SIZE == 1)
-    initial_lru_value = 0;
-  else if (BIHASH_KVP_CACHE_SIZE == 2)
-    initial_lru_value = (0 << 3) | (1 << 0);
-  else if (BIHASH_KVP_CACHE_SIZE == 3)
-    initial_lru_value = (0 << 6) | (1 << 3) | (2 << 0);
-  else if (BIHASH_KVP_CACHE_SIZE == 4)
-    initial_lru_value = (0 << 9) | (1 << 6) | (2 << 3) | (3 << 0);
-  else if (BIHASH_KVP_CACHE_SIZE == 5)
-    initial_lru_value = (0 << 12) | (1 << 9) | (2 << 6) | (3 << 3) | (4 << 0);
-
-  b->cache_lru = initial_lru_value;
-#endif
+  __atomic_clear (h->alloc_lock, __ATOMIC_RELEASE);
 }
 
-static inline int BV (clib_bihash_lock_bucket) (BVT (clib_bihash_bucket) * b)
+static inline void BV (clib_bihash_lock_bucket) (BVT (clib_bihash_bucket) * b)
 {
-  BVT (clib_bihash_bucket) tmp_b;
-  u64 rv;
+  BVT (clib_bihash_bucket) unlocked_bucket, locked_bucket;
 
-  tmp_b.as_u64 = 0;
-  tmp_b.cache_lru = 1 << 15;
-
-  rv = __sync_fetch_and_or (&b->as_u64, tmp_b.as_u64);
-  tmp_b.as_u64 = rv;
-  /* Was already locked? */
-  if (tmp_b.cache_lru & (1 << 15))
-    return 0;
-  return 1;
+  do
+    {
+      locked_bucket.as_u64 = unlocked_bucket.as_u64 = b->as_u64;
+      unlocked_bucket.lock = 0;
+      locked_bucket.lock = 1;
+      CLIB_PAUSE ();
+    }
+  while (__atomic_compare_exchange_n (&b->as_u64, &unlocked_bucket.as_u64,
+				      locked_bucket.as_u64, 1 /* weak */ ,
+				      __ATOMIC_ACQUIRE,
+				      __ATOMIC_ACQUIRE) == 0);
 }
 
 static inline void BV (clib_bihash_unlock_bucket)
   (BVT (clib_bihash_bucket) * b)
 {
-  BVT (clib_bihash_bucket) tmp_b;
-
-  tmp_b.as_u64 = b->as_u64;
-  tmp_b.cache_lru &= ~(1 << 15);
-  b->as_u64 = tmp_b.as_u64;
+  CLIB_MEMORY_BARRIER ();
+  b->lock = 0;
 }
 
 static inline void *BV (clib_bihash_get_value) (BVT (clib_bihash) * h,
 						uword offset)
 {
-  u8 *hp = h->mheap;
+  u8 *hp = (u8 *) (uword) alloc_arena (h);
   u8 *vp = hp + offset;
 
   return (void *) vp;
+}
+
+static inline int BV (clib_bihash_bucket_is_empty)
+  (BVT (clib_bihash_bucket) * b)
+{
+  /* Note: applied to locked buckets, test offset */
+  return b->offset == 0;
 }
 
 static inline uword BV (clib_bihash_get_offset) (BVT (clib_bihash) * h,
@@ -230,20 +220,35 @@ static inline uword BV (clib_bihash_get_offset) (BVT (clib_bihash) * h,
 {
   u8 *hp, *vp;
 
-  hp = (u8 *) h->mheap;
+  hp = (u8 *) (uword) alloc_arena (h);
   vp = (u8 *) v;
 
-  ASSERT ((vp - hp) < 0x100000000ULL);
   return vp - hp;
 }
 
 void BV (clib_bihash_init)
   (BVT (clib_bihash) * h, char *name, u32 nbuckets, uword memory_size);
 
+#if BIHASH_32_64_SVM
+void BV (clib_bihash_master_init_svm)
+  (BVT (clib_bihash) * h, char *name, u32 nbuckets, u64 memory_size);
+void BV (clib_bihash_slave_init_svm)
+  (BVT (clib_bihash) * h, char *name, int fd);
+#endif
+
+void BV (clib_bihash_set_kvp_format_fn) (BVT (clib_bihash) * h,
+					 format_function_t * fmt_fn);
+
 void BV (clib_bihash_free) (BVT (clib_bihash) * h);
 
 int BV (clib_bihash_add_del) (BVT (clib_bihash) * h,
 			      BVT (clib_bihash_kv) * add_v, int is_add);
+int BV (clib_bihash_add_or_overwrite_stale) (BVT (clib_bihash) * h,
+					     BVT (clib_bihash_kv) * add_v,
+					     int (*is_stale_cb) (BVT
+								 (clib_bihash_kv)
+								 *, void *),
+					     void *arg);
 int BV (clib_bihash_search) (BVT (clib_bihash) * h,
 			     BVT (clib_bihash_kv) * search_v,
 			     BVT (clib_bihash_kv) * return_v);
@@ -255,43 +260,26 @@ format_function_t BV (format_bihash);
 format_function_t BV (format_bihash_kvp);
 format_function_t BV (format_bihash_lru);
 
-static inline int BV (clib_bihash_search_inline)
-  (BVT (clib_bihash) * h, BVT (clib_bihash_kv) * key_result)
+static inline int BV (clib_bihash_search_inline_with_hash)
+  (BVT (clib_bihash) * h, u64 hash, BVT (clib_bihash_kv) * key_result)
 {
-  u64 hash;
   u32 bucket_index;
   BVT (clib_bihash_value) * v;
   BVT (clib_bihash_bucket) * b;
-#if BIHASH_KVP_CACHE_SIZE > 0
-  BVT (clib_bihash_kv) * kvp;
-#endif
   int i, limit;
-
-  hash = BV (clib_bihash_hash) (key_result);
 
   bucket_index = hash & (h->nbuckets - 1);
   b = &h->buckets[bucket_index];
 
-  if (b->offset == 0)
+  if (PREDICT_FALSE (BV (clib_bihash_bucket_is_empty) (b)))
     return -1;
 
-#if BIHASH_KVP_CACHE_SIZE > 0
-  /* Check the cache, if not currently locked */
-  if (PREDICT_TRUE ((b->cache_lru & (1 << 15)) == 0))
+  if (PREDICT_FALSE (b->lock))
     {
-      limit = BIHASH_KVP_CACHE_SIZE;
-      kvp = b->cache;
-      for (i = 0; i < limit; i++)
-	{
-	  if (BV (clib_bihash_key_compare) (kvp[i].key, key_result->key))
-	    {
-	      *key_result = kvp[i];
-	      h->cache_hits++;
-	      return 0;
-	    }
-	}
+      volatile BVT (clib_bihash_bucket) * bv = b;
+      while (bv->lock)
+	CLIB_PAUSE ();
     }
-#endif
 
   hash >>= h->log2_nbuckets;
 
@@ -308,67 +296,78 @@ static inline int BV (clib_bihash_search_inline)
       if (BV (clib_bihash_key_compare) (v->kvp[i].key, key_result->key))
 	{
 	  *key_result = v->kvp[i];
-
-#if BIHASH_KVP_CACHE_SIZE > 0
-	  u8 cache_slot;
-	  /* Try to lock the bucket */
-	  if (BV (clib_bihash_lock_bucket) (b))
-	    {
-	      cache_slot = BV (clib_bihash_get_lru) (b);
-	      b->cache[cache_slot] = v->kvp[i];
-	      BV (clib_bihash_update_lru) (b, cache_slot);
-
-	      /* Unlock the bucket */
-	      BV (clib_bihash_unlock_bucket) (b);
-	      h->cache_misses++;
-	    }
-#endif
 	  return 0;
 	}
     }
   return -1;
 }
 
-static inline int BV (clib_bihash_search_inline_2)
-  (BVT (clib_bihash) * h,
-   BVT (clib_bihash_kv) * search_key, BVT (clib_bihash_kv) * valuep)
+static inline int BV (clib_bihash_search_inline)
+  (BVT (clib_bihash) * h, BVT (clib_bihash_kv) * key_result)
 {
   u64 hash;
+
+  hash = BV (clib_bihash_hash) (key_result);
+
+  return BV (clib_bihash_search_inline_with_hash) (h, hash, key_result);
+}
+
+static inline void BV (clib_bihash_prefetch_bucket)
+  (BVT (clib_bihash) * h, u64 hash)
+{
   u32 bucket_index;
-  BVT (clib_bihash_value) * v;
   BVT (clib_bihash_bucket) * b;
-#if BIHASH_KVP_CACHE_SIZE > 0
-  BVT (clib_bihash_kv) * kvp;
-#endif
-  int i, limit;
-
-  ASSERT (valuep);
-
-  hash = BV (clib_bihash_hash) (search_key);
 
   bucket_index = hash & (h->nbuckets - 1);
   b = &h->buckets[bucket_index];
 
-  if (b->offset == 0)
+  CLIB_PREFETCH (b, CLIB_CACHE_LINE_BYTES, READ);
+}
+
+static inline void BV (clib_bihash_prefetch_data)
+  (BVT (clib_bihash) * h, u64 hash)
+{
+  u32 bucket_index;
+  BVT (clib_bihash_value) * v;
+  BVT (clib_bihash_bucket) * b;
+
+  bucket_index = hash & (h->nbuckets - 1);
+  b = &h->buckets[bucket_index];
+
+  if (PREDICT_FALSE (BV (clib_bihash_bucket_is_empty) (b)))
+    return;
+
+  hash >>= h->log2_nbuckets;
+  v = BV (clib_bihash_get_value) (h, b->offset);
+
+  v += (b->linear_search == 0) ? hash & ((1 << b->log2_pages) - 1) : 0;
+
+  CLIB_PREFETCH (v, CLIB_CACHE_LINE_BYTES, READ);
+}
+
+static inline int BV (clib_bihash_search_inline_2_with_hash)
+  (BVT (clib_bihash) * h,
+   u64 hash, BVT (clib_bihash_kv) * search_key, BVT (clib_bihash_kv) * valuep)
+{
+  u32 bucket_index;
+  BVT (clib_bihash_value) * v;
+  BVT (clib_bihash_bucket) * b;
+  int i, limit;
+
+  ASSERT (valuep);
+
+  bucket_index = hash & (h->nbuckets - 1);
+  b = &h->buckets[bucket_index];
+
+  if (PREDICT_FALSE (BV (clib_bihash_bucket_is_empty) (b)))
     return -1;
 
-  /* Check the cache, if currently unlocked */
-#if BIHASH_KVP_CACHE_SIZE > 0
-  if (PREDICT_TRUE ((b->cache_lru & (1 << 15)) == 0))
+  if (PREDICT_FALSE (b->lock))
     {
-      limit = BIHASH_KVP_CACHE_SIZE;
-      kvp = b->cache;
-      for (i = 0; i < limit; i++)
-	{
-	  if (BV (clib_bihash_key_compare) (kvp[i].key, search_key->key))
-	    {
-	      *valuep = kvp[i];
-	      h->cache_hits++;
-	      return 0;
-	    }
-	}
+      volatile BVT (clib_bihash_bucket) * bv = b;
+      while (bv->lock)
+	CLIB_PAUSE ();
     }
-#endif
 
   hash >>= h->log2_nbuckets;
   v = BV (clib_bihash_get_value) (h, b->offset);
@@ -384,27 +383,24 @@ static inline int BV (clib_bihash_search_inline_2)
       if (BV (clib_bihash_key_compare) (v->kvp[i].key, search_key->key))
 	{
 	  *valuep = v->kvp[i];
-
-#if BIHASH_KVP_CACHE_SIZE > 0
-	  u8 cache_slot;
-
-	  /* Try to lock the bucket */
-	  if (BV (clib_bihash_lock_bucket) (b))
-	    {
-	      cache_slot = BV (clib_bihash_get_lru) (b);
-	      b->cache[cache_slot] = v->kvp[i];
-	      BV (clib_bihash_update_lru) (b, cache_slot);
-
-	      /* Reenable the cache */
-	      BV (clib_bihash_unlock_bucket) (b);
-	      h->cache_misses++;
-	    }
-#endif
 	  return 0;
 	}
     }
   return -1;
 }
+
+static inline int BV (clib_bihash_search_inline_2)
+  (BVT (clib_bihash) * h,
+   BVT (clib_bihash_kv) * search_key, BVT (clib_bihash_kv) * valuep)
+{
+  u64 hash;
+
+  hash = BV (clib_bihash_hash) (search_key);
+
+  return BV (clib_bihash_search_inline_2_with_hash) (h, hash, search_key,
+						     valuep);
+}
+
 
 #endif /* __included_bihash_template_h__ */
 

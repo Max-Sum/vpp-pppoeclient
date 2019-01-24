@@ -45,6 +45,7 @@
 #include <vnet/buffer.h>
 #include <vnet/feature/feature.h>
 #include <vnet/ip/icmp46_packet.h>
+#include <vnet/util/throttle.h>
 
 typedef struct ip4_mfib_t
 {
@@ -148,7 +149,19 @@ typedef struct ip4_main_t
 
     u8 pad[2];
   } host_config;
+
+  /** Heapsize for the Mtries */
+  uword mtrie_heap_size;
+
+  /** The memory heap for the mtries */
+  void *mtrie_mheap;
+
+  /** ARP throttling */
+  throttle_t arp_throttle;
+
 } ip4_main_t;
+
+#define ARP_THROTTLE_BITS	(512)
 
 /** Global ip4 main structure. */
 extern ip4_main_t ip4_main;
@@ -179,18 +192,6 @@ ip4_destination_matches_interface (ip4_main_t * im,
 {
   ip4_address_t *a = ip_interface_address_get_address (&im->lookup_main, ia);
   return ip4_destination_matches_route (im, key, a, ia->address_length);
-}
-
-/* As above but allows for unaligned destinations (e.g. works right from IP header of packet). */
-always_inline uword
-ip4_unaligned_destination_matches_route (ip4_main_t * im,
-					 ip4_address_t * key,
-					 ip4_address_t * dest,
-					 uword dest_length)
-{
-  return 0 ==
-    ((clib_mem_unaligned (&key->data_u32, u32) ^ dest->
-      data_u32) & im->fib_masks[dest_length]);
 }
 
 always_inline int
@@ -251,13 +252,15 @@ clib_error_t *ip4_add_del_interface_address (vlib_main_t * vm,
 					     ip4_address_t * address,
 					     u32 address_length, u32 is_del);
 
+void ip4_directed_broadcast (u32 sw_if_index, u8 enable);
+
 void ip4_sw_interface_enable_disable (u32 sw_if_index, u32 is_enable);
 
 int ip4_address_compare (ip4_address_t * a1, ip4_address_t * a2);
 
 /* Send an ARP request to see if given destination is reachable on given interface. */
 clib_error_t *ip4_probe_neighbor (vlib_main_t * vm, ip4_address_t * dst,
-				  u32 sw_if_index);
+				  u32 sw_if_index, u8 refresh);
 
 clib_error_t *ip4_set_arp_limit (u32 arp_limit);
 
@@ -281,6 +284,12 @@ int vnet_set_ip4_flow_hash (u32 table_id,
 int vnet_set_ip4_classify_intfc (vlib_main_t * vm, u32 sw_if_index,
 				 u32 table_index);
 
+void ip4_punt_policer_add_del (u8 is_add, u32 policer_index);
+
+void ip4_punt_redirect_add (u32 rx_sw_if_index,
+			    u32 tx_sw_if_index, ip46_address_t * nh);
+void ip4_punt_redirect_del (u32 rx_sw_if_index);
+
 /* Compute flow hash.  We'll use it to select which adjacency to use for this
    flow.  And other things. */
 always_inline u32
@@ -299,7 +308,6 @@ ip4_compute_flow_hash (const ip4_header_t * ip,
 
   a = (flow_hash_config & IP_FLOW_HASH_REVERSE_SRC_DST) ? t2 : t1;
   b = (flow_hash_config & IP_FLOW_HASH_REVERSE_SRC_DST) ? t1 : t2;
-  b ^= (flow_hash_config & IP_FLOW_HASH_PROTO) ? ip->protocol : 0;
 
   t1 = is_tcp_udp ? tcp->src : 0;
   t2 = is_tcp_udp ? tcp->dst : 0;
@@ -307,6 +315,23 @@ ip4_compute_flow_hash (const ip4_header_t * ip,
   t1 = (flow_hash_config & IP_FLOW_HASH_SRC_PORT) ? t1 : 0;
   t2 = (flow_hash_config & IP_FLOW_HASH_DST_PORT) ? t2 : 0;
 
+  if (flow_hash_config & IP_FLOW_HASH_SYMMETRIC)
+    {
+      if (b < a)
+	{
+	  c = a;
+	  a = b;
+	  b = c;
+	}
+      if (t2 < t1)
+	{
+	  t2 += t1;
+	  t1 = t2 - t1;
+	  t2 = t2 - t1;
+	}
+    }
+
+  b ^= (flow_hash_config & IP_FLOW_HASH_PROTO) ? ip->protocol : 0;
   c = (flow_hash_config & IP_FLOW_HASH_REVERSE_SRC_DST) ?
     (t1 << 16) | t2 : (t2 << 16) | t1;
 

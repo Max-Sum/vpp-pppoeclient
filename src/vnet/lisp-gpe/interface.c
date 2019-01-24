@@ -239,7 +239,7 @@ l2_lisp_gpe_interface_tx (vlib_main_t * vm, vlib_node_runtime_t * node,
 {
   u32 n_left_from, next_index, *from, *to_next;
   lisp_gpe_main_t *lgm = &lisp_gpe_main;
-  u32 thread_index = vlib_get_thread_index ();
+  u32 thread_index = vm->thread_index;
   vlib_combined_counter_main_t *cm = &load_balance_main.lbm_to_counters;
 
   from = vlib_frame_vector_args (from_frame);
@@ -575,7 +575,8 @@ lisp_gpe_tenant_add_default_routes (u32 table_id)
  * @return number of vectors in frame.
  */
 u32
-lisp_gpe_add_l3_iface (lisp_gpe_main_t * lgm, u32 vni, u32 table_id)
+lisp_gpe_add_l3_iface (lisp_gpe_main_t * lgm, u32 vni, u32 table_id,
+		       u8 with_default_routes)
 {
   vnet_main_t *vnm = lgm->vnet_main;
   tunnel_lookup_t *l3_ifaces = &lgm->l3_ifaces;
@@ -603,7 +604,8 @@ lisp_gpe_add_l3_iface (lisp_gpe_main_t * lgm, u32 vni, u32 table_id)
 
   /* insert default routes that point to lisp-cp lookup */
   lisp_gpe_iface_set_table (hi->sw_if_index, table_id);
-  lisp_gpe_tenant_add_default_routes (table_id);
+  if (with_default_routes)
+    lisp_gpe_tenant_add_default_routes (table_id);
 
   /* enable interface */
   vnet_sw_interface_set_flags (vnm, hi->sw_if_index,
@@ -698,7 +700,7 @@ lisp_gpe_add_l2_iface (lisp_gpe_main_t * lgm, u32 vni, u32 bd_id)
 
   /* we're ready. add iface to l2 bridge domain */
   set_int_l2_mode (lgm->vlib_main, vnm, MODE_L2_BRIDGE, hi->sw_if_index,
-		   bd_index, 0, 0, 0);
+		   bd_index, L2_BD_PORT_TYPE_NORMAL, 0, 0);
 
   return (hi->sw_if_index);
 }
@@ -734,7 +736,7 @@ lisp_gpe_del_l2_iface (lisp_gpe_main_t * lgm, u32 vni, u32 bd_id)
   /* Remove interface from bridge .. by enabling L3 mode */
   hi = vnet_get_hw_interface (lgm->vnet_main, hip[0]);
   set_int_l2_mode (lgm->vlib_main, lgm->vnet_main, MODE_L3, hi->sw_if_index,
-		   0, 0, 0, 0);
+		   0, L2_BD_PORT_TYPE_NORMAL, 0, 0);
   lisp_gpe_remove_iface (lgm, hip[0], bd_index, &lgm->l2_ifaces);
 }
 
@@ -908,7 +910,9 @@ lisp_gpe_add_del_iface_command_fn (vlib_main_t * vm, unformat_input_t * input,
     {
       if (is_add)
 	{
-	  if (~0 == lisp_gpe_tenant_l3_iface_add_or_lock (vni, table_id))
+	  if (~0 == lisp_gpe_tenant_l3_iface_add_or_lock (vni, table_id, 1
+							  /* with_default_route */
+	      ))
 	    {
 	      error = clib_error_return (0, "L3 interface not created");
 	      goto done;

@@ -79,7 +79,7 @@ typedef struct
   volatile u32 signal_received;
 
   /* convenience */
-  unix_shared_memory_queue_t *vl_input_queue;
+  svm_queue_t *vl_input_queue;
   u32 my_client_index;
   svmdb_client_t *svmdb_client;
 } test_main_t;
@@ -101,7 +101,7 @@ vlib_main_t **vlib_mains;
 void
 vlib_cli_output (struct vlib_main_t *vm, char *fmt, ...)
 {
-  clib_warning ("BUG: vlib_cli_output callled...");
+  clib_warning ("BUG: vlib_cli_output called...");
 }
 
 #define foreach_api_msg                         \
@@ -113,7 +113,7 @@ ping (test_main_t * tm)
   vl_api_control_ping_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_CONTROL_PING);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;

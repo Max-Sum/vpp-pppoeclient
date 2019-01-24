@@ -26,14 +26,21 @@
 #include <vpp-api/vapi/vapi.h>
 #include <vpp-api/vapi/vapi_internal.h>
 #include <vppinfra/types.h>
+#include <vppinfra/pool.h>
+#include <vlib/vlib.h>
 #include <vlibapi/api_common.h>
-#include <vlibmemory/api_common.h>
+#include <vlibmemory/memory_client.h>
+
+#include <vapi/memclnt.api.vapi.h>
 
 /* we need to use control pings for some stuff and because we're forced to put
  * the code in headers, we need a way to be able to grab the ids of these
  * messages - so declare them here as extern */
 vapi_msg_id_t vapi_msg_id_control_ping = 0;
 vapi_msg_id_t vapi_msg_id_control_ping_reply = 0;
+
+DEFINE_VAPI_MSG_IDS_MEMCLNT_API_JSON;
+DEFINE_VAPI_MSG_IDS_VPE_API_JSON;
 
 struct
 {
@@ -79,6 +86,7 @@ struct vapi_ctx_s
   u16 vl_msg_id_max;
   vapi_msg_id_t *vl_msg_id_to_vapi_msg_t;
   bool connected;
+  bool handle_keepalives;
   pthread_mutex_t requests_mutex;
 };
 
@@ -236,7 +244,7 @@ vapi_lookup_vapi_msg_id_t (vapi_ctx_t ctx, u16 vl_msg_id)
     {
       return ctx->vl_msg_id_to_vapi_msg_t[vl_msg_id];
     }
-  return ~0;
+  return VAPI_INVALID_MSG_ID;
 }
 
 vapi_error_e
@@ -255,6 +263,9 @@ vapi_ctx_alloc (vapi_ctx_t * result)
     {
       goto fail;
     }
+  clib_memset (ctx->vapi_msg_id_t_to_vl_msg_id, ~0,
+	       __vapi_metadata.count *
+	       sizeof (*ctx->vapi_msg_id_t_to_vl_msg_id));
   ctx->event_cbs = calloc (__vapi_metadata.count, sizeof (*ctx->event_cbs));
   if (!ctx->event_cbs)
     {
@@ -290,11 +301,16 @@ vapi_error_e
 vapi_connect (vapi_ctx_t ctx, const char *name,
 	      const char *chroot_prefix,
 	      int max_outstanding_requests,
-	      int response_queue_size, vapi_mode_e mode)
+	      int response_queue_size, vapi_mode_e mode,
+	      bool handle_keepalives)
 {
   if (response_queue_size <= 0 || max_outstanding_requests <= 0)
     {
       return VAPI_EINVAL;
+    }
+  if (!clib_mem_get_per_cpu_heap () && !clib_mem_init (0, 1024 * 1024 * 32))
+    {
+      return VAPI_ENOMEM;
     }
   ctx->requests_size = max_outstanding_requests;
   const size_t size = ctx->requests_size * sizeof (*ctx->requests);
@@ -304,7 +320,7 @@ vapi_connect (vapi_ctx_t ctx, const char *name,
       return VAPI_ENOMEM;
     }
   ctx->requests = tmp;
-  memset (ctx->requests, 0, size);
+  clib_memset (ctx->requests, 0, size);
   /* coverity[MISSING_LOCK] - 177211 requests_mutex is not needed here */
   ctx->requests_start = ctx->requests_count = 0;
   if (chroot_prefix)
@@ -334,8 +350,8 @@ vapi_connect (vapi_ctx_t ctx, const char *name,
       vapi_message_desc_t *m = __vapi_metadata.msgs[i];
       u8 scratch[m->name_with_crc_len + 1];
       memcpy (scratch, m->name_with_crc, m->name_with_crc_len + 1);
-      u32 id = vl_api_get_msg_index (scratch);
-      if (~0 != id)
+      u32 id = vl_msg_api_get_msg_index (scratch);
+      if (VAPI_INVALID_MSG_ID != id)
 	{
 	  if (id > UINT16_MAX)
 	    {
@@ -384,6 +400,14 @@ vapi_connect (vapi_ctx_t ctx, const char *name,
     }
   ctx->mode = mode;
   ctx->connected = true;
+  if (vapi_is_msg_available (ctx, vapi_msg_id_memclnt_keepalive))
+    {
+      ctx->handle_keepalives = handle_keepalives;
+    }
+  else
+    {
+      ctx->handle_keepalives = false;
+    }
   return VAPI_OK;
 fail:
   vl_client_disconnect ();
@@ -423,7 +447,7 @@ vapi_send (vapi_ctx_t ctx, void *msg)
       goto out;
     }
   int tmp;
-  unix_shared_memory_queue_t *q = api_main.shmem_hdr->vl_input_queue;
+  svm_queue_t *q = api_main.shmem_hdr->vl_input_queue;
 #if VAPI_DEBUG
   unsigned msgid = be16toh (*(u16 *) msg);
   if (msgid <= ctx->vl_msg_id_max)
@@ -444,9 +468,8 @@ vapi_send (vapi_ctx_t ctx, void *msg)
       VAPI_DBG ("send msg@%p:%u[UNKNOWN]", msg, msgid);
     }
 #endif
-  tmp = unix_shared_memory_queue_add (q, (u8 *) & msg,
-				      VAPI_MODE_BLOCKING ==
-				      ctx->mode ? 0 : 1);
+  tmp = svm_queue_add (q, (u8 *) & msg,
+		       VAPI_MODE_BLOCKING == ctx->mode ? 0 : 1);
   if (tmp < 0)
     {
       rv = VAPI_EAGAIN;
@@ -465,7 +488,7 @@ vapi_send2 (vapi_ctx_t ctx, void *msg1, void *msg2)
       rv = VAPI_EINVAL;
       goto out;
     }
-  unix_shared_memory_queue_t *q = api_main.shmem_hdr->vl_input_queue;
+  svm_queue_t *q = api_main.shmem_hdr->vl_input_queue;
 #if VAPI_DEBUG
   unsigned msgid1 = be16toh (*(u16 *) msg1);
   unsigned msgid2 = be16toh (*(u16 *) msg2);
@@ -489,9 +512,8 @@ vapi_send2 (vapi_ctx_t ctx, void *msg1, void *msg2)
     }
   VAPI_DBG ("send two: %u[%s], %u[%s]", msgid1, name1, msgid2, name2);
 #endif
-  int tmp = unix_shared_memory_queue_add2 (q, (u8 *) & msg1, (u8 *) & msg2,
-					   VAPI_MODE_BLOCKING ==
-					   ctx->mode ? 0 : 1);
+  int tmp = svm_queue_add2 (q, (u8 *) & msg1, (u8 *) & msg2,
+			    VAPI_MODE_BLOCKING == ctx->mode ? 0 : 1);
   if (tmp < 0)
     {
       rv = VAPI_EAGAIN;
@@ -502,7 +524,8 @@ out:
 }
 
 vapi_error_e
-vapi_recv (vapi_ctx_t ctx, void **msg, size_t * msg_size)
+vapi_recv (vapi_ctx_t ctx, void **msg, size_t * msg_size,
+	   svm_q_conditional_wait_t cond, u32 time)
 {
   if (!ctx || !ctx->connected || !msg || !msg_size)
     {
@@ -517,9 +540,12 @@ vapi_recv (vapi_ctx_t ctx, void **msg, size_t * msg_size)
       return VAPI_EINVAL;
     }
 
-  unix_shared_memory_queue_t *q = am->vl_input_queue;
+  svm_queue_t *q = am->vl_input_queue;
+again:
   VAPI_DBG ("doing shm queue sub");
-  int tmp = unix_shared_memory_queue_sub (q, (u8 *) & data, 0);
+
+  int tmp = svm_queue_sub (q, (u8 *) & data, cond, time);
+
   if (tmp == 0)
     {
 #if VAPI_DEBUG_ALLOC
@@ -554,6 +580,30 @@ vapi_recv (vapi_ctx_t ctx, void **msg, size_t * msg_size)
 	  VAPI_DBG ("recv msg@%p:%u[UNKNOWN]", *msg, msgid);
 	}
 #endif
+      if (ctx->handle_keepalives)
+	{
+	  unsigned msgid = be16toh (*(u16 *) * msg);
+	  if (msgid ==
+	      vapi_lookup_vl_msg_id (ctx, vapi_msg_id_memclnt_keepalive))
+	    {
+	      vapi_msg_memclnt_keepalive_reply *reply = NULL;
+	      do
+		{
+		  reply = vapi_msg_alloc (ctx, sizeof (*reply));
+		}
+	      while (!reply);
+	      reply->header.context = vapi_get_client_index (ctx);
+	      reply->header._vl_msg_id =
+		vapi_lookup_vl_msg_id (ctx,
+				       vapi_msg_id_memclnt_keepalive_reply);
+	      reply->payload.retval = 0;
+	      vapi_msg_memclnt_keepalive_reply_hton (reply);
+	      while (VAPI_EAGAIN == vapi_send (ctx, reply));
+	      vapi_msg_free (ctx, *msg);
+	      VAPI_DBG ("autohandled memclnt_keepalive");
+	      goto again;
+	    }
+	}
     }
   else
     {
@@ -598,14 +648,13 @@ vapi_dispatch_response (vapi_ctx_t ctx, vapi_msg_id_t id,
 	{
 	  VAPI_ERR ("No response to req with context=%u",
 		    (unsigned) ctx->requests[tmp].context);
-	  ctx->requests[ctx->requests_start].callback (ctx,
-						       ctx->requests
+	  ctx->requests[ctx->requests_start].callback (ctx, ctx->requests
 						       [ctx->
 							requests_start].callback_ctx,
 						       VAPI_ENORESP, true,
 						       NULL);
-	  memset (&ctx->requests[ctx->requests_start], 0,
-		  sizeof (ctx->requests[ctx->requests_start]));
+	  clib_memset (&ctx->requests[ctx->requests_start], 0,
+		       sizeof (ctx->requests[ctx->requests_start]));
 	  ++ctx->requests_start;
 	  --ctx->requests_count;
 	  if (ctx->requests_start == ctx->requests_size)
@@ -646,8 +695,8 @@ vapi_dispatch_response (vapi_ctx_t ctx, vapi_msg_id_t id,
 	}
       if (is_last)
 	{
-	  memset (&ctx->requests[ctx->requests_start], 0,
-		  sizeof (ctx->requests[ctx->requests_start]));
+	  clib_memset (&ctx->requests[ctx->requests_start], 0,
+		       sizeof (ctx->requests[ctx->requests_start]));
 	  ++ctx->requests_start;
 	  --ctx->requests_count;
 	  if (ctx->requests_start == ctx->requests_size)
@@ -700,7 +749,7 @@ vapi_dispatch_one (vapi_ctx_t ctx)
   VAPI_DBG ("vapi_dispatch_one()");
   void *msg;
   size_t size;
-  vapi_error_e rv = vapi_recv (ctx, &msg, &size);
+  vapi_error_e rv = vapi_recv (ctx, &msg, &size, SVM_Q_WAIT, 0);
   if (VAPI_OK != rv)
     {
       VAPI_DBG ("vapi_recv failed with rv=%d", rv);
@@ -714,7 +763,7 @@ vapi_dispatch_one (vapi_ctx_t ctx)
       vapi_msg_free (ctx, msg);
       return VAPI_EINVAL;
     }
-  if (~0 == (unsigned) ctx->vl_msg_id_to_vapi_msg_t[vpp_id])
+  if (VAPI_INVALID_MSG_ID == (unsigned) ctx->vl_msg_id_to_vapi_msg_t[vpp_id])
     {
       VAPI_ERR ("Unknown msg ID received, id `%u' marked as not supported",
 		(unsigned) vpp_id);

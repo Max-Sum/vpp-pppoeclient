@@ -117,6 +117,23 @@ format_ip6_address_and_length (u8 * s, va_list * args)
   return format (s, "%U/%d", format_ip6_address, a, l);
 }
 
+u8 *
+format_ip6_address_and_mask (u8 * s, va_list * args)
+{
+  ip6_address_and_mask_t *am = va_arg (*args, ip6_address_and_mask_t *);
+
+  if (am->addr.as_u64[0] == 0 && am->addr.as_u64[1] == 0 &&
+      am->mask.as_u64[0] == 0 && am->mask.as_u64[1] == 0)
+    return format (s, "any");
+
+  if (am->mask.as_u64[0] == ~0 && am->mask.as_u64[1] == ~0)
+    return format (s, "%U", format_ip4_address, &am->addr);
+
+  return format (s, "%U/%U", format_ip6_address, &am->addr,
+		 format_ip4_address, &am->mask);
+}
+
+
 /* Parse an IP6 address. */
 uword
 unformat_ip6_address (unformat_input_t * input, va_list * args)
@@ -212,6 +229,32 @@ unformat_ip6_address (unformat_input_t * input, va_list * args)
   }
 }
 
+uword
+unformat_ip6_address_and_mask (unformat_input_t * input, va_list * args)
+{
+  ip6_address_and_mask_t *am = va_arg (*args, ip6_address_and_mask_t *);
+  ip6_address_t addr, mask;
+
+  clib_memset (&addr, 0, sizeof (ip6_address_t));
+  clib_memset (&mask, 0, sizeof (ip6_address_t));
+
+  if (unformat (input, "any"))
+    ;
+  else if (unformat (input, "%U/%U", unformat_ip6_address, &addr,
+		     unformat_ip6_address, &mask))
+    ;
+  else if (unformat (input, "%U", unformat_ip6_address, &addr))
+    mask.as_u64[0] = mask.as_u64[1] = ~0;
+  else
+    return 0;
+
+  am->addr.as_u64[0] = addr.as_u64[0];
+  am->addr.as_u64[1] = addr.as_u64[1];
+  am->mask.as_u64[0] = mask.as_u64[0];
+  am->mask.as_u64[1] = mask.as_u64[1];
+  return 1;
+}
+
 /* Format an IP6 header. */
 u8 *
 format_ip6_header (u8 * s, va_list * args)
@@ -219,7 +262,7 @@ format_ip6_header (u8 * s, va_list * args)
   ip6_header_t *ip = va_arg (*args, ip6_header_t *);
   u32 max_header_bytes = va_arg (*args, u32);
   u32 i, ip_version, traffic_class, flow_label;
-  uword indent;
+  u32 indent;
 
   /* Nothing to do. */
   if (max_header_bytes < sizeof (ip[0]))
@@ -280,7 +323,7 @@ unformat_ip6_header (unformat_input_t * input, va_list * args)
     ip = p;
   }
 
-  memset (ip, 0, sizeof (ip[0]));
+  clib_memset (ip, 0, sizeof (ip[0]));
   ip->ip_version_traffic_class_and_flow_label =
     clib_host_to_net_u32 (6 << 28);
 

@@ -23,6 +23,8 @@
 #include <vnet/vnet.h>
 #include <vnet/bfd/bfd_protocol.h>
 #include <vnet/bfd/bfd_udp.h>
+#include <vlib/log.h>
+#include <vppinfra/os.h>
 
 #define foreach_bfd_mode(F) \
   F (asynchronous)          \
@@ -259,6 +261,23 @@ typedef void (*bfd_notify_fn_t) (bfd_listen_event_e, const bfd_session_t *);
 
 typedef struct
 {
+  /** lock to protect data structures */
+  clib_spinlock_t lock;
+  int lock_recursion_count;
+  uword owner_thread_index;
+
+  /** Number of event wakeup RPCs in flight. Should be 0 or 1 */
+  int bfd_process_wakeup_events_in_flight;
+
+  /** The timestamp of last wakeup event being sent */
+  u64 bfd_process_wakeup_event_start_clocks;
+
+  /** The time it took the last wakeup event to make it to handling */
+  u64 bfd_process_wakeup_event_delay_clocks;
+
+  /** When the bfd process is supposed to wake up next */
+  u64 bfd_process_next_wakeup_clocks;
+
   /** pool of bfd sessions context data */
   bfd_session_t *sessions;
 
@@ -296,8 +315,11 @@ typedef struct
   /** hashmap - index in pool auth_keys by conf_key_id */
   u32 *auth_key_by_conf_key_id;
 
-  /** A vector of callback notification functions */
+  /** vector of callback notification functions */
   bfd_notify_fn_t *listeners;
+
+  /** log class */
+  vlib_log_class_t log_class;
 } bfd_main_t;
 
 extern bfd_main_t bfd_main;
@@ -342,6 +364,46 @@ typedef CLIB_PACKED (struct {
 }) bfd_echo_pkt_t;
 /* *INDENT-ON* */
 
+static inline void
+bfd_lock (bfd_main_t * bm)
+{
+  uword my_thread_index = __os_thread_index;
+
+  if (bm->owner_thread_index == my_thread_index
+      && bm->lock_recursion_count > 0)
+    {
+      bm->lock_recursion_count++;
+      return;
+    }
+
+  clib_spinlock_lock_if_init (&bm->lock);
+  bm->lock_recursion_count = 1;
+  bm->owner_thread_index = my_thread_index;
+}
+
+static inline void
+bfd_unlock (bfd_main_t * bm)
+{
+  uword my_thread_index = __os_thread_index;
+  ASSERT (bm->owner_thread_index == my_thread_index);
+
+  if (bm->lock_recursion_count > 1)
+    {
+      bm->lock_recursion_count--;
+      return;
+    }
+  bm->lock_recursion_count = 0;
+  bm->owner_thread_index = ~0;
+  clib_spinlock_unlock_if_init (&bm->lock);
+}
+
+static inline void
+bfd_lock_check (bfd_main_t * bm)
+{
+  if (PREDICT_FALSE (bm->lock_recursion_count < 1))
+    clib_warning ("lock check failure");
+}
+
 u8 *bfd_input_format_trace (u8 * s, va_list * args);
 bfd_session_t *bfd_get_session (bfd_main_t * bm, bfd_transport_e t);
 void bfd_put_session (bfd_main_t * bm, bfd_session_t * bs);
@@ -358,6 +420,7 @@ void bfd_init_final_control_frame (vlib_main_t * vm, vlib_buffer_t * b,
 				   bfd_main_t * bm, bfd_session_t * bs,
 				   int is_local);
 u8 *format_bfd_session (u8 * s, va_list * args);
+u8 *format_bfd_session_brief (u8 * s, va_list * args);
 u8 *format_bfd_auth_key (u8 * s, va_list * args);
 void bfd_session_set_flags (bfd_session_t * bs, u8 admin_up_down);
 unsigned bfd_auth_type_supported (bfd_auth_type_e auth_type);

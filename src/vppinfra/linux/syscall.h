@@ -19,6 +19,12 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
+static inline int
+getcpu (unsigned *cpu, unsigned *node, void *tcache)
+{
+  return syscall (__NR_getcpu, cpu, node, tcache);
+}
+
 static inline long
 set_mempolicy (int mode, const unsigned long *nodemask, unsigned long maxnode)
 {
@@ -39,11 +45,13 @@ move_pages (int pid, unsigned long count, void **pages, const int *nodes,
   return syscall (__NR_move_pages, pid, count, pages, nodes, status, flags);
 }
 
+#ifndef HAVE_MEMFD_CREATE
 static inline int
 memfd_create (const char *name, unsigned int flags)
 {
   return syscall (__NR_memfd_create, name, flags);
 }
+#endif
 
 #endif /* included_linux_syscall_h */
 

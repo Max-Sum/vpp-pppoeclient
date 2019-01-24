@@ -77,6 +77,7 @@ typedef struct hash_header
 #define KEY_FUNC_POINTER_UWORD	(1)	/*< sum = *(uword *) key */
 #define KEY_FUNC_POINTER_U32	(2)	/*< sum = *(u32 *) key */
 #define KEY_FUNC_STRING         (3)	/*< sum = string_key_sum, etc. */
+#define KEY_FUNC_MEM		(4)	/*< sum = mem_key_sum */
 
   /* key comparison function */
   hash_key_equal_function_t *key_equal;
@@ -273,11 +274,34 @@ uword hash_bytes (void *v);
 /* Public macro to set (key, value) for pointer key */
 #define hash_set_mem(h,key,value) hash_set3 (h, pointer_to_uword (key), (value), 0)
 
+/* Public inline function allocate and copy key to use in hash for pointer key */
+always_inline void
+hash_set_mem_alloc (uword ** h, void *key, uword v)
+{
+  size_t ksz = hash_header (*h)->user;
+  void *copy = clib_mem_alloc (ksz);
+  clib_memcpy_fast (copy, key, ksz);
+  hash_set_mem (*h, copy, v);
+}
+
 /* Public macro to set (key, 0) for pointer key */
 #define hash_set1_mem(h,key)     hash_set3 ((h), pointer_to_uword (key), 0, 0)
 
 /* Public macro to unset (key, value) for pointer key */
 #define hash_unset_mem(h,key)    ((h) = _hash_unset ((h), pointer_to_uword (key),0))
+
+/* Public inline function to unset pointer key and then free the key memory */
+always_inline void
+hash_unset_mem_free (uword ** h, void *key)
+{
+  hash_pair_t *hp = hash_get_pair_mem (*h, key);
+  if (PREDICT_TRUE (hp != NULL))
+    {
+      key = uword_to_pointer (hp->key, void *);
+      hash_unset_mem (*h, key);
+      clib_mem_free (key);
+    }
+}
 
 /* internal routine to free a hash table */
 extern void *_hash_free (void *v);
@@ -287,7 +311,7 @@ extern void *_hash_free (void *v);
 
 clib_error_t *hash_validate (void *v);
 
-/* Public inline funcion to get the number of value bytes for a hash table */
+/* Public inline function to get the number of value bytes for a hash table */
 always_inline uword
 hash_value_bytes (hash_t * h)
 {
@@ -295,7 +319,7 @@ hash_value_bytes (hash_t * h)
   return (sizeof (p->value[0]) << h->log2_pair_size) - sizeof (p->key);
 }
 
-/* Public inline funcion to get log2(size of a (key,value) pair) */
+/* Public inline function to get log2(size of a (key,value) pair) */
 always_inline uword
 hash_pair_log2_bytes (hash_t * h)
 {
@@ -308,21 +332,21 @@ hash_pair_log2_bytes (hash_t * h)
   return log2_bytes;
 }
 
-/* Public inline funcion to get size of a (key,value) pair */
+/* Public inline function to get size of a (key,value) pair */
 always_inline uword
 hash_pair_bytes (hash_t * h)
 {
   return (uword) 1 << hash_pair_log2_bytes (h);
 }
 
-/* Public inline funcion to advance a pointer past one (key,value) pair */
+/* Public inline function to advance a pointer past one (key,value) pair */
 always_inline void *
 hash_forward1 (hash_t * h, void *v)
 {
   return (u8 *) v + hash_pair_bytes (h);
 }
 
-/* Public inline funcion to advance a pointer past N (key,value) pairs */
+/* Public inline function to advance a pointer past N (key,value) pairs */
 always_inline void *
 hash_forward (hash_t * h, void *v, uword n)
 {
@@ -414,7 +438,7 @@ do {                                                                        \
 
     calls body with each active hash pair
 */
-/* Iteratate over key/value pairs. */
+/* Iterate over key/value pairs. */
 #define hash_foreach(key_var,value_var,h,body)			\
 do {								\
   hash_pair_t * _r;						\
@@ -472,7 +496,7 @@ hash_set_value_bytes (hash_t * h, uword value_bytes)
                      _format_pair,_format_pair_arg)          \
 ({							     \
   hash_t _h;						     \
-  memset (&_h, 0, sizeof (_h));				     \
+  clib_memset (&_h, 0, sizeof (_h));				     \
   _h.user = (_user);				             \
   _h.key_sum   = (hash_key_sum_function_t *) (_key_sum);     \
   _h.key_equal = (_key_equal);				     \
@@ -648,6 +672,20 @@ extern u8 *vec_key_format_pair (u8 * s, va_list * args);
 extern uword string_key_sum (hash_t * h, uword key);
 extern uword string_key_equal (hash_t * h, uword key1, uword key2);
 extern u8 *string_key_format_pair (u8 * s, va_list * args);
+
+/*
+ * Note: if you plan to put a hash into shared memory,
+ * the key sum and key equal functions MUST be set to magic constants!
+ * PIC means that whichever process sets up the hash won't have
+ * the actual key sum functions at the same place, leading to
+ * very hard-to-find bugs...
+ */
+
+#define hash_create_shmem(elts,key_bytes,value_bytes)           \
+  hash_create2((elts),(key_bytes),(value_bytes),                \
+               (hash_key_sum_function_t *) KEY_FUNC_MEM,        \
+               (hash_key_equal_function_t *)KEY_FUNC_MEM,       \
+               0, 0)
 
 #define hash_create_string(elts,value_bytes)                    \
   hash_create2((elts),0,(value_bytes),                          \

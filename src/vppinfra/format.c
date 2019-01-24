@@ -139,13 +139,13 @@ justify (u8 * s, format_info_t * fi, uword s_len_orig)
       if (n_left > 0)
 	{
 	  vec_insert (s, n_left, i0);
-	  memset (s + i0, fi->pad_char, n_left);
+	  clib_memset (s + i0, fi->pad_char, n_left);
 	  l1 = vec_len (s);
 	}
       if (n_right > 0)
 	{
 	  vec_resize (s, n_right);
-	  memset (s + l1, fi->pad_char, n_right);
+	  clib_memset (s + l1, fi->pad_char, n_right);
 	}
     }
   return s;
@@ -463,6 +463,17 @@ fformat (FILE * f, char *fmt, ...)
 }
 
 #ifdef CLIB_UNIX
+void
+fformat_append_cr (FILE * ofp, const char *fmt, ...)
+{
+  va_list va;
+
+  va_start (va, fmt);
+  (void) va_fformat (ofp, (char *) fmt, &va);
+  va_end (va);
+  fformat (ofp, "\n");
+}
+
 word
 fdformat (int fd, char *fmt, ...)
 {

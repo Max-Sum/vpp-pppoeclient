@@ -167,7 +167,7 @@ di (unformat_input_t * i)
 #endif
 
 /* Parse delimited vector string.  If string starts with { then string
-   is delimited by balenced parenthesis.  Other string is delimited by
+   is delimited by balanced parenthesis.  Other string is delimited by
    white space.  {} were chosen since they are special to the shell. */
 static uword
 unformat_string (unformat_input_t * input,
@@ -335,7 +335,7 @@ unformat_token (unformat_input_t * input, va_list * va)
   if (!token_chars)
     token_chars = (u8 *) "a-zA-Z0-9_";
 
-  memset (map, 0, sizeof (map));
+  clib_memset (map, 0, sizeof (map));
   for (s = token_chars; *s;)
     {
       /* Parse range. */
@@ -576,9 +576,9 @@ unformat_float (unformat_input_t * input, va_list * va)
   uword signs[2], sign_index = 0;
   uword n_input = 0;
 
-  memset (values, 0, sizeof (values));
-  memset (n_digits, 0, sizeof (n_digits));
-  memset (signs, 0, sizeof (signs));
+  clib_memset (values, 0, sizeof (values));
+  clib_memset (n_digits, 0, sizeof (n_digits));
+  clib_memset (signs, 0, sizeof (signs));
 
   while ((c = unformat_get_input (input)) != UNFORMAT_END_OF_INPUT)
     {
@@ -1037,7 +1037,7 @@ unformat_init_vector (unformat_input_t * input, u8 * vector_string)
 #ifdef CLIB_UNIX
 
 static uword
-unix_file_fill_buffer (unformat_input_t * input)
+clib_file_fill_buffer (unformat_input_t * input)
 {
   int fd = pointer_to_uword (input->fill_buffer_arg);
   uword l, n;
@@ -1055,9 +1055,9 @@ unix_file_fill_buffer (unformat_input_t * input)
 }
 
 void
-unformat_init_unix_file (unformat_input_t * input, int file_descriptor)
+unformat_init_clib_file (unformat_input_t * input, int file_descriptor)
 {
-  unformat_init (input, unix_file_fill_buffer,
+  unformat_init (input, clib_file_fill_buffer,
 		 uword_to_pointer (file_descriptor, void *));
 }
 

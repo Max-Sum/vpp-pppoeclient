@@ -62,7 +62,7 @@ vl_api_ipsec_gre_add_del_tunnel_t_handler (vl_api_ipsec_gre_add_del_tunnel_t *
       goto out;
     }
 
-  memset (a, 0, sizeof (*a));
+  clib_memset (a, 0, sizeof (*a));
 
   /* ip addresses sent in network byte order */
   clib_memcpy (&(a->src), mp->src_address, 4);
@@ -83,12 +83,12 @@ out:
 }
 
 static void send_ipsec_gre_tunnel_details
-  (ipsec_gre_tunnel_t * t, unix_shared_memory_queue_t * q, u32 context)
+  (ipsec_gre_tunnel_t * t, vl_api_registration_t * reg, u32 context)
 {
   vl_api_ipsec_gre_tunnel_details_t *rmp;
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  memset (rmp, 0, sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
   rmp->_vl_msg_id = ntohs (VL_API_IPSEC_GRE_TUNNEL_DETAILS);
   clib_memcpy (rmp->src_address, &(t->tunnel_src), 4);
   clib_memcpy (rmp->dst_address, &(t->tunnel_dst), 4);
@@ -97,22 +97,20 @@ static void send_ipsec_gre_tunnel_details
   rmp->remote_sa_id = htonl (t->remote_sa_id);
   rmp->context = context;
 
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void vl_api_ipsec_gre_tunnel_dump_t_handler
   (vl_api_ipsec_gre_tunnel_dump_t * mp)
 {
-  unix_shared_memory_queue_t *q;
+  vl_api_registration_t *reg;
   ipsec_gre_main_t *igm = &ipsec_gre_main;
   ipsec_gre_tunnel_t *t;
   u32 sw_if_index;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
 
   sw_if_index = ntohl (mp->sw_if_index);
 
@@ -121,7 +119,7 @@ static void vl_api_ipsec_gre_tunnel_dump_t_handler
         /* *INDENT-OFF* */
         pool_foreach (t, igm->tunnels,
         ({
-            send_ipsec_gre_tunnel_details(t, q, mp->context);
+            send_ipsec_gre_tunnel_details(t, reg, mp->context);
         }));
         /* *INDENT-ON* */
     }
@@ -133,14 +131,14 @@ static void vl_api_ipsec_gre_tunnel_dump_t_handler
 	  return;
 	}
       t = &igm->tunnels[igm->tunnel_index_by_sw_if_index[sw_if_index]];
-      send_ipsec_gre_tunnel_details (t, q, mp->context);
+      send_ipsec_gre_tunnel_details (t, reg, mp->context);
     }
 }
 
 /*
  * ipsec_gre_api_hookup
  * Add vpe's API message handlers to the table.
- * vlib has alread mapped shared memory and
+ * vlib has already mapped shared memory and
  * added the client registration handlers.
  * See .../vlib-api/vlibmemory/memclnt_vlib.c:memclnt_process()
  */

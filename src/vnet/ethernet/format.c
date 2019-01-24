@@ -55,6 +55,12 @@ format_ethernet_address (u8 * s, va_list * args)
 }
 
 u8 *
+format_mac_address (u8 * s, va_list * args)
+{
+  return (format_ethernet_address (s, args));
+}
+
+u8 *
 format_ethernet_type (u8 * s, va_list * args)
 {
   ethernet_type_t type = va_arg (*args, u32);
@@ -100,7 +106,7 @@ format_ethernet_header_with_length (u8 * s, va_list * args)
   ethernet_type_t type = clib_net_to_host_u16 (e->type);
   ethernet_type_t vlan_type[ARRAY_LEN (m->vlan)];
   u32 n_vlan = 0, i, header_bytes;
-  uword indent;
+  u32 indent;
 
   while ((type == ETHERNET_TYPE_VLAN || type == ETHERNET_TYPE_DOT1AD
 	  || type == ETHERNET_TYPE_DOT1AH) && n_vlan < ARRAY_LEN (m->vlan))
@@ -230,6 +236,13 @@ unformat_ethernet_address (unformat_input_t * input, va_list * args)
   return (unformat_user (input, unformat_ethernet_address_unix, result)
 	  || unformat_user (input, unformat_ethernet_address_cisco, result));
 }
+
+uword
+unformat_mac_address (unformat_input_t * input, va_list * args)
+{
+  return (unformat_ethernet_address (input, args));
+}
+
 
 /* Returns ethernet type as an int in host byte order. */
 uword

@@ -24,6 +24,7 @@
 #include <vnet/fib/fib_node_list.h>
 #include <vnet/fib/fib_walk.h>
 #include <vnet/fib/fib_urpf_list.h>
+#include <vnet/fib/fib_path_ext.h>
 
 /**
  * The magic number of child entries that make a path-list popular.
@@ -82,24 +83,22 @@ static fib_path_list_t * fib_path_list_pool;
  */
 static uword *fib_path_list_db;
 
+/**
+ * the logger
+ */
+vlib_log_class_t fib_path_list_logger;
+
 /*
  * Debug macro
  */
-#ifdef FIB_DEBUG
-#define FIB_PATH_LIST_DBG(_pl, _fmt, _args...)		  \
-{   		            				  \
-    u8 *_tmp = 0;					  \
-    _tmp = fib_path_list_format(			  \
-	fib_path_list_get_index(_pl), _tmp);		  \
-    clib_warning("pl:[%d:%p:%p:%s]:" _fmt,		  \
-		 fib_path_list_get_index(_pl),		  \
-		 _pl, _pl->fpl_paths, _tmp,		  \
-		 ##_args);				  \
-    vec_free(_tmp);					  \
+#define FIB_PATH_LIST_DBG(_pl, _fmt, _args...)                  \
+{                                                               \
+    vlib_log_debug(fib_path_list_logger,                        \
+                   "[%U]:" _fmt,                                \
+                   format_fib_path_list,                        \
+                   fib_path_list_get_index(_pl), 0,             \
+                   ##_args);                                    \
 }
-#else
-#define FIB_PATH_LIST_DBG(_pl, _fmt, _args...)
-#endif
 
 static fib_path_list_t *
 fib_path_list_get (fib_node_index_t index)
@@ -116,9 +115,7 @@ fib_path_list_get_node (fib_node_index_t index)
 static fib_path_list_t*
 fib_path_list_from_fib_node (fib_node_t *node)
 {
-#if CLIB_DEBUG > 0
     ASSERT(FIB_NODE_TYPE_PATH_LIST == node->fn_type);
-#endif
     return ((fib_path_list_t*)node);
 }
 
@@ -128,16 +125,21 @@ fib_path_list_get_index (fib_path_list_t *path_list)
     return (path_list - fib_path_list_pool);
 }
 
-static u8 *
+u8 *
 format_fib_path_list (u8 * s, va_list * args)
 {
+    fib_node_index_t *path_index, path_list_index;
     fib_path_list_attribute_t attr;
-    fib_node_index_t *path_index;
     fib_path_list_t *path_list;
+    u32 indent;
 
-    path_list = va_arg (*args, fib_path_list_t *);
-    
-    s = format (s, "    index:%u", fib_path_list_get_index(path_list));
+    path_list_index = va_arg (*args, fib_node_index_t);
+    indent = va_arg (*args, u32);
+    path_list = fib_path_list_get(path_list_index);
+
+    s = format (s, "%Upath-list:[%d]",
+                format_white_space, indent,
+                fib_path_list_get_index(path_list));
     s = format (s, " locks:%u", path_list->fpl_node.fn_locks);
 
     if (FIB_PATH_LIST_FLAG_NONE != path_list->fpl_flags)
@@ -155,7 +157,8 @@ format_fib_path_list (u8 * s, va_list * args)
 
     vec_foreach (path_index, path_list->fpl_paths)
     {
-	s = fib_path_format(*path_index, s);
+	s = format(s, "%U", format_fib_path, *path_index, indent+2,
+                   FIB_PATH_FORMAT_FLAGS_NONE);
 	s = format(s, "\n");
     }
 
@@ -166,11 +169,7 @@ u8 *
 fib_path_list_format (fib_node_index_t path_list_index,
 		      u8 * s)
 {
-    fib_path_list_t *path_list;
-
-    path_list = fib_path_list_get(path_list_index);
-
-    return (format(s, "%U", format_fib_path_list, path_list));
+    return (format(s, "%U", format_fib_path_list, path_list_index, 4));
 }
 
 static uword
@@ -341,6 +340,18 @@ fib_path_list_last_lock_gone (fib_node_t *node)
     fib_path_list_destroy(path_list);
 }
 
+static load_balance_flags_t
+fib_path_list_fwd_flags_2_load_balance (fib_path_list_fwd_flags_t pl_flags)
+{
+    load_balance_flags_t lb_flags = LOAD_BALANCE_FLAG_NONE;
+
+    if (pl_flags & FIB_PATH_LIST_FWD_FLAG_STICKY)
+    {
+        lb_flags |= LOAD_BALANCE_ATTR_STICKY;
+    }
+    return (lb_flags);
+}
+
 /*
  * fib_path_mk_lb
  *
@@ -350,41 +361,39 @@ fib_path_list_last_lock_gone (fib_node_t *node)
 static void
 fib_path_list_mk_lb (fib_path_list_t *path_list,
 		     fib_forward_chain_type_t fct,
-		     dpo_id_t *dpo)
+		     dpo_id_t *dpo,
+                     fib_path_list_fwd_flags_t flags)
 {
     load_balance_path_t *nhs;
     fib_node_index_t *path_index;
 
-    nhs  = NULL;
-
-    if (!dpo_id_is_valid(dpo))
-    {
-        /*
-         * first time create
-         */
-        dpo_set(dpo,
-                DPO_LOAD_BALANCE,
-                fib_forw_chain_type_to_dpo_proto(fct),
-                load_balance_create(0,
-				    fib_forw_chain_type_to_dpo_proto(fct),
-				    0 /* FIXME FLOW HASH */));
-    }
+    nhs = NULL;
 
     /*
      * We gather the DPOs from resolved paths.
      */
     vec_foreach (path_index, path_list->fpl_paths)
     {
-	nhs = fib_path_append_nh_for_multipath_hash(*path_index,
-                                                    fct,
-                                                    nhs);
+        if ((flags & FIB_PATH_LIST_FWD_FLAG_STICKY) ||
+            fib_path_is_resolved(*path_index))
+        {
+            nhs = fib_path_append_nh_for_multipath_hash(*path_index,
+                                                        fct, nhs);
+        }
     }
 
     /*
      * Path-list load-balances, which if used, would be shared and hence
      * never need a load-balance map.
      */
-    load_balance_multipath_update(dpo, nhs, LOAD_BALANCE_FLAG_NONE);
+    dpo_set(dpo,
+            DPO_LOAD_BALANCE,
+            fib_forw_chain_type_to_dpo_proto(fct),
+            load_balance_create(vec_len(nhs),
+                                fib_forw_chain_type_to_dpo_proto(fct),
+                                0 /* FIXME FLOW HASH */));
+    load_balance_multipath_update(dpo, nhs,
+                                  fib_path_list_fwd_flags_2_load_balance(flags));
 
     FIB_PATH_LIST_DBG(path_list, "mk lb: %d", dpo->dpoi_index);
 
@@ -461,6 +470,9 @@ fib_path_list_back_walk (fib_node_index_t path_list_index,
 
     fib_path_list_mk_urpf(path_list);
 
+    FIB_PATH_LIST_DBG(path_list, "bw:%U",
+                      format_fib_node_bw_reason, ctx->fnbw_reason);
+
     /*
      * propagate the backwalk further
      */
@@ -531,7 +543,7 @@ fib_path_list_alloc (fib_node_index_t *path_list_index)
     fib_path_list_t *path_list;
 
     pool_get(fib_path_list_pool, path_list);
-    memset(path_list, 0, sizeof(*path_list));
+    clib_memset(path_list, 0, sizeof(*path_list));
 
     fib_node_init(&path_list->fpl_node,
 		  FIB_NODE_TYPE_PATH_LIST);
@@ -582,6 +594,11 @@ u32
 fib_path_list_get_n_paths (fib_node_index_t path_list_index)
 {
     fib_path_list_t *path_list;
+
+    if (FIB_NODE_INDEX_INVALID == path_list_index)
+    {
+        return (0);
+    }
 
     path_list = fib_path_list_get(path_list_index);
 
@@ -706,7 +723,7 @@ fib_path_list_create (fib_path_list_flags_t flags,
 	if (FIB_NODE_INDEX_INVALID != old_path_list_index)
 	{
 	    fib_path_list_destroy(path_list);
-	
+
 	    path_list_index = old_path_list_index;
 	}
 	else
@@ -731,7 +748,7 @@ fib_path_list_create (fib_path_list_flags_t flags,
     return (path_list_index);
 }
 
-static fib_path_cfg_flags_t 
+static fib_path_cfg_flags_t
 fib_path_list_flags_2_path_flags (fib_path_list_flags_t plf)
 {
     fib_path_cfg_flags_t pf = FIB_PATH_CFG_FLAG_NONE;
@@ -825,7 +842,7 @@ fib_path_list_path_add (fib_node_index_t path_list_index,
     ASSERT(1 == vec_len(rpaths));
     ASSERT(!(path_list->fpl_flags & FIB_PATH_LIST_FLAG_SHARED));
 
-    FIB_PATH_LIST_DBG(orig_path_list, "path-add");
+    FIB_PATH_LIST_DBG(path_list, "path-add");
 
     new_path_index = fib_path_create(path_list_index,
                                      rpaths);
@@ -972,7 +989,7 @@ fib_path_list_path_remove (fib_node_index_t path_list_index,
     ASSERT(1 == vec_len(rpaths));
     ASSERT(!(path_list->fpl_flags & FIB_PATH_LIST_FLAG_SHARED));
 
-    FIB_PATH_LIST_DBG(orig_path_list, "path-remove");
+    FIB_PATH_LIST_DBG(path_list, "path-remove");
 
     /*
      * create a representation of the path to be removed, so it
@@ -1014,13 +1031,11 @@ fib_path_list_path_remove (fib_node_index_t path_list_index,
 fib_node_index_t
 fib_path_list_copy_and_path_remove (fib_node_index_t orig_path_list_index,
 				    fib_path_list_flags_t flags,
-				    const fib_route_path_t *rpaths)
+				    const fib_route_path_t *rpath)
 {
     fib_node_index_t path_index, *orig_path_index, path_list_index, tmp_path_index;
     fib_path_list_t *path_list,  *orig_path_list;
     fib_node_index_t pi;
-
-    ASSERT(1 == vec_len(rpaths));
 
     path_list = fib_path_list_alloc(&path_list_index);
 
@@ -1044,8 +1059,7 @@ fib_path_list_copy_and_path_remove (fib_node_index_t orig_path_list_index,
      * create a representation of the path to be removed, so it
      * can be used as a comparison object during the copy.
      */
-    tmp_path_index = fib_path_create(path_list_index,
-				     rpaths);
+    tmp_path_index = fib_path_create(path_list_index, rpath);
 
     vec_foreach (orig_path_index, orig_path_list->fpl_paths)
     {
@@ -1143,13 +1157,26 @@ fib_path_list_copy_and_path_remove (fib_node_index_t orig_path_list_index,
 void
 fib_path_list_contribute_forwarding (fib_node_index_t path_list_index,
 				     fib_forward_chain_type_t fct,
+                                     fib_path_list_fwd_flags_t flags,
 				     dpo_id_t *dpo)
 {
     fib_path_list_t *path_list;
 
     path_list = fib_path_list_get(path_list_index);
 
-    fib_path_list_mk_lb(path_list, fct, dpo);
+    fib_path_list_mk_lb(path_list, fct, dpo, flags);
+
+    ASSERT(DPO_LOAD_BALANCE == dpo->dpoi_type);
+
+    /*
+     * If there's only one bucket in the load-balance then we can
+     * squash it out.
+     */
+    if ((1 == load_balance_n_buckets(dpo->dpoi_index)) &&
+        (FIB_PATH_LIST_FWD_FLAG_COLLAPSE & flags))
+    {
+        dpo_copy(dpo, load_balance_get_bucket(dpo->dpoi_index, 0));
+    }
 }
 
 /*
@@ -1194,9 +1221,11 @@ fib_path_list_recursive_loop_detect (fib_node_index_t path_list_index,
 
 	is_looped  = fib_path_recursive_loop_detect(*path_index, copy_ptr);
 	list_looped += is_looped;
+
+        vec_free(copy);
     }
 
-    FIB_PATH_LIST_DBG(path_list, "loop-detect: eval:%d", eval);
+    FIB_PATH_LIST_DBG(path_list, "loop-detect: eval:%d", list_looped);
 
     if (list_looped)
     {
@@ -1268,7 +1297,6 @@ fib_path_list_lock(fib_node_index_t path_list_index)
 	path_list = fib_path_list_get(path_list_index);
 
 	fib_node_lock(&path_list->fpl_node);
-	FIB_PATH_LIST_DBG(path_list, "lock");
     }
 }
 
@@ -1280,7 +1308,6 @@ fib_path_list_unlock (fib_node_index_t path_list_index)
     if (FIB_NODE_INDEX_INVALID != path_list_index)
     {
 	path_list = fib_path_list_get(path_list_index);
-	FIB_PATH_LIST_DBG(path_list, "unlock");
     
 	fib_node_unlock(&path_list->fpl_node);
     }
@@ -1317,6 +1344,29 @@ fib_path_list_walk (fib_node_index_t path_list_index,
     }
 }
 
+void
+fib_path_list_walk_w_ext (fib_node_index_t path_list_index,
+                          const fib_path_ext_list_t *ext_list,
+                          fib_path_list_walk_w_ext_fn_t func,
+                          void *ctx)
+{
+    fib_node_index_t *path_index;
+    fib_path_list_t *path_list;
+    fib_path_ext_t *path_ext;
+
+    path_list = fib_path_list_get(path_list_index);
+
+    vec_foreach(path_index, path_list->fpl_paths)
+    {
+        path_ext = fib_path_ext_list_find_by_path_index(ext_list, *path_index);
+
+        if (FIB_PATH_LIST_WALK_STOP == func(path_list_index,
+                                            *path_index,
+                                            path_ext,
+                                            ctx))
+            break;
+    }
+}
 
 void
 fib_path_list_module_init (void)
@@ -1330,6 +1380,7 @@ fib_path_list_module_init (void)
     				     fib_path_list_db_hash_key_equal,
     				     /* format pair/arg */
     				     0, 0);
+    fib_path_list_logger = vlib_log_register_class("fib", "path-list");
 }
 
 static clib_error_t *
@@ -1365,9 +1416,9 @@ show_fib_path_list_command (vlib_main_t * vm,
 	 * show all
 	 */
 	vlib_cli_output (vm, "FIB Path Lists");
-	pool_foreach(path_list, fib_path_list_pool,
+	pool_foreach_index (pli, fib_path_list_pool,
 	({
-	    vlib_cli_output (vm, "%U", format_fib_path_list, path_list);
+	    vlib_cli_output (vm, "%U", format_fib_path_list, pli, 0);
 	}));
     }
     return (NULL);

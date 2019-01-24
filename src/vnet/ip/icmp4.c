@@ -219,7 +219,7 @@ VLIB_REGISTER_NODE (ip4_icmp_input_node,static) = {
 
   .n_next_nodes = 1,
   .next_nodes = {
-    [ICMP_INPUT_NEXT_ERROR] = "error-punt",
+    [ICMP_INPUT_NEXT_ERROR] = "ip4-punt",
   },
 };
 /* *INDENT-ON* */
@@ -513,13 +513,15 @@ ip4_icmp_error (vlib_main_t * vm,
 		  b->current_length = 0;
 		}
 	    }
-	  p0->current_length =
-	    p0->current_length > 576 ? 576 : p0->current_length;
 
 	  /* Add IP header and ICMPv4 header including a 4 byte data field */
 	  vlib_buffer_advance (p0,
 			       -sizeof (ip4_header_t) -
 			       sizeof (icmp46_header_t) - 4);
+
+	  p0->current_length =
+	    p0->current_length > 576 ? 576 : p0->current_length;
+
 	  out_ip0 = vlib_buffer_get_current (p0);
 	  icmp0 = (icmp46_header_t *) & out_ip0[1];
 
@@ -592,7 +594,7 @@ VLIB_REGISTER_NODE (ip4_icmp_error_node) = {
 
   .n_next_nodes = IP4_ICMP_ERROR_N_NEXT,
   .next_nodes = {
-    [IP4_ICMP_ERROR_NEXT_DROP] = "error-drop",
+    [IP4_ICMP_ERROR_NEXT_DROP] = "ip4-drop",
     [IP4_ICMP_ERROR_NEXT_LOOKUP] = "ip4-lookup",
   },
 
@@ -651,7 +653,13 @@ icmp4_pg_edit_function (pg_main_t * pg,
       ASSERT (p0->current_data == 0);
       ip0 = (void *) (p0->data + ip_offset);
       icmp0 = (void *) (p0->data + icmp_offset);
-      len0 = clib_net_to_host_u16 (ip0->length) - ip4_header_bytes (ip0);
+
+      /* if IP length has been specified, then calculate the length based on buffer */
+      if (ip0->length == 0)
+	len0 = vlib_buffer_length_in_chain (vm, p0) - icmp_offset;
+      else
+	len0 = clib_net_to_host_u16 (ip0->length) - icmp_offset;
+
       icmp0->checksum =
 	~ip_csum_fold (ip_incremental_checksum (0, icmp0, len0));
     }
@@ -764,8 +772,9 @@ icmp4_init (vlib_main_t * vm)
   foreach_icmp4_code;
 #undef _
 
-  memset (cm->ip4_input_next_index_by_type,
-	  ICMP_INPUT_NEXT_ERROR, sizeof (cm->ip4_input_next_index_by_type));
+  clib_memset (cm->ip4_input_next_index_by_type,
+	       ICMP_INPUT_NEXT_ERROR,
+	       sizeof (cm->ip4_input_next_index_by_type));
 
   ip4_icmp_register_type (vm, ICMP4_echo_request,
 			  ip4_icmp_echo_request_node.index);

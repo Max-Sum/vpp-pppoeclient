@@ -48,10 +48,46 @@
 #include <vppinfra/mheap.h>
 #include <vppinfra/format.h>
 #include <vppinfra/random.h>
+#include <vppinfra/time.h>
 
 static int verbose = 0;
 #define if_verbose(format,args...) \
   if (verbose) { clib_warning(format, ## args); }
+
+int
+test1 (void)
+{
+  clib_time_t clib_time;
+  void *h_mem = clib_mem_alloc (2ULL << 30);
+  void *h;
+  uword *objects = 0;
+  int i;
+  f64 before, after;
+
+  clib_time_init (&clib_time);
+
+  vec_validate (objects, 2000000 - 1);
+
+  h = mheap_alloc (h_mem, (uword) (2 << 30));
+
+  before = clib_time_now (&clib_time);
+
+  for (i = 0; i < vec_len (objects); i++)
+    {
+      h = mheap_get_aligned (h, 24 /* size */ ,
+			     64 /* align */ ,
+			     16 /* align at offset */ , &objects[i]);
+    }
+
+  after = clib_time_now (&clib_time);
+
+  fformat (stdout, "alloc: %u objects in %.2f seconds, %.2f objects/second\n",
+	   vec_len (objects), (after - before),
+	   ((f64) vec_len (objects)) / (after - before));
+
+  return 0;
+}
+
 
 int
 test_mheap_main (unformat_input_t * input)
@@ -70,6 +106,7 @@ test_mheap_main (unformat_input_t * input)
 #define CHECK_VALIDITY 1
 #define CHECK_DATA     2
 #define CHECK_ALIGN    4
+#define TEST1	       8
 
   n_iterations = 10;
   seed = 0;
@@ -93,7 +130,8 @@ test_mheap_main (unformat_input_t * input)
 	  && 0 == unformat (input, "verbose %=", &really_verbose, 1)
 	  && 0 == unformat (input, "trace %=", &trace, 1)
 	  && 0 == unformat (input, "vm %=", &use_vm, 1)
-	  && 0 == unformat (input, "align %|", &check_mask, CHECK_ALIGN))
+	  && 0 == unformat (input, "align %|", &check_mask, CHECK_ALIGN)
+	  && 0 == unformat (input, "test1 %|", &check_mask, TEST1))
 	{
 	  clib_warning ("unknown input `%U'", format_unformat_error, input);
 	  return 1;
@@ -104,14 +142,19 @@ test_mheap_main (unformat_input_t * input)
   if (!seed)
     seed = random_default_seed ();
 
+  if (check_mask & TEST1)
+    {
+      return test1 ();
+    }
+
   if_verbose
     ("testing %d iterations, %d %saligned objects, max. size %d, seed %d",
      n_iterations, n_objects, (check_mask & CHECK_ALIGN) ? "randomly " : "un",
      max_object_size, seed);
 
   vec_resize (objects, n_objects);
-  if (vec_bytes (objects))	/* stupid warning be gone */
-    memset (objects, ~0, vec_bytes (objects));
+  if (vec_bytes (objects) > 0)	/* stupid warning be gone */
+    clib_memset (objects, ~0, vec_bytes (objects));
   objects_used = 0;
 
   /* Allocate initial heap. */
@@ -223,6 +266,8 @@ main (int argc, char *argv[])
 {
   unformat_input_t i;
   int ret;
+
+  clib_mem_init (0, 3ULL << 30);
 
   verbose = (argc > 1);
   unformat_init_command_line (&i, argv);

@@ -260,8 +260,8 @@ icmp_to_icmp6 (vlib_buffer_t * p, ip4_to_ip6_set_fn_t fn, void *ctx,
 			       -2 * (sizeof (*ip6) - sizeof (*ip4)) -
 			       sizeof (*inner_frag));
 	  ip6 = vlib_buffer_get_current (p);
-	  clib_memcpy (u8_ptr_add (ip6, sizeof (*ip6) - sizeof (*ip4)), ip4,
-		       20 + 8);
+	  memmove (u8_ptr_add (ip6, sizeof (*ip6) - sizeof (*ip4)), ip4,
+                   20 + 8);
 	  ip4 =
 	    (ip4_header_t *) u8_ptr_add (ip6, sizeof (*ip6) - sizeof (*ip4));
 	  icmp = (icmp46_header_t *) (ip4 + 1);
@@ -286,8 +286,8 @@ icmp_to_icmp6 (vlib_buffer_t * p, ip4_to_ip6_set_fn_t fn, void *ctx,
 	{
 	  vlib_buffer_advance (p, -2 * (sizeof (*ip6) - sizeof (*ip4)));
 	  ip6 = vlib_buffer_get_current (p);
-	  clib_memcpy (u8_ptr_add (ip6, sizeof (*ip6) - sizeof (*ip4)), ip4,
-		       20 + 8);
+	  memmove (u8_ptr_add (ip6, sizeof (*ip6) - sizeof (*ip4)), ip4,
+                   20 + 8);
 	  ip4 =
 	    (ip4_header_t *) u8_ptr_add (ip6, sizeof (*ip6) - sizeof (*ip4));
 	  icmp = (icmp46_header_t *) u8_ptr_add (ip4, sizeof (*ip4));
@@ -507,6 +507,7 @@ ip4_to_ip6_tcp_udp (vlib_buffer_t * p, ip4_to_ip6_set_fn_t fn, void *ctx)
   ip6_frag_hdr_t *frag;
   u32 frag_id;
   int rv;
+  ip4_address_t old_src, old_dst;
 
   ip4 = vlib_buffer_get_current (p);
 
@@ -517,7 +518,7 @@ ip4_to_ip6_tcp_udp (vlib_buffer_t * p, ip4_to_ip6_set_fn_t fn, void *ctx)
 
       //UDP checksum is optional over IPv4 but mandatory for IPv6
       //We do not check udp->length sanity but use our safe computed value instead
-      if (PREDICT_FALSE (!checksum))
+      if (PREDICT_FALSE (!*checksum))
 	{
 	  u16 udp_len = clib_host_to_net_u16 (ip4->length) - sizeof (*ip4);
 	  csum = ip_incremental_checksum (0, udp, udp_len);
@@ -534,9 +535,8 @@ ip4_to_ip6_tcp_udp (vlib_buffer_t * p, ip4_to_ip6_set_fn_t fn, void *ctx)
       checksum = &tcp->checksum;
     }
 
-  csum = ip_csum_sub_even (*checksum, ip4->src_address.as_u32);
-  csum = ip_csum_sub_even (csum, ip4->dst_address.as_u32);
-  *checksum = ip_csum_fold (csum);
+  old_src.as_u32 = ip4->src_address.as_u32;
+  old_dst.as_u32 = ip4->dst_address.as_u32;
 
   // Deal with fragmented packets
   if (PREDICT_FALSE (ip4->flags_and_fragment_offset &
@@ -577,7 +577,9 @@ ip4_to_ip6_tcp_udp (vlib_buffer_t * p, ip4_to_ip6_set_fn_t fn, void *ctx)
   if ((rv = fn (ip4, ip6, ctx)) != 0)
     return rv;
 
-  csum = ip_csum_add_even (*checksum, ip6->src_address.as_u64[0]);
+  csum = ip_csum_sub_even (*checksum, old_src.as_u32);
+  csum = ip_csum_sub_even (csum, old_dst.as_u32);
+  csum = ip_csum_add_even (csum, ip6->src_address.as_u64[0]);
   csum = ip_csum_add_even (csum, ip6->src_address.as_u64[1]);
   csum = ip_csum_add_even (csum, ip6->dst_address.as_u64[0]);
   csum = ip_csum_add_even (csum, ip6->dst_address.as_u64[1]);
@@ -649,11 +651,3 @@ ip4_to_ip6 (vlib_buffer_t * p, ip4_to_ip6_set_fn_t fn, void *ctx)
 }
 
 #endif /* __included_ip4_to_ip6_h__ */
-
-/*
- * fd.io coding-style-patch-verification: ON
- *
- * Local Variables:
- * eval: (c-set-style "gnu")
- * End:
- */

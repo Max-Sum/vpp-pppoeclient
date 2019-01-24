@@ -24,7 +24,6 @@
 
 #include <vlibapi/api.h>
 #include <vlibmemory/api.h>
-#include <vlibsocket/api.h>
 #include <vnet/ip/ip6_hop_by_hop.h>
 
 #include "ioam_cache.h"
@@ -55,6 +54,8 @@
 
 #define REPLY_MSG_ID_BASE cm->msg_id_base
 #include <vlibapi/api_helper_macros.h>
+
+ioam_cache_main_t ioam_cache_main;
 
 /* List of message types that this plugin understands */
 #define foreach_ioam_cache_plugin_api_msg                        \
@@ -350,6 +351,9 @@ show_ioam_cache_command_fn (vlib_main_t * vm,
     {
       if (unformat (input, "verbose"))
 	verbose = 1;
+      else
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, input);
     }
   ioam_cache_table_print (vm, verbose);
 
@@ -377,7 +381,7 @@ ioam_cache_init (vlib_main_t * vm)
 
   name = format (0, "ioam_cache_%08x%c", api_version, 0);
 
-  memset (&ioam_cache_main, 0, sizeof (ioam_cache_main));
+  clib_memset (&ioam_cache_main, 0, sizeof (ioam_cache_main));
   /* Ask for a correctly-sized block of API message decode slots */
   em->msg_id_base = vl_msg_api_get_msg_ids
     ((char *) name, VL_MSG_FIRST_AVAILABLE);

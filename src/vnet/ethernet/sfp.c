@@ -35,7 +35,7 @@ format_sfp_id (u8 * s, va_list * args)
   char *t = 0;
   switch (id)
     {
-#define _(f) case SFP_ID_##f: t = #f; break;
+#define _(f,str) case SFP_ID_##f: t = str; break;
       foreach_sfp_id
 #undef _
     default:
@@ -81,11 +81,10 @@ u8 *
 format_sfp_eeprom (u8 * s, va_list * args)
 {
   sfp_eeprom_t *e = va_arg (*args, sfp_eeprom_t *);
-  uword indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
   int i;
 
-  if (e->id != SFP_ID_sfp)
-    s = format (s, "id %U, ", format_sfp_id, e->id);
+  s = format (s, "id %U, ", format_sfp_id, e->id);
 
   s = format (s, "compatibility:");
   for (i = 0; i < SFP_N_COMPATIBILITY; i++)
@@ -104,6 +103,10 @@ format_sfp_eeprom (u8 * s, va_list * args)
 	    format_space_terminated, sizeof (e->vendor_serial_number),
 	    e->vendor_serial_number, format_space_terminated,
 	    sizeof (e->vendor_date_code), e->vendor_date_code);
+
+  if (e->length[4])
+    s = format (s, "\n%Ucable length: %um", format_white_space, indent,
+		e->length[4]);
 
   return s;
 }

@@ -21,7 +21,6 @@
 #include <vat/vat.h>
 #include <vlibapi/api.h>
 #include <vlibmemory/api.h>
-#include <vlibsocket/api.h>
 #include <vppinfra/error.h>
 
 #define __plugin_msg_base export_test_main.msg_id_base
@@ -154,7 +153,7 @@ ioam_export_vat_api_hookup (vat_main_t * vam)
 }
 
 clib_error_t *
-vat_plugin_register (vat_main_t * vam)
+ioam_export_vat_plugin_register (vat_main_t * vam)
 {
   export_test_main_t *sm = &export_test_main;
   u8 *name;

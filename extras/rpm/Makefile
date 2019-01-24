@@ -11,36 +11,52 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+ifneq ($(shell uname),Darwin)
+OS_ID        = $(shell grep '^ID=' /etc/os-release | cut -f2- -d= | sed -e 's/\"//g')
+endif
 
 TARBALL=$(shell realpath ../../build-root/vpp-latest.tar.xz)
 
 BASENAME=$(shell basename $(TARBALL) | sed -e s/.tar.\*//)
 VERSION=$(shell echo $(BASENAME) | cut -f2 -d-)
 RELEASE=$(shell echo $(BASENAME) | cut -f3- -d- | sed -e s/-/_/g)
+BR=$(shell realpath $(CURDIR)/../../build-root)
+RPMBUILD=$(BR)/rpmbuild
 PC=%
 
 all: RPM
 
-srpm:
-	@echo $(TARBALL)
-	mkdir -p rpmbuild/{RPMS,SRPMS,BUILD,SOURCES,SPECS}
-	cp $(TARBALL) rpmbuild/SOURCES/vpp-$(VERSION)-$(RELEASE).tar.xz
-	cp vpp.spec rpmbuild/SOURCES
-	sed -i '1s/^/$(PC)define _version $(VERSION)\n/' rpmbuild/SOURCES/vpp.spec
-	sed -i '1s/^/$(PC)define _release $(RELEASE)\n/' rpmbuild/SOURCES/vpp.spec
-	sed -i '/define _topdir/d' rpmbuild/SOURCES/vpp.spec
-	rpmbuild -bs \
-	  --define "_topdir rpmbuild" \
-	  rpmbuild/SOURCES/vpp.spec
-	mv $$(find rpmbuild/SRPMS -name \*.src.rpm -type f) .
+# SUSE rolling-release (a.k.a. Tumbleweed)
+ifeq ($(filter opensuse-tumbleweed,$(OS_ID)),$(OS_ID))
+SPEC_FILE='vpp-suse.spec'
+# SUSE osleap15
+else ifeq ($(filter opensuse-leap,$(OS_ID)),$(OS_ID))
+SPEC_FILE='vpp-suse.spec'
+# SUSE leap42.x
+else ifeq ($(filter opensuse,$(OS_ID)),$(OS_ID))
+SPEC_FILE='vpp-suse.spec'
+else
+SPEC_FILE='vpp.spec'
+endif
 
-RPM:
+spec:
 	@echo $(TARBALL)
-	mkdir -p RPMS SOURCES
-	cp $(TARBALL) SOURCES/vpp-$(VERSION)-$(RELEASE).tar.xz
-	rpmbuild -bb \
-	  --define "_topdir $(PWD)" \
+	mkdir -p $(RPMBUILD)/{RPMS,SRPMS,BUILD,SOURCES,SPECS}
+	cp $(TARBALL) $(RPMBUILD)/SOURCES/vpp-$(VERSION)-$(RELEASE).tar.xz
+	cp $(SPEC_FILE) $(RPMBUILD)/SPECS
+
+srpm: spec
+	rpmbuild -bs \
+	  --define "_topdir $(RPMBUILD)" \
 	  --define "_version $(VERSION)" \
 	  --define "_release $(RELEASE)" \
-	  vpp.spec
-	mv $$(find RPMS -name \*.rpm -type f) .
+	  $(RPMBUILD)/SPECS/$(SPEC_FILE)
+	mv $$(find $(RPMBUILD)/SRPMS -name \*.src.rpm -type f) $(BR)
+
+RPM: spec
+	rpmbuild -bb \
+	  --define "_topdir $(RPMBUILD)" \
+	  --define "_version $(VERSION)" \
+	  --define "_release $(RELEASE)" \
+	  $(RPMBUILD)/SPECS/$(SPEC_FILE)
+	mv $$(find $(RPMBUILD)/RPMS -name \*.rpm -type f) $(BR)

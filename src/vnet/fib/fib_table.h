@@ -29,6 +29,40 @@
 #define FIB_TABLE_TOTAL_LOCKS FIB_SOURCE_MAX
 
 /**
+ * Flags for the source data
+ */
+typedef enum fib_table_attribute_t_ {
+    /**
+     * Marker. Add new values after this one.
+     */
+    FIB_TABLE_ATTRIBUTE_FIRST,
+    /**
+     * the table is for IP6 link local addresses
+     */
+    FIB_TABLE_ATTRIBUTE_IP6_LL = FIB_TABLE_ATTRIBUTE_FIRST,
+    /**
+     * Marker. add new entries before this one.
+     */
+    FIB_TABLE_ATTRIBUTE_LAST = FIB_TABLE_ATTRIBUTE_IP6_LL,
+} fib_table_attribute_t;
+
+#define FIB_TABLE_ATTRIBUTE_MAX (FIB_TABLE_ATTRIBUTE_LAST+1)
+
+#define FIB_TABLE_ATTRIBUTES {		         \
+    [FIB_TABLE_ATTRIBUTE_IP6_LL]  = "ip6-ll",	 \
+}
+
+#define FOR_EACH_FIB_TABLE_ATTRIBUTE(_item)      	\
+    for (_item = FIB_TABLE_ATTRIBUTE_FIRST;		\
+	 _item < FIB_TABLE_ATTRIBUTE_MAX;		\
+	 _item++)
+
+typedef enum fib_table_flags_t_ {
+    FIB_TABLE_FLAG_NONE   = 0,
+    FIB_TABLE_FLAG_IP6_LL  = (1 << FIB_TABLE_ATTRIBUTE_IP6_LL),
+} __attribute__ ((packed)) fib_table_flags_t;
+
+/**
  * @brief 
  *   A protocol Independent FIB table
  */
@@ -38,6 +72,11 @@ typedef struct fib_table_t_
      * Which protocol this table serves. Used to switch on the union above.
      */
     fib_protocol_t ft_proto;
+
+    /**
+     * Table flags
+     */
+    fib_table_flags_t ft_flags;
 
     /**
      * per-source number of locks on the table
@@ -79,7 +118,7 @@ typedef struct fib_table_t_
  * @brief
  *  Format the description/name of the table
  */
-extern u8* format_fib_table_name(u8* s, va_list ap);
+extern u8* format_fib_table_name(u8* s, va_list *ap);
 
 /**
  * @brief
@@ -299,7 +338,7 @@ extern fib_node_index_t fib_table_entry_path_add(u32 fib_index,
 						 u32 next_hop_sw_if_index,
 						 u32 next_hop_fib_index,
 						 u32 next_hop_weight,
-						 mpls_label_t *next_hop_label_stack,
+						 fib_mpls_label_t *next_hop_label_stack,
 						 fib_route_path_flags_t pf);
 /**
  * @brief
@@ -482,7 +521,7 @@ extern fib_node_index_t fib_table_entry_update_one_path(u32 fib_index,
 							u32 next_hop_sw_if_index,
 							u32 next_hop_fib_index,
 							u32 next_hop_weight,
-							mpls_label_t *next_hop_label_stack,
+							fib_mpls_label_t *next_hop_label_stack,
 							fib_route_path_flags_t pf);
 
 /**
@@ -557,6 +596,17 @@ extern void fib_table_entry_delete_index(fib_node_index_t entry_index,
 
 /**
  * @brief
+ *  Return the stats index for a FIB entry
+ * @param fib_index
+ *  The table's FIB index
+ * @param prefix
+ *  The entry's prefix's
+ */
+extern u32 fib_table_entry_get_stats_index(u32 fib_index,
+                                           const fib_prefix_t *prefix);
+
+/**
+ * @brief
  *  Flush all entries from a table for the source
  *
  * @param fib_index
@@ -603,6 +653,21 @@ extern u32 fib_table_get_index_for_sw_if_index(fib_protocol_t proto,
  */
 extern u32 fib_table_get_table_id_for_sw_if_index(fib_protocol_t proto,
 						  u32 sw_if_index);
+
+/**
+ * @brief
+ *  Get the Table-ID of the FIB from protocol and index
+ *
+ * @param fib_index
+ *  The FIB index
+ *
+ * @paran proto
+ *  The protocol of the FIB (and thus the entries therein)
+ *
+ * @return fib_index
+ *  The tableID of the FIB
+ */
+extern u32 fib_table_get_table_id(u32 fib_index, fib_protocol_t proto);
 
 /**
  * @brief
@@ -697,7 +762,7 @@ extern u32 fib_table_create_and_lock(fib_protocol_t proto,
  *  The index of the FIB
  *
  * @paran proto
- *  The protocol of the FIB (and thus the entries therein)
+ *  The protocol the packets the flow hash will be calculated for.
  *
  * @return The flow hash config
  */
@@ -793,10 +858,29 @@ extern fib_table_t *fib_table_get(fib_node_index_t index,
 				  fib_protocol_t proto);
 
 /**
+ * @brief return code controlling how a table walk proceeds
+ */
+typedef enum fib_table_walk_rc_t_
+{
+    /**
+     * Continue on to the next entry
+     */
+    FIB_TABLE_WALK_CONTINUE,
+    /**
+     * Do no traverse down this sub-tree
+     */
+    FIB_TABLE_WALK_SUB_TREE_STOP,
+    /**
+     * Stop the walk completely
+     */
+    FIB_TABLE_WALK_STOP,
+} fib_table_walk_rc_t;
+
+/**
  * @brief Call back function when walking entries in a FIB table
  */
-typedef int (*fib_table_walk_fn_t)(fib_node_index_t fei,
-                                   void *ctx);
+typedef fib_table_walk_rc_t (*fib_table_walk_fn_t)(fib_node_index_t fei,
+                                                   void *ctx);
 
 /**
  * @brief Walk all entries in a FIB table
@@ -807,5 +891,22 @@ extern void fib_table_walk(u32 fib_index,
                            fib_protocol_t proto,
                            fib_table_walk_fn_t fn,
                            void *ctx);
+
+/**
+ * @brief Walk all entries in a sub-tree FIB table. The 'root' paraneter
+ * is the prefix at the root of the sub-tree.
+ * N.B: This is NOT safe to deletes. If you need to delete walk the whole
+ * table and store elements in a vector, then delete the elements
+ */
+extern void fib_table_sub_tree_walk(u32 fib_index,
+                                    fib_protocol_t proto,
+                                    const fib_prefix_t *root,
+                                    fib_table_walk_fn_t fn,
+                                    void *ctx);
+
+/**
+ * @brief format (display) the memory used by the FIB tables
+ */
+extern u8 *format_fib_table_memory(u8 *s, va_list *args);
 
 #endif

@@ -270,36 +270,47 @@ show_sw_interfaces (vlib_main_t * vm,
 {
   clib_error_t *error = 0;
   vnet_main_t *vnm = vnet_get_main ();
+  unformat_input_t _linput, *linput = &_linput;
   vnet_interface_main_t *im = &vnm->interface_main;
   vnet_sw_interface_t *si, *sorted_sis = 0;
   u32 sw_if_index = ~(u32) 0;
   u8 show_addresses = 0;
   u8 show_features = 0;
   u8 show_tag = 0;
+  int verbose = 0;
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  /*
+   * Get a line of input. Won't work if the user typed
+   * "show interface" and nothing more.
+   */
+  if (unformat_user (input, unformat_line_input, linput))
     {
-      /* See if user wants to show specific interface */
-      if (unformat
-	  (input, "%U", unformat_vnet_sw_interface, vnm, &sw_if_index))
+      while (unformat_check_input (linput) != UNFORMAT_END_OF_INPUT)
 	{
-	  si = pool_elt_at_index (im->sw_interfaces, sw_if_index);
-	  vec_add1 (sorted_sis, si[0]);
+	  /* See if user wants to show specific interface */
+	  if (unformat
+	      (linput, "%U", unformat_vnet_sw_interface, vnm, &sw_if_index))
+	    {
+	      si = pool_elt_at_index (im->sw_interfaces, sw_if_index);
+	      vec_add1 (sorted_sis, si[0]);
+	    }
+	  else if (unformat (linput, "address") || unformat (linput, "addr"))
+	    show_addresses = 1;
+	  else if (unformat (linput, "features") || unformat (linput, "feat"))
+	    show_features = 1;
+	  else if (unformat (linput, "tag"))
+	    show_tag = 1;
+	  else if (unformat (linput, "verbose"))
+	    verbose = 1;
+	  else
+	    {
+	      error = clib_error_return (0, "unknown input `%U'",
+					 format_unformat_error, linput);
+	      goto done;
+	    }
 	}
-      else if (unformat (input, "address") || unformat (input, "addr"))
-	show_addresses = 1;
-      else if (unformat (input, "features") || unformat (input, "feat"))
-	show_features = 1;
-      else if (unformat (input, "tag"))
-	show_tag = 1;
-      else
-	{
-	  error = clib_error_return (0, "unknown input `%U'",
-				     format_unformat_error, input);
-	  goto done;
-	}
+      unformat_free (linput);
     }
-
   if (show_features || show_tag)
     {
       if (sw_if_index == ~(u32) 0)
@@ -308,21 +319,22 @@ show_sw_interfaces (vlib_main_t * vm,
 
   if (show_features)
     {
-      vnet_interface_features_show (vm, sw_if_index);
+      vnet_interface_features_show (vm, sw_if_index, verbose);
 
       l2_input_config_t *l2_input = l2input_intf_config (sw_if_index);
       u32 fb = l2_input->feature_bitmap;
       /* intf input features are masked by bridge domain */
       if (l2_input->bridge)
 	fb &= l2input_bd_config (l2_input->bd_index)->feature_bitmap;
-      vlib_cli_output (vm, "\nl2-input:\n%U", format_l2_input_features, fb);
+      vlib_cli_output (vm, "\nl2-input:\n%U", format_l2_input_features, fb,
+		       1);
 
       l2_output_config_t *l2_output = l2output_intf_config (sw_if_index);
       vlib_cli_output (vm, "\nl2-output:");
       if (l2_output->out_vtr_flag)
 	vlib_cli_output (vm, "%10s (%s)", "VTR", "--internal--");
       vlib_cli_output (vm, "%U", format_l2_output_features,
-		       l2_output->feature_bitmap);
+		       l2_output->feature_bitmap, 1);
       return 0;
     }
   if (show_tag)
@@ -344,14 +356,14 @@ show_sw_interfaces (vlib_main_t * vm,
       sorted_sis =
 	vec_new (vnet_sw_interface_t, pool_elts (im->sw_interfaces));
       _vec_len (sorted_sis) = 0;
-      pool_foreach (si, im->sw_interfaces, (
-					     {
-					     int visible =
-					     vnet_swif_is_api_visible (si);
-					     if (visible)
-					     vec_add1 (sorted_sis, si[0]);}
-		    ));
-
+      /* *INDENT-OFF* */
+      pool_foreach (si, im->sw_interfaces,
+      ({
+        int visible = vnet_swif_is_api_visible (si);
+        if (visible)
+          vec_add1 (sorted_sis, si[0]);}
+        ));
+      /* *INDENT-ON* */
       /* Sort by name. */
       vec_sort_with_function (sorted_sis, sw_interface_name_compare);
     }
@@ -365,11 +377,7 @@ show_sw_interfaces (vlib_main_t * vm,
 	ip_lookup_main_t *lm4 = &im4->lookup_main;
 	ip_lookup_main_t *lm6 = &im6->lookup_main;
 	ip_interface_address_t *ia = 0;
-	ip4_address_t *r4;
-	ip6_address_t *r6;
 	u32 fib_index4 = 0, fib_index6 = 0;
-	ip4_fib_t *fib4;
-	ip6_fib_t *fib6;
 
 	if (vec_len (im4->fib_index_by_sw_if_index) > si->sw_if_index)
 	  fib_index4 = vec_elt (im4->fib_index_by_sw_if_index,
@@ -379,85 +387,69 @@ show_sw_interfaces (vlib_main_t * vm,
 	  fib_index6 = vec_elt (im6->fib_index_by_sw_if_index,
 				si->sw_if_index);
 
-	fib4 = ip4_fib_get (fib_index4);
-	fib6 = ip6_fib_get (fib_index6);
+	ip4_fib_t *fib4 = ip4_fib_get (fib_index4);
+	ip6_fib_t *fib6 = ip6_fib_get (fib_index6);
 
 	if (si->flags & VNET_SW_INTERFACE_FLAG_UNNUMBERED)
 	  vlib_cli_output
 	    (vm, "%U (%s): \n  unnumbered, use %U",
-	     format_vnet_sw_if_index_name,
-	     vnm, si->sw_if_index,
+	     format_vnet_sw_if_index_name, vnm, si->sw_if_index,
 	     (si->flags & VNET_SW_INTERFACE_FLAG_ADMIN_UP) ? "up" : "dn",
 	     format_vnet_sw_if_index_name, vnm, si->unnumbered_sw_if_index);
-
 	else
-	  {
-	    vlib_cli_output (vm, "%U (%s):",
-			     format_vnet_sw_if_index_name,
-			     vnm, si->sw_if_index,
-			     (si->flags & VNET_SW_INTERFACE_FLAG_ADMIN_UP)
-			     ? "up" : "dn");
-	  }
+	  vlib_cli_output
+	    (vm, "%U (%s):",
+	     format_vnet_sw_if_index_name, vnm, si->sw_if_index,
+	     (si->flags & VNET_SW_INTERFACE_FLAG_ADMIN_UP) ? "up" : "dn");
 
 	/* Display any L2 info */
 	l2_input_config_t *l2_input = l2input_intf_config (si->sw_if_index);
 	if (l2_input->bridge)
 	  {
+	    bd_main_t *bdm = &bd_main;
 	    u32 bd_id = l2input_main.bd_configs[l2_input->bd_index].bd_id;
-	    vlib_cli_output (vm, "  l2 bridge bd_id %d%s%d", bd_id,
-			     l2_input->bvi ? " bvi shg " : " shg ",
-			     l2_input->shg);
+	    vlib_cli_output (vm, "  L2 bridge bd-id %d idx %d shg %d %s",
+			     bd_id, bd_find_index (bdm, bd_id), l2_input->shg,
+			     l2_input->bvi ? "bvi" : " ");
 	  }
 	else if (l2_input->xconnect)
-	  {
-	    vlib_cli_output (vm, "  l2 xconnect %U",
-			     format_vnet_sw_if_index_name,
-			     vnm, l2_input->output_sw_if_index);
-	  }
+	  vlib_cli_output (vm, "  L2 xconnect %U",
+			   format_vnet_sw_if_index_name, vnm,
+			   l2_input->output_sw_if_index);
 
+	/* *INDENT-OFF* */
 	/* Display any IP4 addressing info */
-          /* *INDENT-OFF* */
-	  foreach_ip_interface_address (lm4, ia, si->sw_if_index,
-					1 /* honor unnumbered */,
-	  ({
-            r4 = ip_interface_address_get_address (lm4, ia);
-            if (fib4->table_id)
-              {
-                vlib_cli_output (vm, "  %U/%d table %d",
-                                 format_ip4_address, r4,
-                                 ia->address_length,
-                                 fib4->table_id);
-              }
-            else
-              {
-                vlib_cli_output (vm, "  %U/%d",
-                                 format_ip4_address, r4,
-                                 ia->address_length);
-              }
-          }));
-          /* *INDENT-ON* */
+	foreach_ip_interface_address (lm4, ia, si->sw_if_index,
+				      1 /* honor unnumbered */,
+	({
+	  ip4_address_t *r4 = ip_interface_address_get_address (lm4, ia);
+	  if (fib4->table_id)
+	    vlib_cli_output (vm, "  L3 %U/%d ip4 table-id %d fib-idx %d",
+			     format_ip4_address, r4, ia->address_length,
+			     fib4->table_id,
+			     ip4_fib_index_from_table_id (fib4->table_id));
+	  else
+	    vlib_cli_output (vm, "  L3 %U/%d",
+			     format_ip4_address, r4, ia->address_length);
+        }));
+	/* *INDENT-ON* */
 
+	/* *INDENT-OFF* */
 	/* Display any IP6 addressing info */
-          /* *INDENT-OFF* */
-          foreach_ip_interface_address (lm6, ia, si->sw_if_index,
-                                        1 /* honor unnumbered */,
-          ({
-            r6 = ip_interface_address_get_address (lm6, ia);
-            if (fib6->table_id)
-              {
-                vlib_cli_output (vm, "  %U/%d table %d",
-                                 format_ip6_address, r6,
-                                 ia->address_length,
-                                 fib6->table_id);
-              }
-            else
-              {
-                vlib_cli_output (vm, "  %U/%d",
-                                 format_ip6_address, r6,
-                                 ia->address_length);
-              }
-          }));
-          /* *INDENT-ON* */
+	foreach_ip_interface_address (lm6, ia, si->sw_if_index,
+				      1 /* honor unnumbered */,
+        ({
+	  ip6_address_t *r6 = ip_interface_address_get_address (lm6, ia);
+	  if (fib6->table_id)
+	    vlib_cli_output (vm, "  L3 %U/%d ip6 table-id %d fib-idx %d",
+			     format_ip6_address, r6, ia->address_length,
+			     fib6->table_id,
+			     ip6_fib_index_from_table_id (fib6->table_id));
+	  else
+	    vlib_cli_output (vm, "  L3 %U/%d",
+			     format_ip6_address, r6, ia->address_length);
+        }));
+	/* *INDENT-ON* */
       }
     }
   else
@@ -476,7 +468,7 @@ done:
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_sw_interfaces_command, static) = {
   .path = "show interface",
-  .short_help = "show interface [address|addr|features|feat] [<interface> [<interface> [..]]]",
+  .short_help = "show interface [address|addr|features|feat] [<interface> [<interface> [..]]] [verbose]",
   .function = show_sw_interfaces,
 };
 /* *INDENT-ON* */
@@ -696,7 +688,7 @@ create_sub_interfaces (vlib_main_t * vm,
       goto done;
     }
 
-  memset (&template, 0, sizeof (template));
+  clib_memset (&template, 0, sizeof (template));
   template.sub.eth.raw_flags = 0;
 
   if (unformat (input, "%d default", &id_min))
@@ -823,14 +815,14 @@ done:
  * subinterfaces to handle a range of VLAN IDs.
  *
  * - <b>create sub-interfaces <interface> <subId> dot1q|dot1ad <vlanId>|any [exact-match]</b> -
- * Use this command to specify the outer VLAN ID, to either be explicited or to make the
+ * Use this command to specify the outer VLAN ID, to either be explicit or to make the
  * VLAN ID different from the '<em>subId</em>'.
  *
  * - <b>create sub-interfaces <interface> <subId> dot1q|dot1ad <vlanId>|any inner-dot1q
  * <vlanId>|any [exact-match]</b> - Use this command to specify the outer VLAN ID and
- * the innner VLAN ID.
+ * the inner VLAN ID.
  *
- * When '<em>dot1q</em>' or '<em>dot1ad</em>' is explictly entered, subinterfaces
+ * When '<em>dot1q</em>' or '<em>dot1ad</em>' is explicitly entered, subinterfaces
  * can be configured as either exact-match or non-exact match. Non-exact match is the CLI
  * default. If '<em>exact-match</em>' is specified, packets must have the same number of
  * VLAN tags as the configuration. For non-exact-match, packets must at least that number
@@ -954,60 +946,32 @@ set_unnumbered (vlib_main_t * vm,
 		unformat_input_t * input, vlib_cli_command_t * cmd)
 {
   vnet_main_t *vnm = vnet_get_main ();
-  u32 unnumbered_sw_if_index;
-  u32 inherit_from_sw_if_index;
-  vnet_sw_interface_t *si;
-  int is_set = 0;
-  int is_del = 0;
-  u32 was_unnum;
+  u32 unnumbered_sw_if_index = ~0;
+  u32 inherit_from_sw_if_index = ~0;
+  int enable = 1;
 
   if (unformat (input, "%U use %U",
 		unformat_vnet_sw_interface, vnm, &unnumbered_sw_if_index,
 		unformat_vnet_sw_interface, vnm, &inherit_from_sw_if_index))
-    is_set = 1;
+    enable = 1;
   else if (unformat (input, "del %U",
 		     unformat_vnet_sw_interface, vnm,
 		     &unnumbered_sw_if_index))
-    is_del = 1;
+    enable = 0;
   else
     return clib_error_return (0, "parse error '%U'",
 			      format_unformat_error, input);
 
-  si = vnet_get_sw_interface (vnm, unnumbered_sw_if_index);
-  was_unnum = (si->flags & VNET_SW_INTERFACE_FLAG_UNNUMBERED);
+  if (~0 == unnumbered_sw_if_index)
+    return clib_error_return (0, "Specify the unnumbered interface");
+  if (enable && ~0 == inherit_from_sw_if_index)
+    return clib_error_return (0, "When enabling unnumbered specify the"
+			      " IP enabled interface that it uses");
 
-  if (is_del)
-    {
-      si->flags &= ~(VNET_SW_INTERFACE_FLAG_UNNUMBERED);
-      si->unnumbered_sw_if_index = (u32) ~ 0;
+  vnet_sw_interface_update_unnumbered (unnumbered_sw_if_index,
+				       inherit_from_sw_if_index, enable);
 
-      ip4_main.lookup_main.if_address_pool_index_by_sw_if_index
-	[unnumbered_sw_if_index] = ~0;
-      ip6_main.lookup_main.if_address_pool_index_by_sw_if_index
-	[unnumbered_sw_if_index] = ~0;
-    }
-  else if (is_set)
-    {
-      si->flags |= VNET_SW_INTERFACE_FLAG_UNNUMBERED;
-      si->unnumbered_sw_if_index = inherit_from_sw_if_index;
-
-      ip4_main.lookup_main.if_address_pool_index_by_sw_if_index
-	[unnumbered_sw_if_index] =
-	ip4_main.lookup_main.if_address_pool_index_by_sw_if_index
-	[inherit_from_sw_if_index];
-      ip6_main.lookup_main.if_address_pool_index_by_sw_if_index
-	[unnumbered_sw_if_index] =
-	ip6_main.lookup_main.if_address_pool_index_by_sw_if_index
-	[inherit_from_sw_if_index];
-    }
-
-  if (was_unnum != (si->flags & VNET_SW_INTERFACE_FLAG_UNNUMBERED))
-    {
-      ip4_sw_interface_enable_disable (unnumbered_sw_if_index, !is_del);
-      ip6_sw_interface_enable_disable (unnumbered_sw_if_index, !is_del);
-    }
-
-  return 0;
+  return (NULL);
 }
 
 /* *INDENT-OFF* */
@@ -1151,13 +1115,17 @@ static clib_error_t *
 mtu_cmd (vlib_main_t * vm, unformat_input_t * input, vlib_cli_command_t * cmd)
 {
   vnet_main_t *vnm = vnet_get_main ();
-  u32 hw_if_index, mtu;
-  u32 flags = ETHERNET_INTERFACE_FLAG_MTU;
+  u32 hw_if_index, sw_if_index, mtu;
   ethernet_main_t *em = &ethernet_main;
+  u32 mtus[VNET_N_MTU] = { 0, 0, 0, 0 };
 
   if (unformat (input, "%d %U", &mtu,
 		unformat_vnet_hw_interface, vnm, &hw_if_index))
     {
+      /*
+       * Change physical MTU on interface. Only supported for Ethernet
+       * interfaces
+       */
       vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, hw_if_index);
       ethernet_interface_t *eif = ethernet_get_interface (em, hw_if_index);
 
@@ -1173,22 +1141,36 @@ mtu_cmd (vlib_main_t * vm, unformat_input_t * input, vlib_cli_command_t * cmd)
 	return clib_error_return (0, "Invalid mtu (%d): must be <= (%d)", mtu,
 				  hi->max_supported_packet_bytes);
 
-      if (hi->max_packet_bytes != mtu)
-	{
-	  hi->max_packet_bytes = mtu;
-	  ethernet_set_flags (vnm, hw_if_index, flags);
-	}
+      vnet_hw_interface_set_mtu (vnm, hw_if_index, mtu);
+      goto done;
     }
+  else if (unformat (input, "packet %d %U", &mtu,
+		     unformat_vnet_sw_interface, vnm, &sw_if_index))
+    /* Set default packet MTU (including L3 header */
+    mtus[VNET_MTU_L3] = mtu;
+  else if (unformat (input, "ip4 %d %U", &mtu,
+		     unformat_vnet_sw_interface, vnm, &sw_if_index))
+    mtus[VNET_MTU_IP4] = mtu;
+  else if (unformat (input, "ip6 %d %U", &mtu,
+		     unformat_vnet_sw_interface, vnm, &sw_if_index))
+    mtus[VNET_MTU_IP6] = mtu;
+  else if (unformat (input, "mpls %d %U", &mtu,
+		     unformat_vnet_sw_interface, vnm, &sw_if_index))
+    mtus[VNET_MTU_MPLS] = mtu;
   else
     return clib_error_return (0, "unknown input `%U'",
 			      format_unformat_error, input);
+
+  vnet_sw_interface_set_protocol_mtu (vnm, sw_if_index, mtus);
+
+done:
   return 0;
 }
 
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (set_interface_mtu_cmd, static) = {
   .path = "set interface mtu",
-  .short_help = "set interface mtu <value> <interface>",
+  .short_help = "set interface mtu [packet|ip4|ip6|mpls] <value> <interface>",
   .function = mtu_cmd,
 };
 /* *INDENT-ON* */
@@ -1201,7 +1183,7 @@ set_interface_mac_address (vlib_main_t * vm, unformat_input_t * input,
   vnet_sw_interface_t *si = NULL;
   clib_error_t *error = 0;
   u32 sw_if_index = ~0;
-  u64 mac = 0;
+  u8 mac[6] = { 0 };
 
   if (!unformat_user (input, unformat_vnet_sw_interface, vnm, &sw_if_index))
     {
@@ -1209,7 +1191,7 @@ set_interface_mac_address (vlib_main_t * vm, unformat_input_t * input,
 				 format_unformat_error, input);
       goto done;
     }
-  if (!unformat_user (input, unformat_ethernet_address, &mac))
+  if (!unformat_user (input, unformat_ethernet_address, mac))
     {
       error = clib_error_return (0, "expected mac address `%U'",
 				 format_unformat_error, input);
@@ -1293,6 +1275,46 @@ VLIB_CLI_COMMAND (clear_tag_command, static) = {
 /* *INDENT-ON* */
 
 static clib_error_t *
+set_ip_directed_broadcast (vlib_main_t * vm,
+			   unformat_input_t * input, vlib_cli_command_t * cmd)
+{
+  vnet_main_t *vnm = vnet_get_main ();
+  u32 sw_if_index = ~0;
+  u8 enable = 0;
+
+  if (!unformat (input, "%U", unformat_vnet_sw_interface, vnm, &sw_if_index));
+  else if (unformat (input, "enable"))
+    enable = 1;
+  else if (unformat (input, "disable"))
+    enable = 0;
+  else
+    return clib_error_return (0, "unknown input: `%U'",
+			      format_unformat_error, input);
+
+  if (~0 == sw_if_index)
+    return clib_error_return (0, "specify an interface: `%U'",
+			      format_unformat_error, input);
+
+  vnet_sw_interface_ip_directed_broadcast (vnm, sw_if_index, enable);
+
+  return 0;
+}
+
+/*?
+ * This command is used to enable/disable IP directed broadcast
+ * If directed broadcast is enabled a packet sent to the interface's
+ * subnet broadcast address will be sent L2 broadcast on the interface,
+ * otherwise it is dropped.
+ ?*/
+/* *INDENT-OFF* */
+VLIB_CLI_COMMAND (set_ip_directed_broadcast_command, static) = {
+  .path = "set interface ip directed-broadcast",
+  .short_help = "set interface enable <interface> <enable|disable>",
+  .function = set_ip_directed_broadcast,
+};
+/* *INDENT-ON* */
+
+static clib_error_t *
 set_hw_interface_rx_mode (vnet_main_t * vnm, u32 hw_if_index,
 			  u32 queue_id, vnet_hw_interface_rx_mode mode)
 {
@@ -1347,6 +1369,33 @@ set_hw_interface_rx_mode (vnet_main_t * vnm, u32 hw_if_index,
   return 0;
 }
 
+clib_error_t *
+set_hw_interface_change_rx_mode (vnet_main_t * vnm, u32 hw_if_index,
+				 u8 queue_id_valid, u32 queue_id,
+				 vnet_hw_interface_rx_mode mode)
+{
+  clib_error_t *error = 0;
+  vnet_hw_interface_t *hw;
+  int i;
+
+  hw = vnet_get_hw_interface (vnm, hw_if_index);
+
+  if (queue_id_valid == 0)
+    {
+      for (i = 0; i < vec_len (hw->dq_runtime_index_by_queue); i++)
+	{
+	  error = set_hw_interface_rx_mode (vnm, hw_if_index, i, mode);
+	  if (error)
+	    break;
+	}
+      hw->default_rx_mode = mode;
+    }
+  else
+    error = set_hw_interface_rx_mode (vnm, hw_if_index, queue_id, mode);
+
+  return (error);
+}
+
 static clib_error_t *
 set_interface_rx_mode (vlib_main_t * vm, unformat_input_t * input,
 		       vlib_cli_command_t * cmd)
@@ -1354,12 +1403,10 @@ set_interface_rx_mode (vlib_main_t * vm, unformat_input_t * input,
   clib_error_t *error = 0;
   unformat_input_t _line_input, *line_input = &_line_input;
   vnet_main_t *vnm = vnet_get_main ();
-  vnet_hw_interface_t *hw;
   u32 hw_if_index = (u32) ~ 0;
   u32 queue_id = (u32) ~ 0;
   vnet_hw_interface_rx_mode mode = VNET_HW_INTERFACE_RX_MODE_UNKNOWN;
-  int i;
-  u8 input_queue_id = 0;
+  u8 queue_id_valid = 0;
 
   if (!unformat_user (input, unformat_line_input, line_input))
     return 0;
@@ -1370,7 +1417,7 @@ set_interface_rx_mode (vlib_main_t * vm, unformat_input_t * input,
 	  (line_input, "%U", unformat_vnet_hw_interface, vnm, &hw_if_index))
 	;
       else if (unformat (line_input, "queue %d", &queue_id))
-	input_queue_id = 1;
+	queue_id_valid = 1;
       else if (unformat (line_input, "polling"))
 	mode = VNET_HW_INTERFACE_RX_MODE_POLLING;
       else if (unformat (line_input, "interrupt"))
@@ -1394,20 +1441,8 @@ set_interface_rx_mode (vlib_main_t * vm, unformat_input_t * input,
   if (mode == VNET_HW_INTERFACE_RX_MODE_UNKNOWN)
     return clib_error_return (0, "please specify valid rx-mode");
 
-  hw = vnet_get_hw_interface (vnm, hw_if_index);
-
-  if (input_queue_id == 0)
-    {
-      for (i = 0; i < vec_len (hw->dq_runtime_index_by_queue); i++)
-	{
-	  error = set_hw_interface_rx_mode (vnm, hw_if_index, i, mode);
-	  if (error)
-	    break;
-	}
-      hw->default_rx_mode = mode;
-    }
-  else
-    error = set_hw_interface_rx_mode (vnm, hw_if_index, queue_id, mode);
+  error = set_hw_interface_change_rx_mode (vnm, hw_if_index, queue_id_valid,
+					   queue_id, mode);
 
   return (error);
 }
@@ -1486,7 +1521,7 @@ show_interface_rx_placement_fn (vlib_main_t * vm, unformat_input_t * input,
       }));
     if (vec_len (s) > 0)
       {
-        vlib_cli_output(vm, "Thread %u (%v):\n%v", index,
+        vlib_cli_output(vm, "Thread %u (%s):\n%v", index,
 			vlib_worker_threads[index].name, s);
         vec_reset_length (s);
       }
@@ -1531,47 +1566,20 @@ VLIB_CLI_COMMAND (show_interface_rx_placement, static) = {
 };
 /* *INDENT-ON* */
 
-static clib_error_t *
-set_interface_rx_placement (vlib_main_t * vm, unformat_input_t * input,
-			    vlib_cli_command_t * cmd)
+clib_error_t *
+set_hw_interface_rx_placement (u32 hw_if_index, u32 queue_id,
+			       u32 thread_index, u8 is_main)
 {
-  clib_error_t *error = 0;
-  unformat_input_t _line_input, *line_input = &_line_input;
   vnet_main_t *vnm = vnet_get_main ();
   vnet_device_main_t *vdm = &vnet_device_main;
-  vnet_hw_interface_rx_mode mode;
-  u32 hw_if_index = (u32) ~ 0;
-  u32 queue_id = (u32) 0;
-  u32 thread_index = (u32) ~ 0;
+  clib_error_t *error = 0;
+  vnet_hw_interface_rx_mode mode = VNET_HW_INTERFACE_RX_MODE_UNKNOWN;
   int rv;
 
-  if (!unformat_user (input, unformat_line_input, line_input))
-    return 0;
-
-  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
-    {
-      if (unformat
-	  (line_input, "%U", unformat_vnet_hw_interface, vnm, &hw_if_index))
-	;
-      else if (unformat (line_input, "queue %d", &queue_id))
-	;
-      else if (unformat (line_input, "main", &thread_index))
-	thread_index = 0;
-      else if (unformat (line_input, "worker %d", &thread_index))
-	thread_index += vdm->first_worker_thread_index;
-      else
-	{
-	  error = clib_error_return (0, "parse error: '%U'",
-				     format_unformat_error, line_input);
-	  unformat_free (line_input);
-	  return error;
-	}
-    }
-
-  unformat_free (line_input);
-
-  if (hw_if_index == (u32) ~ 0)
-    return clib_error_return (0, "please specify valid interface name");
+  if (is_main)
+    thread_index = 0;
+  else
+    thread_index += vdm->first_worker_thread_index;
 
   if (thread_index > vdm->last_worker_thread_index)
     return clib_error_return (0,
@@ -1591,7 +1599,53 @@ set_interface_rx_placement (vlib_main_t * vm, unformat_input_t * input,
 				      thread_index);
   vnet_hw_interface_set_rx_mode (vnm, hw_if_index, queue_id, mode);
 
-  return 0;
+  return (error);
+}
+
+static clib_error_t *
+set_interface_rx_placement (vlib_main_t * vm, unformat_input_t * input,
+			    vlib_cli_command_t * cmd)
+{
+  clib_error_t *error = 0;
+  unformat_input_t _line_input, *line_input = &_line_input;
+  vnet_main_t *vnm = vnet_get_main ();
+  u32 hw_if_index = (u32) ~ 0;
+  u32 queue_id = (u32) 0;
+  u32 thread_index = (u32) ~ 0;
+  u8 is_main = 0;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat
+	  (line_input, "%U", unformat_vnet_hw_interface, vnm, &hw_if_index))
+	;
+      else if (unformat (line_input, "queue %d", &queue_id))
+	;
+      else if (unformat (line_input, "main", &thread_index))
+	is_main = 1;
+      else if (unformat (line_input, "worker %d", &thread_index))
+	;
+      else
+	{
+	  error = clib_error_return (0, "parse error: '%U'",
+				     format_unformat_error, line_input);
+	  unformat_free (line_input);
+	  return error;
+	}
+    }
+
+  unformat_free (line_input);
+
+  if (hw_if_index == (u32) ~ 0)
+    return clib_error_return (0, "please specify valid interface name");
+
+  error = set_hw_interface_rx_placement (hw_if_index, queue_id, thread_index,
+					 is_main);
+
+  return (error);
 }
 
 /*?

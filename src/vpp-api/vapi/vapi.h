@@ -21,7 +21,9 @@
 #include <string.h>
 #include <stdbool.h>
 #include <vppinfra/types.h>
+#include <vlibapi/api_types.h>
 #include <vapi/vapi_common.h>
+#include <svm/queue.h>
 
 #ifdef __cplusplus
 extern "C"
@@ -95,13 +97,15 @@ extern "C"
  * @param max_outstanding_requests max number of outstanding requests queued
  * @param response_queue_size size of the response queue
  * @param mode mode of operation - blocking or nonblocking
+ * @param handle_keepalives - if true, automatically handle memclnt_keepalive
  *
  * @return VAPI_OK on success, other error code on error
  */
   vapi_error_e vapi_connect (vapi_ctx_t ctx, const char *name,
 			     const char *chroot_prefix,
 			     int max_outstanding_requests,
-			     int response_queue_size, vapi_mode_e mode);
+			     int response_queue_size, vapi_mode_e mode,
+			     bool handle_keepalives);
 
 /**
  * @brief disconnect from vpp
@@ -162,10 +166,13 @@ extern "C"
  * @param ctx opaque vapi context
  * @param[out] msg pointer to result variable containing message
  * @param[out] msg_size pointer to result variable containing message size
+ * @param cond enum type for blocking, non-blocking or timed wait call
+ * @param time in sec for timed wait
  *
  * @return VAPI_OK on success, other error code on error
  */
-  vapi_error_e vapi_recv (vapi_ctx_t ctx, void **msg, size_t * msg_size);
+  vapi_error_e vapi_recv (vapi_ctx_t ctx, void **msg, size_t * msg_size,
+			  svm_q_conditional_wait_t cond, u32 time);
 
 /**
  * @brief wait for connection to become readable or writable

@@ -59,7 +59,7 @@ format_vnet_interface_output_trace (u8 * s, va_list * va)
   interface_output_trace_t *t = va_arg (*va, interface_output_trace_t *);
   vnet_main_t *vnm = vnet_get_main ();
   vnet_sw_interface_t *si;
-  uword indent;
+  u32 indent;
 
   if (t->sw_if_index != (u32) ~ 0)
     {
@@ -99,7 +99,7 @@ vnet_interface_output_trace (vlib_main_t * vm,
   u32 n_left, *from;
 
   n_left = n_buffers;
-  from = vlib_frame_args (frame);
+  from = vlib_frame_vector_args (frame);
 
   while (n_left >= 4)
     {
@@ -121,15 +121,15 @@ vnet_interface_output_trace (vlib_main_t * vm,
 	{
 	  t0 = vlib_add_trace (vm, node, b0, sizeof (t0[0]));
 	  t0->sw_if_index = vnet_buffer (b0)->sw_if_index[VLIB_TX];
-	  clib_memcpy (t0->data, vlib_buffer_get_current (b0),
-		       sizeof (t0->data));
+	  clib_memcpy_fast (t0->data, vlib_buffer_get_current (b0),
+			    sizeof (t0->data));
 	}
       if (b1->flags & VLIB_BUFFER_IS_TRACED)
 	{
 	  t1 = vlib_add_trace (vm, node, b1, sizeof (t1[0]));
 	  t1->sw_if_index = vnet_buffer (b1)->sw_if_index[VLIB_TX];
-	  clib_memcpy (t1->data, vlib_buffer_get_current (b1),
-		       sizeof (t1->data));
+	  clib_memcpy_fast (t1->data, vlib_buffer_get_current (b1),
+			    sizeof (t1->data));
 	}
       from += 2;
       n_left -= 2;
@@ -149,8 +149,8 @@ vnet_interface_output_trace (vlib_main_t * vm,
 	{
 	  t0 = vlib_add_trace (vm, node, b0, sizeof (t0[0]));
 	  t0->sw_if_index = vnet_buffer (b0)->sw_if_index[VLIB_TX];
-	  clib_memcpy (t0->data, vlib_buffer_get_current (b0),
-		       sizeof (t0->data));
+	  clib_memcpy_fast (t0->data, vlib_buffer_get_current (b0),
+			    sizeof (t0->data));
 	}
       from += 1;
       n_left -= 1;
@@ -181,7 +181,10 @@ calc_checksums (vlib_main_t * vm, vlib_buffer_t * b)
       if (b->flags & VNET_BUFFER_F_OFFLOAD_IP_CKSUM)
 	ip4->checksum = ip4_header_checksum (ip4);
       if (b->flags & VNET_BUFFER_F_OFFLOAD_TCP_CKSUM)
-	th->checksum = ip4_tcp_udp_compute_checksum (vm, b, ip4);
+	{
+	  th->checksum = 0;
+	  th->checksum = ip4_tcp_udp_compute_checksum (vm, b, ip4);
+	}
       if (b->flags & VNET_BUFFER_F_OFFLOAD_UDP_CKSUM)
 	uh->checksum = ip4_tcp_udp_compute_checksum (vm, b, ip4);
     }
@@ -222,7 +225,7 @@ vnet_interface_output_node_inline (vlib_main_t * vm,
   if (node->flags & VLIB_NODE_FLAG_TRACE)
     vnet_interface_output_trace (vm, node, frame, n_buffers);
 
-  from = vlib_frame_args (frame);
+  from = vlib_frame_vector_args (frame);
 
   if (rt->is_deleted)
     return vlib_error_drop_buffers (vm, node, from,
@@ -328,10 +331,10 @@ vnet_interface_output_node_inline (vlib_main_t * vm,
 
 	  if (PREDICT_FALSE (current_config_index != ~0))
 	    {
-	      b0->feature_arc_index = arc;
-	      b1->feature_arc_index = arc;
-	      b2->feature_arc_index = arc;
-	      b3->feature_arc_index = arc;
+	      vnet_buffer (b0)->feature_arc_index = arc;
+	      vnet_buffer (b1)->feature_arc_index = arc;
+	      vnet_buffer (b2)->feature_arc_index = arc;
+	      vnet_buffer (b3)->feature_arc_index = arc;
 	      b0->current_config_index = current_config_index;
 	      b1->current_config_index = current_config_index;
 	      b2->current_config_index = current_config_index;
@@ -415,7 +418,7 @@ vnet_interface_output_node_inline (vlib_main_t * vm,
 
 	  if (PREDICT_FALSE (current_config_index != ~0))
 	    {
-	      b0->feature_arc_index = arc;
+	      vnet_buffer (b0)->feature_arc_index = arc;
 	      b0->current_config_index = current_config_index;
 	    }
 
@@ -443,7 +446,7 @@ vnet_interface_output_node_inline (vlib_main_t * vm,
   return n_buffers;
 }
 
-static_always_inline uword
+static uword
 vnet_interface_output_node (vlib_main_t * vm, vlib_node_runtime_t * node,
 			    vlib_frame_t * frame)
 {
@@ -475,7 +478,7 @@ vnet_per_buffer_interface_output (vlib_main_t * vm,
 
   n_left_from = frame->n_vectors;
 
-  from = vlib_frame_args (frame);
+  from = vlib_frame_vector_args (frame);
   next_index = node->cached_next_index;
 
   while (n_left_from > 0)
@@ -513,8 +516,8 @@ vnet_per_buffer_interface_output (vlib_main_t * vm,
 				       vnet_buffer (b1)->sw_if_index
 				       [VLIB_TX]);
 
-	  next0 = hi0->hw_if_index;
-	  next1 = hi1->hw_if_index;
+	  next0 = hi0->output_node_next_index;
+	  next1 = hi1->output_node_next_index;
 
 	  vlib_validate_buffer_enqueue_x2 (vm, node, next_index, to_next,
 					   n_left_to_next, bi0, bi1, next0,
@@ -541,7 +544,7 @@ vnet_per_buffer_interface_output (vlib_main_t * vm,
 				       vnet_buffer (b0)->sw_if_index
 				       [VLIB_TX]);
 
-	  next0 = hi0->hw_if_index;
+	  next0 = hi0->output_node_next_index;
 
 	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
 					   n_left_to_next, bi0, next0);
@@ -669,7 +672,7 @@ static u8 *
 validate_error_frame (vlib_main_t * vm,
 		      vlib_node_runtime_t * node, vlib_frame_t * f)
 {
-  u32 *buffers = vlib_frame_args (f);
+  u32 *buffers = vlib_frame_vector_args (f);
   vlib_buffer_t *b;
   u8 *msg = 0;
   uword i;
@@ -719,7 +722,7 @@ process_drop_punt (vlib_main_t * vm,
   static vlib_error_t memory[VNET_ERROR_N_DISPOSITION];
   static char memory_init[VNET_ERROR_N_DISPOSITION];
 
-  buffers = vlib_frame_args (frame);
+  buffers = vlib_frame_vector_args (frame);
   first_buffer = buffers;
 
   {
@@ -1080,12 +1083,19 @@ VNET_FEATURE_ARC_INIT (interface_output, static) =
 {
   .arc_name  = "interface-output",
   .start_nodes = VNET_FEATURES (0),
+  .last_in_arc = "interface-tx",
   .arc_index_ptr = &vnet_main.interface_main.output_feature_arc_index,
 };
 
 VNET_FEATURE_INIT (span_tx, static) = {
   .arc_name = "interface-output",
   .node_name = "span-output",
+  .runs_before = VNET_FEATURES ("interface-tx"),
+};
+
+VNET_FEATURE_INIT (ipsec_if_tx, static) = {
+  .arc_name = "interface-output",
+  .node_name = "ipsec-if-output",
   .runs_before = VNET_FEATURES ("interface-tx"),
 };
 
@@ -1104,18 +1114,31 @@ vnet_per_buffer_interface_output_hw_interface_add_del (vnet_main_t * vnm,
   vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, hw_if_index);
   u32 next_index;
 
-  next_index = vlib_node_add_next_with_slot
-    (vnm->vlib_main, vnet_per_buffer_interface_output_node.index,
-     hi->output_node_index,
-     /* next_index */ hw_if_index);
+  if (hi->output_node_index == 0)
+    return 0;
 
-  ASSERT (next_index == hw_if_index);
+  next_index = vlib_node_add_next
+    (vnm->vlib_main, vnet_per_buffer_interface_output_node.index,
+     hi->output_node_index);
+  hi->output_node_next_index = next_index;
 
   return 0;
 }
 
 VNET_HW_INTERFACE_ADD_DEL_FUNCTION
   (vnet_per_buffer_interface_output_hw_interface_add_del);
+
+void
+vnet_set_interface_output_node (vnet_main_t * vnm,
+				u32 hw_if_index, u32 node_index)
+{
+  ASSERT (node_index);
+  vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, hw_if_index);
+  u32 next_index = vlib_node_add_next
+    (vnm->vlib_main, vnet_per_buffer_interface_output_node.index, node_index);
+  hi->output_node_next_index = next_index;
+  hi->output_node_index = node_index;
+}
 
 static clib_error_t *
 pcap_drop_trace_command_fn (vlib_main_t * vm,
@@ -1138,7 +1161,7 @@ pcap_drop_trace_command_fn (vlib_main_t * vm,
 	      if (im->pcap_filename == 0)
 		im->pcap_filename = format (0, "/tmp/drop.pcap%c", 0);
 
-	      memset (&im->pcap_main, 0, sizeof (im->pcap_main));
+	      clib_memset (&im->pcap_main, 0, sizeof (im->pcap_main));
 	      im->pcap_main.file_name = (char *) im->pcap_filename;
 	      im->pcap_main.n_packets_to_capture = 100;
 	      if (im->pcap_pkts_to_capture)

@@ -38,6 +38,10 @@ extern fib_node_index_t ip4_mfib_table_lookup_exact_match(const ip4_mfib_t *fib,
                                                           const ip4_address_t *grp,
                                                           const ip4_address_t *src,
                                                           u32 len);
+extern fib_node_index_t ip4_mfib_table_get_less_specific (const ip4_mfib_t *mfib,
+                                                          const ip4_address_t *src,
+                                                          const ip4_address_t *grp,
+                                                          u32 len);
 
 extern void ip4_mfib_table_entry_remove(ip4_mfib_t *fib,
                                         const ip4_address_t *grp,
@@ -98,8 +102,13 @@ extern u32 ip4_mfib_table_get_index_for_sw_if_index(u32 sw_if_index);
  * @param fn The function to invoke on each entry visited
  * @param ctx A context passed in the visit function
  */
-extern void ip4_mfib_table_walk (ip4_mfib_t *mfib,
-                                 mfib_table_walk_fn_t fn,
-                                 void *ctx);
+extern void ip4_mfib_table_walk(ip4_mfib_t *mfib,
+                                mfib_table_walk_fn_t fn,
+                                void *ctx);
+
+/**
+ * @brief format (display) the memory usage for IP4 mfibs
+ */
+extern u8 * format_ip4_mfib_table_memory(u8 * s, va_list * args);
 
 #endif

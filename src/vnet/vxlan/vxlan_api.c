@@ -47,7 +47,61 @@
 #define foreach_vpe_api_msg                             \
 _(SW_INTERFACE_SET_VXLAN_BYPASS, sw_interface_set_vxlan_bypass)         \
 _(VXLAN_ADD_DEL_TUNNEL, vxlan_add_del_tunnel)                           \
-_(VXLAN_TUNNEL_DUMP, vxlan_tunnel_dump)
+_(VXLAN_TUNNEL_DUMP, vxlan_tunnel_dump)                                 \
+_(VXLAN_OFFLOAD_RX, vxlan_offload_rx)
+
+static void
+vl_api_vxlan_offload_rx_t_handler (vl_api_vxlan_offload_rx_t * mp)
+{
+  vl_api_vxlan_offload_rx_reply_t *rmp;
+  int rv = 0;
+  u32 hw_if_index = ntohl (mp->hw_if_index);
+  u32 sw_if_index = ntohl (mp->sw_if_index);
+
+  if (!vnet_hw_interface_is_valid (vnet_get_main (), hw_if_index))
+    {
+      rv = VNET_API_ERROR_NO_SUCH_ENTRY;
+      goto err;
+    }
+  VALIDATE_SW_IF_INDEX (mp);
+
+  u32 t_index = vnet_vxlan_get_tunnel_index (sw_if_index);
+  if (t_index == ~0)
+    {
+      rv = VNET_API_ERROR_INVALID_SW_IF_INDEX_2;
+      goto err;
+    }
+
+  vxlan_main_t *vxm = &vxlan_main;
+  vxlan_tunnel_t *t = pool_elt_at_index (vxm->tunnels, t_index);
+  if (!ip46_address_is_ip4 (&t->dst))
+    {
+      rv = VNET_API_ERROR_INVALID_ADDRESS_FAMILY;
+      goto err;
+    }
+
+  vnet_main_t *vnm = vnet_get_main ();
+  vnet_hw_interface_t *hw_if = vnet_get_hw_interface (vnm, hw_if_index);
+  ip4_main_t *im = &ip4_main;
+  u32 rx_fib_index =
+    vec_elt (im->fib_index_by_sw_if_index, hw_if->sw_if_index);
+
+  if (t->encap_fib_index != rx_fib_index)
+    {
+      rv = VNET_API_ERROR_NO_SUCH_FIB;
+      goto err;
+    }
+
+  if (vnet_vxlan_add_del_rx_flow (hw_if_index, t_index, mp->enable))
+    {
+      rv = VNET_API_ERROR_UNSPECIFIED;
+      goto err;
+    }
+  BAD_SW_IF_INDEX_LABEL;
+err:
+
+  REPLY_MACRO (VL_API_VXLAN_OFFLOAD_RX_REPLY);
+}
 
 static void
   vl_api_sw_interface_set_vxlan_bypass_t_handler
@@ -70,10 +124,11 @@ static void vl_api_vxlan_add_del_tunnel_t_handler
 {
   vl_api_vxlan_add_del_tunnel_reply_t *rmp;
   int rv = 0;
-  ip4_main_t *im = &ip4_main;
+  u32 fib_index;
 
-  uword *p = hash_get (im->fib_index_by_table_id, ntohl (mp->encap_vrf_id));
-  if (!p)
+  fib_index = fib_table_find (fib_ip_proto (mp->is_ipv6),
+			      ntohl (mp->encap_vrf_id));
+  if (fib_index == ~0)
     {
       rv = VNET_API_ERROR_NO_SUCH_FIB;
       goto out;
@@ -82,8 +137,9 @@ static void vl_api_vxlan_add_del_tunnel_t_handler
   vnet_vxlan_add_del_tunnel_args_t a = {
     .is_add = mp->is_add,
     .is_ip6 = mp->is_ipv6,
+    .instance = ntohl (mp->instance),
     .mcast_sw_if_index = ntohl (mp->mcast_sw_if_index),
-    .encap_fib_index = p[0],
+    .encap_fib_index = fib_index,
     .decap_next_index = ntohl (mp->decap_next_index),
     .vni = ntohl (mp->vni),
     .dst = to_ip46 (mp->is_ipv6, mp->dst_address),
@@ -116,7 +172,7 @@ out:
 }
 
 static void send_vxlan_tunnel_details
-  (vxlan_tunnel_t * t, unix_shared_memory_queue_t * q, u32 context)
+  (vxlan_tunnel_t * t, vl_api_registration_t * reg, u32 context)
 {
   vl_api_vxlan_tunnel_details_t *rmp;
   ip4_main_t *im4 = &ip4_main;
@@ -124,7 +180,7 @@ static void send_vxlan_tunnel_details
   u8 is_ipv6 = !ip46_address_is_ip4 (&t->dst);
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  memset (rmp, 0, sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
   rmp->_vl_msg_id = ntohs (VL_API_VXLAN_TUNNEL_DETAILS);
   if (is_ipv6)
     {
@@ -138,6 +194,8 @@ static void send_vxlan_tunnel_details
       memcpy (rmp->dst_address, t->dst.ip4.as_u8, 4);
       rmp->encap_vrf_id = htonl (im4->fibs[t->encap_fib_index].ft_table_id);
     }
+
+  rmp->instance = htonl (t->user_instance);
   rmp->mcast_sw_if_index = htonl (t->mcast_sw_if_index);
   rmp->vni = htonl (t->vni);
   rmp->decap_next_index = htonl (t->decap_next_index);
@@ -145,22 +203,20 @@ static void send_vxlan_tunnel_details
   rmp->is_ipv6 = is_ipv6;
   rmp->context = context;
 
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void vl_api_vxlan_tunnel_dump_t_handler
   (vl_api_vxlan_tunnel_dump_t * mp)
 {
-  unix_shared_memory_queue_t *q;
+  vl_api_registration_t *reg;
   vxlan_main_t *vxm = &vxlan_main;
   vxlan_tunnel_t *t;
   u32 sw_if_index;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
 
   sw_if_index = ntohl (mp->sw_if_index);
 
@@ -169,7 +225,7 @@ static void vl_api_vxlan_tunnel_dump_t_handler
       /* *INDENT-OFF* */
       pool_foreach (t, vxm->tunnels,
       ({
-        send_vxlan_tunnel_details(t, q, mp->context);
+        send_vxlan_tunnel_details(t, reg, mp->context);
       }));
       /* *INDENT-ON* */
     }
@@ -181,14 +237,14 @@ static void vl_api_vxlan_tunnel_dump_t_handler
 	  return;
 	}
       t = &vxm->tunnels[vxm->tunnel_index_by_sw_if_index[sw_if_index]];
-      send_vxlan_tunnel_details (t, q, mp->context);
+      send_vxlan_tunnel_details (t, reg, mp->context);
     }
 }
 
 /*
  * vpe_api_hookup
  * Add vpe's API message handlers to the table.
- * vlib has alread mapped shared memory and
+ * vlib has already mapped shared memory and
  * added the client registration handlers.
  * See .../vlib-api/vlibmemory/memclnt_vlib.c:memclnt_process()
  */

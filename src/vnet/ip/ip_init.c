@@ -47,7 +47,7 @@ ip_main_init (vlib_main_t * vm)
   ip_main_t *im = &ip_main;
   clib_error_t *error = 0;
 
-  memset (im, 0, sizeof (im[0]));
+  clib_memset (im, 0, sizeof (im[0]));
 
   {
     ip_protocol_info_t *pi;
@@ -128,13 +128,16 @@ do {						\
   if ((error = vlib_call_init_function (vm, ip_classify_init)))
     return error;
 
-  if ((error = vlib_call_init_function (vm, input_acl_init)))
+  if ((error = vlib_call_init_function (vm, in_out_acl_init)))
     return error;
 
   if ((error = vlib_call_init_function (vm, policer_classify_init)))
     return error;
 
   if ((error = vlib_call_init_function (vm, flow_classify_init)))
+    return error;
+
+  if ((error = vlib_call_init_function (vm, dns_init)))
     return error;
 
   return error;

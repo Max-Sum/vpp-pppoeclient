@@ -95,32 +95,24 @@ clib_mem_init (void *memory, uword memory_size)
   return heap;
 }
 
-#ifdef CLIB_LINUX_KERNEL
-#include <asm/page.h>
-
-uword
-clib_mem_get_page_size (void)
+void *
+clib_mem_init_thread_safe (void *memory, uword memory_size)
 {
-  return PAGE_SIZE;
-}
-#endif
+  mheap_t *h;
+  u8 *heap;
 
-#ifdef CLIB_UNIX
-uword
-clib_mem_get_page_size (void)
-{
-  return getpagesize ();
-}
-#endif
+  clib_mem_init (memory, memory_size);
 
-/* Make a guess for standalone. */
-#ifdef CLIB_STANDALONE
-uword
-clib_mem_get_page_size (void)
-{
-  return 4096;
+  heap = clib_mem_get_per_cpu_heap ();
+  ASSERT (heap);
+
+  h = mheap_header (heap);
+
+  /* make the main heap thread-safe */
+  h->flags |= MHEAP_FLAG_THREAD_SAFE;
+
+  return heap;
 }
-#endif
 
 u8 *
 format_clib_mem_usage (u8 * s, va_list * va)

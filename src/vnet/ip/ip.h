@@ -65,6 +65,9 @@
 #include <vnet/ip/icmp6.h>
 #include <vnet/classify/vnet_classify.h>
 
+#define u8_ptr_add(ptr, index) (((u8 *)ptr) + index)
+#define u16_net_add(u, val) clib_host_to_net_u16(clib_net_to_host_u16(u) + (val))
+
 /* Per protocol info. */
 typedef struct
 {
@@ -159,7 +162,7 @@ ip_incremental_checksum_buffer (vlib_main_t * vm,
   void *h;
   u32 n;
 
-  n = clib_min (n_bytes_left, b->current_length);
+  n = clib_min (n_bytes_left, b->current_length - first_buffer_offset);
   h = vlib_buffer_get_current (b) + first_buffer_offset;
   sum = ip_incremental_checksum (sum, h, n);
   if (PREDICT_FALSE (b->flags & VLIB_BUFFER_NEXT_PRESENT))
@@ -191,6 +194,26 @@ void ip_table_delete (fib_protocol_t fproto, u32 table_id, u8 is_api);
 
 int ip_table_bind (fib_protocol_t fproto, u32 sw_if_index,
 		   u32 table_id, u8 is_api);
+
+u8 ip_is_zero (ip46_address_t * ip46_address, u8 is_ip4);
+u8 ip_is_local_host (ip46_address_t * ip46_address, u8 is_ip4);
+u8 ip4_is_local_host (ip4_address_t * ip4_address);
+u8 ip6_is_local_host (ip6_address_t * ip6_address);
+u8 ip_is_local (u32 fib_index, ip46_address_t * ip46_address, u8 is_ip4);
+u8 ip_interface_has_address (u32 sw_if_index, ip46_address_t * ip, u8 is_ip4);
+void ip_copy (ip46_address_t * dst, ip46_address_t * src, u8 is_ip4);
+void ip_set (ip46_address_t * dst, void *src, u8 is_ip4);
+void *ip_interface_get_first_ip (u32 sw_if_index, u8 is_ip4);
+void ip4_address_normalize (ip4_address_t * ip4, u8 preflen);
+void ip6_address_normalize (ip6_address_t * ip6, u8 preflen);
+void ip4_preflen_to_mask (u8 pref_len, ip4_address_t * ip);
+u32 ip4_mask_to_preflen (ip4_address_t * mask);
+void ip4_prefix_max_address_host_order (ip4_address_t * ip, u8 plen,
+					ip4_address_t * res);
+void ip6_prefix_max_address_host_order (ip6_address_t * ip, u8 plen,
+					ip6_address_t * res);
+void ip6_preflen_to_mask (u8 pref_len, ip6_address_t * mask);
+u32 ip6_mask_to_preflen (ip6_address_t * mask);
 
 #endif /* included_ip_main_h */
 

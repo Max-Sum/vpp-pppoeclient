@@ -22,7 +22,10 @@
 #include <vnet/fib/fib_node_list.h>
 
 /* Adjacency packet/byte counters indexed by adjacency index. */
-vlib_combined_counter_main_t adjacency_counters;
+vlib_combined_counter_main_t adjacency_counters = {
+    .name = "adjacency",
+    .stat_segment_name = "/net/adjacency",
+};
 
 /*
  * the single adj pool
@@ -35,12 +38,24 @@ ip_adjacency_t *adj_pool;
  */
 int adj_per_adj_counters;
 
+const ip46_address_t ADJ_BCAST_ADDR = {
+    .ip6 = {
+        .as_u64[0] = 0xffffffffffffffff,
+        .as_u64[1] = 0xffffffffffffffff,
+    },
+};
+
+/**
+ * Adj flag names
+ */
+static const char *adj_attr_names[] = ADJ_ATTR_NAMES;
+
 always_inline void
 adj_poison (ip_adjacency_t * adj)
 {
     if (CLIB_DEBUG > 0)
     {
-	memset (adj, 0xfe, sizeof (adj[0]));
+	clib_memset (adj, 0xfe, sizeof (adj[0]));
     }
 }
 
@@ -57,7 +72,8 @@ adj_alloc (fib_protocol_t proto)
     /* Validate adjacency counters. */
     vlib_validate_combined_counter(&adjacency_counters,
                                    adj_get_index(adj));
-
+    vlib_zero_combined_counter(&adjacency_counters,
+                               adj_get_index(adj));
     fib_node_init(&adj->ia_node,
                   FIB_NODE_TYPE_ADJ);
 
@@ -69,7 +85,7 @@ adj_alloc (fib_protocol_t proto)
     adj->ia_delegates = NULL;
 
     /* lest it become a midchain in the future */
-    memset(&adj->sub_type.midchain.next_dpo, 0,
+    clib_memset(&adj->sub_type.midchain.next_dpo, 0,
            sizeof(adj->sub_type.midchain.next_dpo));
 
     return (adj);
@@ -82,6 +98,28 @@ adj_index_is_special (adj_index_t adj_index)
 	return (!0);
 
     return (0);
+}
+
+u8*
+format_adj_flags (u8 * s, va_list * args)
+{
+    adj_flags_t af;
+    adj_attr_t at;
+
+    af = va_arg (*args, int);
+
+    if (ADJ_FLAG_NONE == af)
+    {
+        return (format(s, "None"));
+    }
+    FOR_EACH_ADJ_ATTR(at)
+    {
+        if (af & (1 << at))
+        {
+            s = format(s, "%s ", adj_attr_names[at]);
+        }
+    }
+    return (s);
 }
 
 /**
@@ -102,10 +140,11 @@ format_ip_adjacency (u8 * s, va_list * args)
     adj_index = va_arg (*args, u32);
     fiaf = va_arg (*args, format_ip_adjacency_flags_t);
     adj = adj_get(adj_index);
-  
+
     switch (adj->lookup_next_index)
     {
     case IP_LOOKUP_NEXT_REWRITE:
+    case IP_LOOKUP_NEXT_BCAST:
 	s = format (s, "%U", format_adj_nbr, adj_index, 0);
 	break;
     case IP_LOOKUP_NEXT_ARP:
@@ -123,30 +162,67 @@ format_ip_adjacency (u8 * s, va_list * args)
     case IP_LOOKUP_NEXT_MCAST_MIDCHAIN:
 	s = format (s, "%U", format_adj_mcast_midchain, adj_index, 0);
 	break;
-    default:
-	break;
+    case IP_LOOKUP_NEXT_DROP:
+    case IP_LOOKUP_NEXT_PUNT:
+    case IP_LOOKUP_NEXT_LOCAL:
+    case IP_LOOKUP_NEXT_ICMP_ERROR:
+    case IP_LOOKUP_N_NEXT:
+        break;
     }
 
     if (fiaf & FORMAT_IP_ADJACENCY_DETAIL)
     {
-        adj_delegate_type_t adt;
-        adj_delegate_t *aed;
         vlib_counter_t counts;
 
         vlib_get_combined_counter(&adjacency_counters, adj_index, &counts);
-        s = format (s, "\n counts:[%Ld:%Ld]", counts.packets, counts.bytes);
-	s = format (s, "\n locks:%d", adj->ia_node.fn_locks);
+        s = format (s, "\n   flags:%U", format_adj_flags, adj->ia_flags);
+        s = format (s, "\n   counts:[%Ld:%Ld]", counts.packets, counts.bytes);
+	s = format (s, "\n   locks:%d", adj->ia_node.fn_locks);
 	s = format(s, "\n delegates:\n  ");
-        FOR_EACH_ADJ_DELEGATE(adj, adt, aed,
-        {
-            s = format(s, "  %U\n", format_adj_deletegate, aed);
-        });
+        adj_delegate_format(s, adj);
 
-	s = format(s, "\n children:\n  ");
-	s = fib_node_children_format(adj->ia_node.fn_children, s);
+	s = format(s, "\n children:");
+        if (fib_node_list_get_size(adj->ia_node.fn_children))
+        {
+            s = format(s, "\n  ");
+            s = fib_node_children_format(adj->ia_node.fn_children, s);
+        }
     }
 
     return s;
+}
+
+int
+adj_recursive_loop_detect (adj_index_t ai,
+                           fib_node_index_t **entry_indicies)
+{
+    ip_adjacency_t * adj;
+
+    adj = adj_get(ai);
+
+    switch (adj->lookup_next_index)
+    {
+    case IP_LOOKUP_NEXT_REWRITE:
+    case IP_LOOKUP_NEXT_ARP:
+    case IP_LOOKUP_NEXT_GLEAN:
+    case IP_LOOKUP_NEXT_MCAST:
+    case IP_LOOKUP_NEXT_BCAST:
+    case IP_LOOKUP_NEXT_DROP:
+    case IP_LOOKUP_NEXT_PUNT:
+    case IP_LOOKUP_NEXT_LOCAL:
+    case IP_LOOKUP_NEXT_ICMP_ERROR:
+    case IP_LOOKUP_N_NEXT:
+        /*
+         * these adjcencey types are terminal graph nodes, so there's no
+         * possibility of a loop down here.
+         */
+	break;
+    case IP_LOOKUP_NEXT_MIDCHAIN:
+    case IP_LOOKUP_NEXT_MCAST_MIDCHAIN:
+        return (adj_ndr_midchain_recursive_loop_detect(ai, entry_indicies));
+    }
+
+    return (0);
 }
 
 /*
@@ -162,6 +238,8 @@ adj_last_lock_gone (ip_adjacency_t *adj)
     ASSERT(0 == fib_node_list_get_size(adj->ia_node.fn_children));
     ADJ_DBG(adj, "last-lock-gone");
 
+    adj_delegate_adj_deleted(adj);
+
     vlib_worker_thread_barrier_sync (vm);
 
     switch (adj->lookup_next_index)
@@ -171,6 +249,7 @@ adj_last_lock_gone (ip_adjacency_t *adj)
         /* FALL THROUGH */
     case IP_LOOKUP_NEXT_ARP:
     case IP_LOOKUP_NEXT_REWRITE:
+    case IP_LOOKUP_NEXT_BCAST:
 	/*
 	 * complete and incomplete nbr adjs
 	 */
@@ -206,6 +285,16 @@ adj_last_lock_gone (ip_adjacency_t *adj)
     ASSERT(0 == vec_len(adj->ia_delegates));
     vec_free(adj->ia_delegates);
     pool_put(adj_pool, adj);
+}
+
+u32
+adj_dpo_get_urpf (const dpo_id_t *dpo)
+{
+    ip_adjacency_t *adj;
+
+    adj = adj_get(dpo->dpoi_index);
+
+    return (adj->rewrite_header.sw_if_index);
 }
 
 void
@@ -328,6 +417,28 @@ adj_feature_update (u32 sw_if_index,
     adj_walk (sw_if_index, adj_feature_update_walk_cb, &ctx);
 }
 
+static adj_walk_rc_t
+adj_mtu_update_walk_cb (adj_index_t ai,
+                        void *arg)
+{
+    ip_adjacency_t *adj;
+
+    adj = adj_get(ai);
+
+    vnet_rewrite_update_mtu (vnet_get_main(), adj->ia_link,
+                             &adj->rewrite_header);
+
+    return (ADJ_WALK_RC_CONTINUE);
+}
+
+static void
+adj_mtu_update (vnet_main_t * vnm, u32 sw_if_index, u32 flags)
+{
+  adj_walk (sw_if_index, adj_mtu_update_walk_cb, NULL);
+}
+
+VNET_SW_INTERFACE_MTU_CHANGE_FUNCTION(adj_mtu_update);
+
 /**
  * @brief Walk the Adjacencies on a given interface
  */
@@ -358,7 +469,7 @@ adj_get_link_type (adj_index_t ai)
 
     adj = adj_get(ai);
 
-    return (adj->ia_link); 
+    return (adj->ia_link);
 }
 
 /**
@@ -381,24 +492,7 @@ adj_get_sw_if_index (adj_index_t ai)
 int
 adj_is_up (adj_index_t ai)
 {
-    const adj_delegate_t *aed;
-
-    aed = adj_delegate_get(adj_get(ai), ADJ_DELEGATE_BFD);
-
-    if (NULL == aed)
-    {
-        /*
-         * no BFD tracking - resolved
-         */
-        return (!0);
-    }
-    else
-    {
-        /*
-         * defer to the state of the BFD tracking
-         */
-        return (ADJ_BFD_STATE_UP == aed->ad_bfd_state);
-    }
+    return (adj_bfd_is_up(ai));
 }
 
 /**
@@ -500,7 +594,7 @@ adj_show (vlib_main_t * vm,
 
     if (summary)
     {
-        vlib_cli_output (vm, "Number of adjacenies: %d", pool_elts(adj_pool));
+        vlib_cli_output (vm, "Number of adjacencies: %d", pool_elts(adj_pool));
         vlib_cli_output (vm, "Per-adjacency counters: %s",
                          (adj_are_counters_enabled() ?
                           "enabled":

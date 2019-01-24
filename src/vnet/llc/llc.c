@@ -65,7 +65,7 @@ format_llc_header_with_length (u8 * s, va_list * args)
   llc_header_t *h = va_arg (*args, llc_header_t *);
   u32 max_header_bytes = va_arg (*args, u32);
   llc_protocol_t p = h->dst_sap;
-  uword indent, header_bytes;
+  u32 indent, header_bytes;
 
   header_bytes = llc_header_length (h);
   if (max_header_bytes != 0 && header_bytes > max_header_bytes)
@@ -213,7 +213,7 @@ llc_init (vlib_main_t * vm)
   clib_error_t *error;
   llc_main_t *pm = &llc_main;
 
-  memset (pm, 0, sizeof (pm[0]));
+  clib_memset (pm, 0, sizeof (pm[0]));
   pm->vlib_main = vm;
 
   pm->protocol_info_by_name = hash_create_string (0, sizeof (uword));

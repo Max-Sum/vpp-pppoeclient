@@ -27,82 +27,83 @@
 #define REPLY_MSG_ID_BASE 0
 #endif
 
-#define REPLY_MACRO(t)                                          \
-do {                                                            \
-    unix_shared_memory_queue_t * q;                             \
-    rv = vl_msg_api_pd_handler (mp, rv);                        \
-    q = vl_api_client_index_to_input_queue (mp->client_index);  \
-    if (!q)                                                     \
-        return;                                                 \
-                                                                \
-    rmp = vl_msg_api_alloc (sizeof (*rmp));                     \
-    rmp->_vl_msg_id = htons((t)+(REPLY_MSG_ID_BASE));           \
-    rmp->context = mp->context;                                 \
-    rmp->retval = ntohl(rv);                                    \
-                                                                \
-    vl_msg_api_send_shmem (q, (u8 *)&rmp);                      \
+#define REPLY_MACRO(t)                                                  \
+do {                                                                    \
+    vl_api_registration_t *rp;                                          \
+    rv = vl_msg_api_pd_handler (mp, rv);                                \
+    rp = vl_api_client_index_to_registration (mp->client_index);        \
+    if (rp == 0)                                                        \
+      return;                                                           \
+                                                                        \
+    rmp = vl_msg_api_alloc (sizeof (*rmp));                             \
+    rmp->_vl_msg_id = htons((t)+(REPLY_MSG_ID_BASE));                   \
+    rmp->context = mp->context;                                         \
+    rmp->retval = ntohl(rv);                                            \
+                                                                        \
+    vl_api_send_msg (rp, (u8 *)rmp);                                    \
 } while(0);
 
-#define REPLY_MACRO2(t, body)                                   \
-do {                                                            \
-    unix_shared_memory_queue_t * q;                             \
-    rv = vl_msg_api_pd_handler (mp, rv);                        \
-    q = vl_api_client_index_to_input_queue (mp->client_index);  \
-    if (!q)                                                     \
-        return;                                                 \
-                                                                \
-    rmp = vl_msg_api_alloc (sizeof (*rmp));                     \
-    rmp->_vl_msg_id = htons((t)+(REPLY_MSG_ID_BASE));           \
-    rmp->context = mp->context;                                 \
-    rmp->retval = ntohl(rv);                                    \
-    do {body;} while (0);                                       \
-    vl_msg_api_send_shmem (q, (u8 *)&rmp);                      \
+#define REPLY_MACRO2(t, body)                                           \
+do {                                                                    \
+    vl_api_registration_t *rp;                                          \
+    rv = vl_msg_api_pd_handler (mp, rv);                                \
+    rp = vl_api_client_index_to_registration (mp->client_index);        \
+    if (rp == 0)                                                        \
+      return;                                                           \
+                                                                        \
+    rmp = vl_msg_api_alloc (sizeof (*rmp));                             \
+    rmp->_vl_msg_id = htons((t)+(REPLY_MSG_ID_BASE));                   \
+    rmp->context = mp->context;                                         \
+    rmp->retval = ntohl(rv);                                            \
+    do {body;} while (0);                                               \
+    vl_api_send_msg (rp, (u8 *)rmp);                                    \
 } while(0);
 
-#define REPLY_MACRO3(t, n, body)				\
-do {                                                            \
-    unix_shared_memory_queue_t * q;                             \
-    rv = vl_msg_api_pd_handler (mp, rv);                        \
-    q = vl_api_client_index_to_input_queue (mp->client_index);  \
-    if (!q)                                                     \
-        return;                                                 \
-                                                                \
-    rmp = vl_msg_api_alloc (sizeof (*rmp) + n);                 \
-    rmp->_vl_msg_id = htons((t)+(REPLY_MSG_ID_BASE));           \
-    rmp->context = mp->context;                                 \
-    rmp->retval = ntohl(rv);                                    \
-    do {body;} while (0);                                       \
-    vl_msg_api_send_shmem (q, (u8 *)&rmp);                      \
+#define REPLY_MACRO3(t, n, body)                                        \
+do {                                                                    \
+    vl_api_registration_t *rp;                                          \
+    rv = vl_msg_api_pd_handler (mp, rv);                                \
+    rp = vl_api_client_index_to_registration (mp->client_index);        \
+    if (rp == 0)                                                        \
+      return;                                                           \
+                                                                        \
+    rmp = vl_msg_api_alloc (sizeof (*rmp) + n);                         \
+    rmp->_vl_msg_id = htons((t)+(REPLY_MSG_ID_BASE));                   \
+    rmp->context = mp->context;                                         \
+    rmp->retval = ntohl(rv);                                            \
+    do {body;} while (0);                                               \
+    vl_api_send_msg (rp, (u8 *)rmp);                                    \
 } while(0);
 
-#define REPLY_MACRO4(t, n, body)                                \
-do {                                                            \
-    unix_shared_memory_queue_t * q;                             \
-    u8 is_error = 0;                                            \
-    rv = vl_msg_api_pd_handler (mp, rv);                        \
-    q = vl_api_client_index_to_input_queue (mp->client_index);  \
-    if (!q)                                                     \
-        return;                                                 \
-                                                                \
-    rmp = vl_msg_api_alloc_or_null (sizeof (*rmp) + n);         \
-    if (!rmp)                                                   \
-      {                                                         \
-        /* if there isn't enough memory, try to allocate */     \
-        /* some at least for returning an error */              \
-        rmp = vl_msg_api_alloc (sizeof (*rmp));                 \
-        if (!rmp)                                               \
-          return;                                               \
-                                                                \
-        memset (rmp, 0, sizeof (*rmp));                         \
-        rv = VNET_API_ERROR_TABLE_TOO_BIG;                      \
-        is_error = 1;                                           \
-      }                                                         \
-    rmp->_vl_msg_id = htons((t)+(REPLY_MSG_ID_BASE));           \
-    rmp->context = mp->context;                                 \
-    rmp->retval = ntohl(rv);                                    \
-    if (!is_error)                                              \
-      do {body;} while (0);                                     \
-    vl_msg_api_send_shmem (q, (u8 *)&rmp);                      \
+#define REPLY_MACRO4(t, n, body)                                        \
+do {                                                                    \
+    vl_api_registration_t *rp;                                          \
+    u8 is_error = 0;                                                    \
+    rv = vl_msg_api_pd_handler (mp, rv);                                \
+                                                                        \
+    rp = vl_api_client_index_to_registration (mp->client_index);        \
+    if (rp == 0)                                                        \
+      return;                                                           \
+                                                                        \
+    rmp = vl_msg_api_alloc_or_null (sizeof (*rmp) + n);                 \
+    if (!rmp)                                                           \
+      {                                                                 \
+        /* if there isn't enough memory, try to allocate */             \
+        /* some at least for returning an error */                      \
+        rmp = vl_msg_api_alloc (sizeof (*rmp));                         \
+        if (!rmp)                                                       \
+          return;                                                       \
+                                                                        \
+        clib_memset (rmp, 0, sizeof (*rmp));                                 \
+        rv = VNET_API_ERROR_TABLE_TOO_BIG;                              \
+        is_error = 1;                                                   \
+      }                                                                 \
+    rmp->_vl_msg_id = htons((t)+(REPLY_MSG_ID_BASE));                   \
+    rmp->context = mp->context;                                         \
+    rmp->retval = ntohl(rv);                                            \
+    if (!is_error)                                                      \
+      do {body;} while (0);                                             \
+    vl_api_send_msg (rp, (u8 *)rmp);                                    \
 } while(0);
 
 /* "trust, but verify" */
@@ -114,7 +115,7 @@ vnet_sw_if_index_is_api_valid (u32 sw_if_index)
 }
 
 #define VALIDATE_SW_IF_INDEX(mp)				\
- do { u32 __sw_if_index = ntohl(mp->sw_if_index);		\
+ do { u32 __sw_if_index = ntohl((mp)->sw_if_index);		\
     if (!vnet_sw_if_index_is_api_valid(__sw_if_index)) {        \
         rv = VNET_API_ERROR_INVALID_SW_IF_INDEX;                \
         goto bad_sw_if_index;                                   \
@@ -128,7 +129,7 @@ bad_sw_if_index:                                \
 } while (0);
 
 #define VALIDATE_RX_SW_IF_INDEX(mp)				\
- do { u32 __rx_sw_if_index = ntohl(mp->rx_sw_if_index);		\
+ do { u32 __rx_sw_if_index = ntohl((mp)->rx_sw_if_index);       \
     if (!vnet_sw_if_index_is_api_valid(__rx_sw_if_index)) {     \
         rv = VNET_API_ERROR_INVALID_SW_IF_INDEX;                \
         goto bad_rx_sw_if_index;				\
@@ -182,7 +183,7 @@ static void vl_api_want_##lca##_t_handler (                             \
     p = hash_get (vam->lca##_registration_hash, mp->client_index);      \
     if (p) {                                                            \
         if (mp->enable_disable) {                                       \
-            clib_warning ("pid %d: already enabled...", mp->pid);       \
+	    clib_warning ("pid %d: already enabled...", ntohl(mp->pid)); \
             rv = VNET_API_ERROR_INVALID_REGISTRATION;                   \
             goto reply;                                                 \
         } else {                                                        \
@@ -206,7 +207,25 @@ static void vl_api_want_##lca##_t_handler (                             \
                                                                         \
 reply:                                                                  \
     REPLY_MACRO (VL_API_WANT_##UCA##_REPLY);                            \
-}
+}                                                                       \
+                                                                        \
+static clib_error_t * vl_api_want_##lca##_t_reaper (u32 client_index)   \
+{                                                                       \
+    vpe_api_main_t *vam = &vpe_api_main;                                \
+    vpe_client_registration_t *rp;                                      \
+    uword *p;                                                           \
+                                                                        \
+    p = hash_get (vam->lca##_registration_hash, client_index);          \
+    if (p)                                                              \
+      {                                                                 \
+        rp = pool_elt_at_index (vam->lca##_registrations, p[0]);        \
+        pool_put (vam->lca##_registrations, rp);                        \
+        hash_unset (vam->lca##_registration_hash, client_index);        \
+      }                                                                 \
+    return (NULL);                                                      \
+}                                                                       \
+                                                                        \
+VL_MSG_API_REAPER_FUNCTION (vl_api_want_##lca##_t_reaper);              \
 
 #define foreach_registration_hash               \
 _(interface_events)                             \
@@ -217,7 +236,10 @@ _(from_netconf_client)                          \
 _(oam_events)                                   \
 _(bfd_events)                                   \
 _(wc_ip6_nd_events)                             \
-_(wc_ip4_arp_events)
+_(wc_ip4_arp_events)                            \
+_(ip6_ra_events)                                \
+_(dhcp6_pd_reply_events)                        \
+_(dhcp6_reply_events)
 
 typedef struct
 {

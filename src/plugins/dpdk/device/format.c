@@ -18,7 +18,11 @@
 #include <vlib/unix/cj.h>
 #include <assert.h>
 
+#define __USE_GNU
+#include <dlfcn.h>
+
 #include <vnet/ethernet/ethernet.h>
+#include <vnet/ethernet/sfp.h>
 #include <dpdk/device/dpdk.h>
 
 #include <dpdk/device/dpdk_priv.h>
@@ -42,55 +46,43 @@
   _ (rx_errors, q_errors)
 
 #define foreach_dpdk_rss_hf                    \
+  _(ETH_RSS_IPV4,               "ipv4")        \
   _(ETH_RSS_FRAG_IPV4,          "ipv4-frag")   \
   _(ETH_RSS_NONFRAG_IPV4_TCP,   "ipv4-tcp")    \
   _(ETH_RSS_NONFRAG_IPV4_UDP,   "ipv4-udp")    \
   _(ETH_RSS_NONFRAG_IPV4_SCTP,  "ipv4-sctp")   \
   _(ETH_RSS_NONFRAG_IPV4_OTHER, "ipv4-other")  \
-  _(ETH_RSS_IPV4,               "ipv4")        \
-  _(ETH_RSS_IPV6_TCP_EX,        "ipv6-tcp-ex") \
-  _(ETH_RSS_IPV6_UDP_EX,        "ipv6-udp-ex") \
+  _(ETH_RSS_IPV6,               "ipv6")        \
   _(ETH_RSS_FRAG_IPV6,          "ipv6-frag")   \
   _(ETH_RSS_NONFRAG_IPV6_TCP,   "ipv6-tcp")    \
   _(ETH_RSS_NONFRAG_IPV6_UDP,   "ipv6-udp")    \
   _(ETH_RSS_NONFRAG_IPV6_SCTP,  "ipv6-sctp")   \
   _(ETH_RSS_NONFRAG_IPV6_OTHER, "ipv6-other")  \
+  _(ETH_RSS_IPV6_TCP_EX,        "ipv6-tcp-ex") \
+  _(ETH_RSS_IPV6_UDP_EX,        "ipv6-udp-ex") \
   _(ETH_RSS_L2_PAYLOAD,         "l2-payload")  \
   _(ETH_RSS_IPV6_EX,            "ipv6-ex")     \
-  _(ETH_RSS_IPV6,               "ipv6")
-
-
-#define foreach_dpdk_rx_offload_caps            \
-  _(DEV_RX_OFFLOAD_VLAN_STRIP, "vlan-strip")    \
-  _(DEV_RX_OFFLOAD_IPV4_CKSUM, "ipv4-cksum")    \
-  _(DEV_RX_OFFLOAD_UDP_CKSUM , "udp-cksum")     \
-  _(DEV_RX_OFFLOAD_TCP_CKSUM , "tcp-cksum")     \
-  _(DEV_RX_OFFLOAD_TCP_LRO   , "rcp-lro")       \
-  _(DEV_RX_OFFLOAD_QINQ_STRIP, "qinq-strip")
-
-#define foreach_dpdk_tx_offload_caps           \
-  _(DEV_TX_OFFLOAD_VLAN_INSERT, "vlan-insert") \
-  _(DEV_TX_OFFLOAD_IPV4_CKSUM,  "ipv4-cksum")  \
-  _(DEV_TX_OFFLOAD_UDP_CKSUM  , "udp-cksum")   \
-  _(DEV_TX_OFFLOAD_TCP_CKSUM  , "tcp-cksum")   \
-  _(DEV_TX_OFFLOAD_SCTP_CKSUM , "sctp-cksum")  \
-  _(DEV_TX_OFFLOAD_TCP_TSO    , "tcp-tso")     \
-  _(DEV_TX_OFFLOAD_UDP_TSO    , "udp-tso")     \
-  _(DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM, "outer-ipv4-cksum") \
-  _(DEV_TX_OFFLOAD_QINQ_INSERT, "qinq-insert")
+  _(ETH_RSS_IPV6_TCP_EX,        "ipv6-tcp-ex") \
+  _(ETH_RSS_IPV6_UDP_EX,        "ipv6-udp-ex") \
+  _(ETH_RSS_PORT,               "port")        \
+  _(ETH_RSS_VXLAN,              "vxlan")       \
+  _(ETH_RSS_GENEVE,             "geneve")      \
+  _(ETH_RSS_NVGRE,              "nvgre")
 
 #define foreach_dpdk_pkt_rx_offload_flag                                \
-  _ (PKT_RX_VLAN_PKT, "RX packet is a 802.1q VLAN packet")              \
+  _ (PKT_RX_VLAN, "RX packet is a 802.1q VLAN packet")                  \
   _ (PKT_RX_RSS_HASH, "RX packet with RSS hash result")                 \
   _ (PKT_RX_FDIR, "RX packet with FDIR infos")                          \
   _ (PKT_RX_L4_CKSUM_BAD, "L4 cksum of RX pkt. is not OK")              \
   _ (PKT_RX_IP_CKSUM_BAD, "IP cksum of RX pkt. is not OK")              \
+  _ (PKT_RX_EIP_CKSUM_BAD, "External IP header checksum error")         \
   _ (PKT_RX_VLAN_STRIPPED, "RX packet VLAN tag stripped")               \
   _ (PKT_RX_IP_CKSUM_GOOD, "IP cksum of RX pkt. is valid")              \
   _ (PKT_RX_L4_CKSUM_GOOD, "L4 cksum of RX pkt. is valid")              \
   _ (PKT_RX_IEEE1588_PTP, "RX IEEE1588 L2 Ethernet PT Packet")          \
   _ (PKT_RX_IEEE1588_TMST, "RX IEEE1588 L2/L4 timestamped packet")      \
-  _ (PKT_RX_QINQ_STRIPPED, "RX packet QinQ tags stripped")
+  _ (PKT_RX_QINQ_STRIPPED, "RX packet QinQ tags stripped") \
+  _ (PKT_RX_TIMESTAMP, "Timestamp field is valid")
 
 #define foreach_dpdk_pkt_type                                           \
   _ (L2, ETHER, "Ethernet packet")                                      \
@@ -127,7 +119,7 @@
   _ (INNER_L3, IPV6_EXT_UNKNOWN, "Inner IPv6 packet with or without extension headers") \
   _ (INNER_L4, TCP, "Inner TCP packet")                                 \
   _ (INNER_L4, UDP, "Inner UDP packet")                                 \
-  _ (INNER_L4, FRAG, "Inner fagmented IP packet")                       \
+  _ (INNER_L4, FRAG, "Inner fragmented IP packet")                       \
   _ (INNER_L4, SCTP, "Inner SCTP (Stream Control Transmission Protocol) packet") \
   _ (INNER_L4, ICMP, "Inner ICMP packet")                               \
   _ (INNER_L4, NONFRAG, "Inner non-fragmented IP packet")
@@ -160,22 +152,39 @@ format_dpdk_device_name (u8 * s, va_list * args)
   char *devname_format;
   char *device_name;
   u32 i = va_arg (*args, u32);
+  dpdk_device_t *xd = vec_elt_at_index (dm->devices, i);
   struct rte_eth_dev_info dev_info;
+  struct rte_pci_device *pci_dev;
   u8 *ret;
+
+  if (xd->name)
+    return format (s, "%s", xd->name);
 
   if (dm->conf->interface_name_format_decimal)
     devname_format = "%s%d/%d/%d";
   else
     devname_format = "%s%x/%x/%x";
 
-  switch (dm->devices[i].port_type)
+  switch (xd->port_type)
     {
     case VNET_DPDK_PORT_TYPE_ETH_1G:
       device_name = "GigabitEthernet";
       break;
 
+    case VNET_DPDK_PORT_TYPE_ETH_2_5G:
+      device_name = "Two_FiveGigabitEthernet";
+      break;
+
+    case VNET_DPDK_PORT_TYPE_ETH_5G:
+      device_name = "FiveGigabitEthernet";
+      break;
+
     case VNET_DPDK_PORT_TYPE_ETH_10G:
       device_name = "TenGigabitEthernet";
+      break;
+
+    case VNET_DPDK_PORT_TYPE_ETH_20G:
+      device_name = "TwentyGigabitEthernet";
       break;
 
     case VNET_DPDK_PORT_TYPE_ETH_25G:
@@ -190,12 +199,16 @@ format_dpdk_device_name (u8 * s, va_list * args)
       device_name = "FiftyGigabitEthernet";
       break;
 
+    case VNET_DPDK_PORT_TYPE_ETH_56G:
+      device_name = "FiftySixGigabitEthernet";
+      break;
+
     case VNET_DPDK_PORT_TYPE_ETH_100G:
       device_name = "HundredGigabitEthernet";
       break;
 
     case VNET_DPDK_PORT_TYPE_ETH_BOND:
-      return format (s, "BondEthernet%d", dm->devices[i].port_id);
+      return format (s, "BondEthernet%d", xd->bond_instance_num);
 
     case VNET_DPDK_PORT_TYPE_ETH_SWITCH:
       device_name = "EthernetSwitch";
@@ -206,8 +219,7 @@ format_dpdk_device_name (u8 * s, va_list * args)
       break;
 
     case VNET_DPDK_PORT_TYPE_AF_PACKET:
-      rte_eth_dev_info_get (i, &dev_info);
-      return format (s, "af_packet%d", dm->devices[i].port_id);
+      return format (s, "af_packet%d", xd->af_packet_instance_num);
 
     case VNET_DPDK_PORT_TYPE_VIRTIO_USER:
       device_name = "VirtioUser";
@@ -217,24 +229,43 @@ format_dpdk_device_name (u8 * s, va_list * args)
       device_name = "VhostEthernet";
       break;
 
+    case VNET_DPDK_PORT_TYPE_FAILSAFE:
+      device_name = "FailsafeEthernet";
+      break;
+
     default:
     case VNET_DPDK_PORT_TYPE_UNKNOWN:
       device_name = "UnknownEthernet";
       break;
     }
 
-  rte_eth_dev_info_get (i, &dev_info);
+  rte_eth_dev_info_get (xd->port_id, &dev_info);
+  pci_dev = dpdk_get_pci_device (&dev_info);
 
-  if (dev_info.pci_dev)
-    ret = format (s, devname_format, device_name, dev_info.pci_dev->addr.bus,
-		  dev_info.pci_dev->addr.devid,
-		  dev_info.pci_dev->addr.function);
+  if (pci_dev && xd->port_type != VNET_DPDK_PORT_TYPE_FAILSAFE)
+    ret = format (s, devname_format, device_name, pci_dev->addr.bus,
+		  pci_dev->addr.devid, pci_dev->addr.function);
   else
-    ret = format (s, "%s%d", device_name, dm->devices[i].device_index);
+    ret = format (s, "%s%d", device_name, xd->port_id);
 
-  if (dm->devices[i].interface_name_suffix)
-    return format (ret, "/%s", dm->devices[i].interface_name_suffix);
+  if (xd->interface_name_suffix)
+    return format (ret, "/%s", xd->interface_name_suffix);
   return ret;
+}
+
+u8 *
+format_dpdk_device_flags (u8 * s, va_list * args)
+{
+  dpdk_device_t *xd = va_arg (*args, dpdk_device_t *);
+  u8 *t = 0;
+
+#define _(a, b, c) if (xd->flags & (1 << a)) \
+t = format (t, "%s%s", t ? " ":"", c);
+  foreach_dpdk_device_flags
+#undef _
+    s = format (s, "%v", t);
+  vec_free (t);
+  return s;
 }
 
 static u8 *
@@ -326,6 +357,26 @@ format_dpdk_device_type (u8 * s, va_list * args)
       dev_type = "VhostEthernet";
       break;
 
+    case VNET_DPDK_PMD_ENA:
+      dev_type = "AWS ENA VF";
+      break;
+
+    case VNET_DPDK_PMD_FAILSAFE:
+      dev_type = "FailsafeEthernet";
+      break;
+
+    case VNET_DPDK_PMD_LIOVF_ETHER:
+      dev_type = "Cavium Lio VF";
+      break;
+
+    case VNET_DPDK_PMD_QEDE:
+      dev_type = "Cavium QLogic FastLinQ QL4xxxx";
+      break;
+
+    case VNET_DPDK_PMD_NETVSC:
+      dev_type = "Microsoft Hyper-V Netvsc";
+      break;
+
     default:
     case VNET_DPDK_PMD_UNKNOWN:
       dev_type = "### UNKNOWN ###";
@@ -346,12 +397,12 @@ format_dpdk_link_status (u8 * s, va_list * args)
   s = format (s, "%s ", l->link_status ? "up" : "down");
   if (l->link_status)
     {
-      u32 promisc = rte_eth_promiscuous_get (xd->device_index);
+      u32 promisc = rte_eth_promiscuous_get (xd->port_id);
 
       s = format (s, "%s duplex ", (l->link_duplex == ETH_LINK_FULL_DUPLEX) ?
 		  "full" : "half");
-      s = format (s, "speed %u mtu %d %s\n", l->link_speed,
-		  hi->max_packet_bytes, promisc ? " promisc" : "");
+      s = format (s, "mtu %d %s\n", hi->max_packet_bytes, promisc ?
+		  " promisc" : "");
     }
   else
     s = format (s, "\n");
@@ -359,22 +410,18 @@ format_dpdk_link_status (u8 * s, va_list * args)
   return s;
 }
 
-#define _line_len 72
 #define _(v, str)                                            \
 if (bitmap & v) {                                            \
-  if (format_get_indent (s) > next_split ) {                 \
-    next_split += _line_len;                                 \
+  if (format_get_indent (s) > 72)                            \
     s = format(s,"\n%U", format_white_space, indent);        \
-  }                                                          \
   s = format(s, "%s ", str);                                 \
 }
 
-static u8 *
+u8 *
 format_dpdk_rss_hf_name (u8 * s, va_list * args)
 {
   u64 bitmap = va_arg (*args, u64);
-  int next_split = _line_len;
-  int indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
 
   if (!bitmap)
     return format (s, "none");
@@ -382,32 +429,80 @@ format_dpdk_rss_hf_name (u8 * s, va_list * args)
   foreach_dpdk_rss_hf return s;
 }
 
+#undef _
+
+/* Convert to all lower case e.g "VLAN_STRIP" -> "vlan-strip"
+   Works for both vector names and null terminated c strings. */
 static u8 *
+format_offload (u8 * s, va_list * va)
+{
+  u8 *id = va_arg (*va, u8 *);
+  uword i, l;
+
+  l = ~0;
+  if (clib_mem_is_vec (id))
+    l = vec_len (id);
+
+  if (id)
+    for (i = 0; id[i] != 0 && i < l; i++)
+      {
+	u8 c = id[i];
+
+	if (c == '_')
+	  c = '-';
+	else
+	  c = tolower (c);
+	vec_add1 (s, c);
+      }
+
+  return s;
+}
+
+#define _(v, func)                                           \
+if (bitmap & v) {                                            \
+  if (format_get_indent (s) > 72)                            \
+    s = format(s,"\n%U", format_white_space, indent);        \
+  s = format(s, "%U ", format_offload, func (v));	     \
+}
+
+u8 *
 format_dpdk_rx_offload_caps (u8 * s, va_list * args)
 {
-  u32 bitmap = va_arg (*args, u32);
-  int next_split = _line_len;
-  int indent = format_get_indent (s);
+  u64 bitmap = va_arg (*args, u32);
+  u32 indent = format_get_indent (s);
+  uword i;
 
   if (!bitmap)
     return format (s, "none");
 
-  foreach_dpdk_rx_offload_caps return s;
+  for (i = 0; i < 64; i++)
+    {
+      u64 mask = (u64) 1 << i;
+
+      _(mask, rte_eth_dev_rx_offload_name);
+    }
+  return s;
 }
 
-static u8 *
+u8 *
 format_dpdk_tx_offload_caps (u8 * s, va_list * args)
 {
-  u32 bitmap = va_arg (*args, u32);
-  int next_split = _line_len;
-  int indent = format_get_indent (s);
+  u64 bitmap = va_arg (*args, u32);
+  u32 indent = format_get_indent (s);
+  uword i;
+
   if (!bitmap)
     return format (s, "none");
 
-  foreach_dpdk_tx_offload_caps return s;
+  for (i = 0; i < 64; i++)
+    {
+      u64 mask = (u64) 1 << i;
+
+      _(mask, rte_eth_dev_tx_offload_name);
+    }
+  return s;
 }
 
-#undef _line_len
 #undef _
 
 u8 *
@@ -415,13 +510,49 @@ format_dpdk_device_errors (u8 * s, va_list * args)
 {
   dpdk_device_t *xd = va_arg (*args, dpdk_device_t *);
   clib_error_t *e;
-  uword indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
 
   vec_foreach (e, xd->errors)
   {
     s = format (s, "%U%v\n", format_white_space, indent, e->what);
   }
   return s;
+}
+
+static u8 *
+format_dpdk_device_module_info (u8 * s, va_list * args)
+{
+  dpdk_device_t *xd = va_arg (*args, dpdk_device_t *);
+  struct rte_eth_dev_module_info mi = { 0 };
+  struct rte_dev_eeprom_info ei = { 0 };
+
+  if (rte_eth_dev_get_module_info (xd->port_id, &mi) != 0)
+    return format (s, "unknown");
+
+  ei.length = mi.eeprom_len;
+  ei.data = clib_mem_alloc (mi.eeprom_len);
+
+  if (rte_eth_dev_get_module_eeprom (xd->port_id, &ei) == 0)
+    {
+      s = format (s, "%U", format_sfp_eeprom, ei.data +
+		  (mi.type == RTE_ETH_MODULE_SFF_8436 ? 0x80 : 0));
+    }
+  else
+    s = format (s, "eeprom read error");
+
+  clib_mem_free (ei.data);
+  return s;
+}
+
+static const char *
+ptr2sname (void *p)
+{
+  Dl_info info = { 0 };
+
+  if (dladdr (p, &info) == 0)
+    return 0;
+
+  return info.dli_sname;
 }
 
 u8 *
@@ -431,20 +562,31 @@ format_dpdk_device (u8 * s, va_list * args)
   int verbose = va_arg (*args, int);
   dpdk_main_t *dm = &dpdk_main;
   dpdk_device_t *xd = vec_elt_at_index (dm->devices, dev_instance);
-  uword indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
   f64 now = vlib_time_now (dm->vlib_main);
   struct rte_eth_dev_info di;
 
   dpdk_update_counters (xd, now);
   dpdk_update_link_state (xd, now);
+  rte_eth_dev_info_get (xd->port_id, &di);
 
   s = format (s, "%U\n%Ucarrier %U",
-	      format_dpdk_device_type, xd->device_index,
+	      format_dpdk_device_type, dev_instance,
 	      format_white_space, indent + 2, format_dpdk_link_status, xd);
+  s = format (s, "%Uflags: %U\n",
+	      format_white_space, indent + 2, format_dpdk_device_flags, xd);
+  s = format (s, "%Urx: queues %d (max %d), desc %d "
+	      "(min %d max %d align %d)\n",
+	      format_white_space, indent + 2, xd->rx_q_used, di.max_rx_queues,
+	      xd->nb_rx_desc, di.rx_desc_lim.nb_min, di.rx_desc_lim.nb_max,
+	      di.rx_desc_lim.nb_align);
+  s = format (s, "%Utx: queues %d (max %d), desc %d "
+	      "(min %d max %d align %d)\n",
+	      format_white_space, indent + 2, xd->tx_q_used, di.max_tx_queues,
+	      xd->nb_tx_desc, di.tx_desc_lim.nb_min, di.tx_desc_lim.nb_max,
+	      di.tx_desc_lim.nb_align);
 
-  rte_eth_dev_info_get (xd->device_index, &di);
-
-  if (verbose > 1 && xd->flags & DPDK_DEVICE_FLAG_PMD)
+  if (xd->flags & DPDK_DEVICE_FLAG_PMD)
     {
       struct rte_pci_device *pci;
       struct rte_eth_rss_conf rss_conf;
@@ -452,65 +594,75 @@ format_dpdk_device (u8 * s, va_list * args)
       int retval;
 
       rss_conf.rss_key = 0;
-      retval = rte_eth_dev_rss_hash_conf_get (xd->device_index, &rss_conf);
+      rss_conf.rss_hf = 0;
+      retval = rte_eth_dev_rss_hash_conf_get (xd->port_id, &rss_conf);
       if (retval < 0)
 	clib_warning ("rte_eth_dev_rss_hash_conf_get returned %d", retval);
-      pci = di.pci_dev;
+
+      pci = dpdk_get_pci_device (&di);
 
       if (pci)
-	s =
-	  format (s,
-		  "%Upci id:            device %04x:%04x subsystem %04x:%04x\n"
-		  "%Upci address:       %04x:%02x:%02x.%02x\n",
-		  format_white_space, indent + 2, pci->id.vendor_id,
-		  pci->id.device_id, pci->id.subsystem_vendor_id,
-		  pci->id.subsystem_device_id, format_white_space, indent + 2,
-		  pci->addr.domain, pci->addr.bus, pci->addr.devid,
-		  pci->addr.function);
-      s =
-	format (s, "%Umax rx packet len: %d\n", format_white_space,
-		indent + 2, di.max_rx_pktlen);
-      s =
-	format (s, "%Umax num of queues: rx %d tx %d\n", format_white_space,
-		indent + 2, di.max_rx_queues, di.max_tx_queues);
-      s =
-	format (s, "%Upromiscuous:       unicast %s all-multicast %s\n",
-		format_white_space, indent + 2,
-		rte_eth_promiscuous_get (xd->device_index) ? "on" : "off",
-		rte_eth_allmulticast_get (xd->device_index) ? "on" : "off");
-      vlan_off = rte_eth_dev_get_vlan_offload (xd->device_index);
-      s = format (s, "%Uvlan offload:      strip %s filter %s qinq %s\n",
+	{
+	  u8 *s2;
+	  if (xd->cpu_socket > -1)
+	    s2 = format (0, "%d", xd->cpu_socket);
+	  else
+	    s2 = format (0, "unknown");
+	  s = format (s, "%Upci: device %04x:%04x subsystem %04x:%04x "
+		      "address %04x:%02x:%02x.%02x numa %v\n",
+		      format_white_space, indent + 2, pci->id.vendor_id,
+		      pci->id.device_id, pci->id.subsystem_vendor_id,
+		      pci->id.subsystem_device_id, pci->addr.domain,
+		      pci->addr.bus, pci->addr.devid, pci->addr.function, s2);
+	  vec_free (s2);
+	}
+
+      s = format (s, "%Umodule: %U\n", format_white_space, indent + 2,
+		  format_dpdk_device_module_info, xd);
+
+      s = format (s, "%Umax rx packet len: %d\n", format_white_space,
+		  indent + 2, di.max_rx_pktlen);
+      s = format (s, "%Upromiscuous: unicast %s all-multicast %s\n",
+		  format_white_space, indent + 2,
+		  rte_eth_promiscuous_get (xd->port_id) ? "on" : "off",
+		  rte_eth_allmulticast_get (xd->port_id) ? "on" : "off");
+      vlan_off = rte_eth_dev_get_vlan_offload (xd->port_id);
+      s = format (s, "%Uvlan offload: strip %s filter %s qinq %s\n",
 		  format_white_space, indent + 2,
 		  vlan_off & ETH_VLAN_STRIP_OFFLOAD ? "on" : "off",
 		  vlan_off & ETH_VLAN_FILTER_OFFLOAD ? "on" : "off",
 		  vlan_off & ETH_VLAN_EXTEND_OFFLOAD ? "on" : "off");
-      s = format (s, "%Urx offload caps:   %U\n",
+      s = format (s, "%Urx offload avail:  %U\n",
 		  format_white_space, indent + 2,
 		  format_dpdk_rx_offload_caps, di.rx_offload_capa);
-      s = format (s, "%Utx offload caps:   %U\n",
+      s = format (s, "%Urx offload active: %U\n",
+		  format_white_space, indent + 2,
+		  format_dpdk_rx_offload_caps, xd->port_conf.rxmode.offloads);
+      s = format (s, "%Utx offload avail:  %U\n",
 		  format_white_space, indent + 2,
 		  format_dpdk_tx_offload_caps, di.tx_offload_capa);
-      s = format (s, "%Urss active:        %U\n"
-		  "%Urss supported:     %U\n",
+      s = format (s, "%Utx offload active: %U\n",
 		  format_white_space, indent + 2,
-		  format_dpdk_rss_hf_name, rss_conf.rss_hf,
+		  format_dpdk_tx_offload_caps, xd->port_conf.txmode.offloads);
+      s = format (s, "%Urss avail:         %U\n"
+		  "%Urss active:        %U\n",
 		  format_white_space, indent + 2,
-		  format_dpdk_rss_hf_name, di.flow_type_rss_offloads);
+		  format_dpdk_rss_hf_name, di.flow_type_rss_offloads,
+		  format_white_space, indent + 2,
+		  format_dpdk_rss_hf_name, rss_conf.rss_hf);
+      s = format (s, "%Utx burst function: %s\n",
+		  format_white_space, indent + 2,
+		  ptr2sname (rte_eth_devices[xd->port_id].tx_pkt_burst));
+      s = format (s, "%Urx burst function: %s\n",
+		  format_white_space, indent + 2,
+		  ptr2sname (rte_eth_devices[xd->port_id].rx_pkt_burst));
     }
-
-  s = format (s, "%Urx queues %d, rx desc %d, tx queues %d, tx desc %d\n",
-	      format_white_space, indent + 2,
-	      xd->rx_q_used, xd->nb_rx_desc, xd->tx_q_used, xd->nb_tx_desc);
-
-  if (xd->cpu_socket > -1)
-    s = format (s, "%Ucpu socket %d\n",
-		format_white_space, indent + 2, xd->cpu_socket);
 
   /* $$$ MIB counters  */
   {
 #define _(N, V)							\
     if ((xd->stats.V - xd->last_cleared_stats.V) != 0) {       \
-      s = format (s, "\n%U%-40U%16Ld",                         \
+      s = format (s, "\n%U%-40U%16Lu",                         \
                   format_white_space, indent + 2,              \
                   format_c_identifier, #N,                     \
                   xd->stats.V - xd->last_cleared_stats.V);     \
@@ -524,9 +676,9 @@ format_dpdk_device (u8 * s, va_list * args)
   u32 i = 0;
   struct rte_eth_xstat *xstat, *last_xstat;
   struct rte_eth_xstat_name *xstat_names = 0;
-  int len = rte_eth_xstats_get_names (xd->device_index, NULL, 0);
+  int len = rte_eth_xstats_get_names (xd->port_id, NULL, 0);
   vec_validate (xstat_names, len - 1);
-  rte_eth_xstats_get_names (xd->device_index, xstat_names, len);
+  rte_eth_xstats_get_names (xd->port_id, xstat_names, len);
 
   ASSERT (vec_len (xd->xstats) == vec_len (xd->last_cleared_xstats));
 
@@ -542,7 +694,7 @@ format_dpdk_device (u8 * s, va_list * args)
         {
           /* format_c_identifier doesn't like c strings inside vector */
           u8 * name = format(0,"%s", xstat_names[i].name);
-          xs = format(xs, "\n%U%-38U%16Ld",
+          xs = format(xs, "\n%U%-38U%16Lu",
                       format_white_space, indent + 4,
                       format_c_identifier, name, delta);
           vec_free(name);
@@ -569,23 +721,27 @@ format_dpdk_device (u8 * s, va_list * args)
 }
 
 u8 *
-format_dpdk_tx_dma_trace (u8 * s, va_list * va)
+format_dpdk_tx_trace (u8 * s, va_list * va)
 {
   CLIB_UNUSED (vlib_main_t * vm) = va_arg (*va, vlib_main_t *);
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*va, vlib_node_t *);
   CLIB_UNUSED (vnet_main_t * vnm) = vnet_get_main ();
-  dpdk_tx_dma_trace_t *t = va_arg (*va, dpdk_tx_dma_trace_t *);
+  dpdk_tx_trace_t *t = va_arg (*va, dpdk_tx_trace_t *);
   dpdk_main_t *dm = &dpdk_main;
   dpdk_device_t *xd = vec_elt_at_index (dm->devices, t->device_index);
-  uword indent = format_get_indent (s);
-  vnet_sw_interface_t *sw = vnet_get_sw_interface (vnm, xd->vlib_sw_if_index);
+  u32 indent = format_get_indent (s);
+  vnet_sw_interface_t *sw = vnet_get_sw_interface (vnm, xd->sw_if_index);
 
   s = format (s, "%U tx queue %d",
 	      format_vnet_sw_interface_name, vnm, sw, t->queue_index);
 
   s = format (s, "\n%Ubuffer 0x%x: %U",
 	      format_white_space, indent,
-	      t->buffer_index, format_vlib_buffer, &t->buffer);
+	      t->buffer_index, format_vnet_buffer, &t->buffer);
+
+  s = format (s, "\n%U%U",
+	      format_white_space, indent,
+	      format_dpdk_rte_mbuf, &t->mb, &t->data);
 
   s = format (s, "\n%U%U", format_white_space, indent,
 	      format_ethernet_header_with_length, t->buffer.pre_data,
@@ -595,24 +751,24 @@ format_dpdk_tx_dma_trace (u8 * s, va_list * va)
 }
 
 u8 *
-format_dpdk_rx_dma_trace (u8 * s, va_list * va)
+format_dpdk_rx_trace (u8 * s, va_list * va)
 {
   CLIB_UNUSED (vlib_main_t * vm) = va_arg (*va, vlib_main_t *);
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*va, vlib_node_t *);
   CLIB_UNUSED (vnet_main_t * vnm) = vnet_get_main ();
-  dpdk_rx_dma_trace_t *t = va_arg (*va, dpdk_rx_dma_trace_t *);
+  dpdk_rx_trace_t *t = va_arg (*va, dpdk_rx_trace_t *);
   dpdk_main_t *dm = &dpdk_main;
   dpdk_device_t *xd = vec_elt_at_index (dm->devices, t->device_index);
   format_function_t *f;
-  uword indent = format_get_indent (s);
-  vnet_sw_interface_t *sw = vnet_get_sw_interface (vnm, xd->vlib_sw_if_index);
+  u32 indent = format_get_indent (s);
+  vnet_sw_interface_t *sw = vnet_get_sw_interface (vnm, xd->sw_if_index);
 
   s = format (s, "%U rx queue %d",
 	      format_vnet_sw_interface_name, vnm, sw, t->queue_index);
 
   s = format (s, "\n%Ubuffer 0x%x: %U",
 	      format_white_space, indent,
-	      t->buffer_index, format_vlib_buffer, &t->buffer);
+	      t->buffer_index, format_vnet_buffer, &t->buffer);
 
   s = format (s, "\n%U%U",
 	      format_white_space, indent,
@@ -641,7 +797,7 @@ static inline u8 *
 format_dpdk_pkt_types (u8 * s, va_list * va)
 {
   u32 *pkt_types = va_arg (*va, u32 *);
-  uword indent __attribute__ ((unused)) = format_get_indent (s) + 2;
+  u32 indent __attribute__ ((unused)) = format_get_indent (s) + 2;
 
   if (!*pkt_types)
     return s;
@@ -664,7 +820,7 @@ static inline u8 *
 format_dpdk_pkt_offload_flags (u8 * s, va_list * va)
 {
   u64 *ol_flags = va_arg (*va, u64 *);
-  uword indent = format_get_indent (s) + 2;
+  u32 indent = format_get_indent (s) + 2;
 
   if (!*ol_flags)
     return s;
@@ -709,21 +865,25 @@ format_dpdk_rte_mbuf (u8 * s, va_list * va)
 {
   struct rte_mbuf *mb = va_arg (*va, struct rte_mbuf *);
   ethernet_header_t *eth_hdr = va_arg (*va, ethernet_header_t *);
-  uword indent = format_get_indent (s) + 2;
+  u32 indent = format_get_indent (s) + 2;
 
   s = format (s, "PKT MBUF: port %d, nb_segs %d, pkt_len %d"
-	      "\n%Ubuf_len %d, data_len %d, ol_flags 0x%x, data_off %d, phys_addr 0x%x"
-	      "\n%Upacket_type 0x%x",
+	      "\n%Ubuf_len %d, data_len %d, ol_flags 0x%lx, data_off %d, phys_addr 0x%x"
+	      "\n%Upacket_type 0x%x l2_len %u l3_len %u outer_l2_len %u outer_l3_len %u"
+	      "\n%Urss 0x%x fdir.hi 0x%x fdir.lo 0x%x",
 	      mb->port, mb->nb_segs, mb->pkt_len,
 	      format_white_space, indent,
 	      mb->buf_len, mb->data_len, mb->ol_flags, mb->data_off,
-	      mb->buf_physaddr, format_white_space, indent, mb->packet_type);
+	      mb->buf_physaddr, format_white_space, indent, mb->packet_type,
+	      mb->l2_len, mb->l3_len, mb->outer_l2_len, mb->outer_l3_len,
+	      format_white_space, indent, mb->hash.rss, mb->hash.fdir.hi,
+	      mb->hash.fdir.lo);
 
   if (mb->ol_flags)
     s = format (s, "\n%U%U", format_white_space, indent,
 		format_dpdk_pkt_offload_flags, &mb->ol_flags);
 
-  if ((mb->ol_flags & PKT_RX_VLAN_PKT) &&
+  if ((mb->ol_flags & PKT_RX_VLAN) &&
       ((mb->ol_flags & (PKT_RX_VLAN_STRIPPED | PKT_RX_QINQ_STRIPPED)) == 0))
     {
       ethernet_vlan_header_tv_t *vlan_hdr =

@@ -100,11 +100,11 @@ format_pg_output_trace (u8 * s, va_list * va)
   CLIB_UNUSED (vlib_main_t * vm) = va_arg (*va, vlib_main_t *);
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*va, vlib_node_t *);
   pg_output_trace_t *t = va_arg (*va, pg_output_trace_t *);
-  uword indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
 
   s = format (s, "%Ubuffer 0x%x: %U",
 	      format_white_space, indent,
-	      t->buffer_index, format_vlib_buffer, &t->buffer);
+	      t->buffer_index, format_vnet_buffer, &t->buffer);
 
   s = format (s, "\n%U%U", format_white_space, indent,
 	      format_ethernet_header_with_length, t->buffer.pre_data,
@@ -205,7 +205,7 @@ pg_interface_add_or_get (pg_main_t * pg, uword if_id)
 
       rnd = (u32) (now * 1e6);
       rnd = random_u32 (&rnd);
-      clib_memcpy (hw_addr + 2, &rnd, sizeof (rnd));
+      clib_memcpy_fast (hw_addr + 2, &rnd, sizeof (rnd));
       hw_addr[0] = 2;
       hw_addr[1] = 0xfe;
 
@@ -333,10 +333,10 @@ pg_edit_group_get_fixed_packet_data (pg_stream_t * s,
 
   vec_foreach (e, g->edits) do_edit (s, g, e, /* want_commit */ 0);
 
-  clib_memcpy (packet_data, g->fixed_packet_data,
-	       vec_len (g->fixed_packet_data));
-  clib_memcpy (packet_data_mask, g->fixed_packet_data_mask,
-	       vec_len (g->fixed_packet_data_mask));
+  clib_memcpy_fast (packet_data, g->fixed_packet_data,
+		    vec_len (g->fixed_packet_data));
+  clib_memcpy_fast (packet_data_mask, g->fixed_packet_data_mask,
+		    vec_len (g->fixed_packet_data_mask));
 }
 
 static void
@@ -435,30 +435,13 @@ pg_stream_add (pg_main_t * pg, pg_stream_t * s_init)
   s->last_increment_packet_size = s->min_packet_bytes;
 
   {
-    pg_buffer_index_t *bi;
     int n;
 
-    if (vm->buffer_main->callbacks_registered)
-      s->buffer_bytes = VLIB_BUFFER_DATA_SIZE;
-
-    if (!s->buffer_bytes)
-      s->buffer_bytes = s->max_packet_bytes;
-
-    s->buffer_bytes = vlib_buffer_round_size (s->buffer_bytes);
-
+    s->buffer_bytes = VLIB_BUFFER_DATA_SIZE;
     n = s->max_packet_bytes / s->buffer_bytes;
     n += (s->max_packet_bytes % s->buffer_bytes) != 0;
 
     vec_resize (s->buffer_indices, n);
-
-    vec_foreach (bi, s->buffer_indices)
-    {
-      bi->free_list_index =
-	vlib_buffer_create_free_list (vm, s->buffer_bytes,
-				      "pg stream %d buffer #%d",
-				      s - pg->streams,
-				      1 + (bi - s->buffer_indices));
-    }
   }
 
   /* Find an interface to use. */
@@ -483,7 +466,6 @@ pg_stream_add (pg_main_t * pg, pg_stream_t * s_init)
 void
 pg_stream_del (pg_main_t * pg, uword index)
 {
-  vlib_main_t *vm = vlib_get_main ();
   pg_stream_t *s;
   pg_buffer_index_t *bi;
 
@@ -494,12 +476,36 @@ pg_stream_del (pg_main_t * pg, uword index)
 
   vec_foreach (bi, s->buffer_indices)
   {
-    vlib_buffer_delete_free_list (vm, bi->free_list_index);
     clib_fifo_free (bi->buffer_fifo);
   }
 
   pg_stream_free (s);
   pool_put (pg->streams, s);
+}
+
+void
+pg_stream_change (pg_main_t * pg, pg_stream_t * s)
+{
+  /* Determine packet size. */
+  switch (s->packet_size_edit_type)
+    {
+    case PG_EDIT_INCREMENT:
+    case PG_EDIT_RANDOM:
+      if (s->min_packet_bytes == s->max_packet_bytes)
+	s->packet_size_edit_type = PG_EDIT_FIXED;
+    case PG_EDIT_FIXED:
+      break;
+
+    default:
+      /* Get packet size from fixed edits. */
+      s->packet_size_edit_type = PG_EDIT_FIXED;
+      if (!s->replay_packet_templates)
+	s->min_packet_bytes = s->max_packet_bytes =
+	  vec_len (s->fixed_packet_data);
+      break;
+    }
+
+  s->last_increment_packet_size = s->min_packet_bytes;
 }
 
 

@@ -42,6 +42,7 @@
 #include <vnet/pg/pg.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/l2/l2_input.h>
+#include <vnet/l2/l2_bd.h>
 #include <vnet/adj/adj.h>
 
 /**
@@ -91,7 +92,8 @@ ethernet_build_rewrite (vnet_main_t * vnm,
   u8 *rewrite = NULL;
   u8 is_p2p = 0;
 
-  if (sub_sw->type == VNET_SW_INTERFACE_TYPE_P2P)
+  if ((sub_sw->type == VNET_SW_INTERFACE_TYPE_P2P) ||
+      (sub_sw->type == VNET_SW_INTERFACE_TYPE_PIPE))
     is_p2p = 1;
   if (sub_sw != sup_sw)
     {
@@ -150,7 +152,7 @@ ethernet_build_rewrite (vnet_main_t * vnm,
       if (dst_address)
 	clib_memcpy (h->dst_address, dst_address, sizeof (h->dst_address));
       else
-	memset (h->dst_address, ~0, sizeof (h->dst_address));	/* broadcast */
+	clib_memset (h->dst_address, ~0, sizeof (h->dst_address));	/* broadcast */
     }
 
   if (PREDICT_FALSE (!is_p2p) && sub_sw->sub.eth.flags.one_tag)
@@ -197,7 +199,8 @@ ethernet_update_adjacency (vnet_main_t * vnm, u32 sw_if_index, u32 ai)
   adj = adj_get (ai);
 
   vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, sw_if_index);
-  if (si->type == VNET_SW_INTERFACE_TYPE_P2P)
+  if ((si->type == VNET_SW_INTERFACE_TYPE_P2P) ||
+      (si->type == VNET_SW_INTERFACE_TYPE_PIPE))
     {
       default_update_adjacency (vnm, sw_if_index, ai);
     }
@@ -216,7 +219,8 @@ ethernet_update_adjacency (vnet_main_t * vnm, u32 sw_if_index, u32 ai)
 }
 
 static clib_error_t *
-ethernet_mac_change (vnet_hw_interface_t * hi, char *mac_address)
+ethernet_mac_change (vnet_hw_interface_t * hi,
+		     const u8 * old_address, const u8 * mac_address)
 {
   ethernet_interface_t *ei;
   ethernet_main_t *em;
@@ -300,14 +304,11 @@ ethernet_register_interface (vnet_main_t * vnm,
     ETHERNET_MIN_PACKET_BYTES;
   hi->max_packet_bytes = hi->max_supported_packet_bytes =
     ETHERNET_MAX_PACKET_BYTES;
-  hi->per_packet_overhead_bytes =
-    /* preamble */ 8 + /* inter frame gap */ 12;
 
   /* Standard default ethernet MTU. */
-  hi->max_l3_packet_bytes[VLIB_RX] = hi->max_l3_packet_bytes[VLIB_TX] = 9000;
+  vnet_sw_interface_set_mtu (vnm, hi->sw_if_index, 9000);
 
   clib_memcpy (ei->address, address, sizeof (ei->address));
-  vec_free (hi->hw_address);
   vec_add (hi->hw_address, address, sizeof (ei->address));
 
   if (error)
@@ -341,9 +342,11 @@ ethernet_delete_interface (vnet_main_t * vnm, u32 hw_if_index)
 	  if (vlan_table->vlans[idx].qinqs)
 	    {
 	      pool_put_index (em->qinq_pool, vlan_table->vlans[idx].qinqs);
+	      vlan_table->vlans[idx].qinqs = 0;
 	    }
 	}
       pool_put_index (em->vlan_pool, main_intf->dot1q_vlans);
+      main_intf->dot1q_vlans = 0;
     }
   if (main_intf->dot1ad_vlans)
     {
@@ -353,9 +356,11 @@ ethernet_delete_interface (vnet_main_t * vnm, u32 hw_if_index)
 	  if (vlan_table->vlans[idx].qinqs)
 	    {
 	      pool_put_index (em->qinq_pool, vlan_table->vlans[idx].qinqs);
+	      vlan_table->vlans[idx].qinqs = 0;
 	    }
 	}
       pool_put_index (em->vlan_pool, main_intf->dot1ad_vlans);
+      main_intf->dot1ad_vlans = 0;
     }
 
   vnet_delete_hw_interface (vnm, hw_if_index);
@@ -374,85 +379,246 @@ ethernet_set_flags (vnet_main_t * vnm, u32 hw_if_index, u32 flags)
   ASSERT (hi->hw_class_index == ethernet_hw_interface_class.index);
 
   ei = pool_elt_at_index (em->interfaces, hi->hw_instance);
+  ei->flags = flags;
   if (ei->flag_change)
     return ei->flag_change (vnm, hi, flags);
   return (u32) ~ 0;
 }
 
-/* Echo packets back to ethernet/l2-input. */
+/**
+ * Echo packets back to ethernet/l2-input.
+ */
 static uword
 simulated_ethernet_interface_tx (vlib_main_t * vm,
-				 vlib_node_runtime_t * node,
-				 vlib_frame_t * frame)
+				 vlib_node_runtime_t *
+				 node, vlib_frame_t * frame)
 {
-  u32 n_left_from, n_left_to_next, n_copy, *from, *to_next;
-  u32 next_index = VNET_SIMULATED_ETHERNET_TX_NEXT_ETHERNET_INPUT;
-  u32 i, next_node_index, bvi_flag, sw_if_index;
-  u32 n_pkts = 0, n_bytes = 0;
+  u32 n_left_from, *from;
+  u32 next_index = 0;
+  u32 n_bytes;
   u32 thread_index = vm->thread_index;
   vnet_main_t *vnm = vnet_get_main ();
   vnet_interface_main_t *im = &vnm->interface_main;
-  vlib_node_main_t *nm = &vm->node_main;
-  vlib_node_t *loop_node;
-  vlib_buffer_t *b;
-
-  // check tx node index, it is ethernet-input on loopback create
-  // but can be changed to l2-input if loopback is configured as
-  // BVI of a BD (Bridge Domain).
-  loop_node = vec_elt (nm->nodes, node->node_index);
-  next_node_index = loop_node->next_nodes[next_index];
-  bvi_flag = (next_node_index == l2input_node.index) ? 1 : 0;
+  l2_input_config_t *config;
+  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b;
+  u16 nexts[VLIB_FRAME_SIZE], *next;
+  u32 new_rx_sw_if_index = ~0;
+  u32 new_tx_sw_if_index = ~0;
 
   n_left_from = frame->n_vectors;
-  from = vlib_frame_args (frame);
+  from = vlib_frame_vector_args (frame);
 
-  while (n_left_from > 0)
+  vlib_get_buffers (vm, from, bufs, n_left_from);
+  b = bufs;
+  next = nexts;
+
+  /* Ordinarily, this is the only config lookup. */
+  config = l2input_intf_config (vnet_buffer (b[0])->sw_if_index[VLIB_TX]);
+  next_index =
+    config->bridge ? VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT :
+    VNET_SIMULATED_ETHERNET_TX_NEXT_ETHERNET_INPUT;
+  new_tx_sw_if_index = config->bvi ? L2INPUT_BVI : ~0;
+  new_rx_sw_if_index = vnet_buffer (b[0])->sw_if_index[VLIB_TX];
+
+  while (n_left_from >= 4)
     {
-      vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
+      u32 sw_if_index0, sw_if_index1, sw_if_index2, sw_if_index3;
+      u32 not_all_match_config;
 
-      n_copy = clib_min (n_left_from, n_left_to_next);
-
-      clib_memcpy (to_next, from, n_copy * sizeof (from[0]));
-      n_left_to_next -= n_copy;
-      n_left_from -= n_copy;
-      i = 0;
-      b = vlib_get_buffer (vm, from[i]);
-      sw_if_index = vnet_buffer (b)->sw_if_index[VLIB_TX];
-      while (1)
+      /* Prefetch next iteration. */
+      if (PREDICT_TRUE (n_left_from >= 8))
 	{
-	  // Set up RX and TX indices as if received from a real driver
-	  // unless loopback is used as a BVI. For BVI case, leave TX index
-	  // and update l2_len in packet as required for l2 forwarding path
-	  vnet_buffer (b)->sw_if_index[VLIB_RX] = sw_if_index;
-	  if (bvi_flag)
-	    {
-	      vnet_update_l2_len (b);
-	      vnet_buffer (b)->sw_if_index[VLIB_TX] = L2INPUT_BVI;
-	    }
-	  else
-	    vnet_buffer (b)->sw_if_index[VLIB_TX] = (u32) ~ 0;
-
-	  i++;
-	  n_pkts++;
-	  n_bytes += vlib_buffer_length_in_chain (vm, b);
-
-	  if (i < n_copy)
-	    b = vlib_get_buffer (vm, from[i]);
-	  else
-	    break;
+	  vlib_prefetch_buffer_header (b[4], STORE);
+	  vlib_prefetch_buffer_header (b[5], STORE);
+	  vlib_prefetch_buffer_header (b[6], STORE);
+	  vlib_prefetch_buffer_header (b[7], STORE);
 	}
-      from += n_copy;
 
-      vlib_put_next_frame (vm, node, next_index, n_left_to_next);
+      /* Make sure all pkts were transmitted on the same (loop) intfc */
+      sw_if_index0 = vnet_buffer (b[0])->sw_if_index[VLIB_TX];
+      sw_if_index1 = vnet_buffer (b[1])->sw_if_index[VLIB_TX];
+      sw_if_index2 = vnet_buffer (b[2])->sw_if_index[VLIB_TX];
+      sw_if_index3 = vnet_buffer (b[3])->sw_if_index[VLIB_TX];
 
-      /* increment TX interface stat */
+      not_all_match_config = (sw_if_index0 ^ sw_if_index1)
+	^ (sw_if_index2 ^ sw_if_index3);
+      not_all_match_config += sw_if_index0 ^ new_rx_sw_if_index;
+
+      /* Speed path / expected case: all pkts on the same intfc */
+      if (PREDICT_TRUE (not_all_match_config == 0))
+	{
+	  next[0] = next_index;
+	  next[1] = next_index;
+	  next[2] = next_index;
+	  next[3] = next_index;
+	  vnet_buffer (b[0])->sw_if_index[VLIB_RX] = new_rx_sw_if_index;
+	  vnet_buffer (b[1])->sw_if_index[VLIB_RX] = new_rx_sw_if_index;
+	  vnet_buffer (b[2])->sw_if_index[VLIB_RX] = new_rx_sw_if_index;
+	  vnet_buffer (b[3])->sw_if_index[VLIB_RX] = new_rx_sw_if_index;
+	  vnet_buffer (b[0])->sw_if_index[VLIB_TX] = new_tx_sw_if_index;
+	  vnet_buffer (b[1])->sw_if_index[VLIB_TX] = new_tx_sw_if_index;
+	  vnet_buffer (b[2])->sw_if_index[VLIB_TX] = new_tx_sw_if_index;
+	  vnet_buffer (b[3])->sw_if_index[VLIB_TX] = new_tx_sw_if_index;
+	  n_bytes = vlib_buffer_length_in_chain (vm, b[0]);
+	  n_bytes += vlib_buffer_length_in_chain (vm, b[1]);
+	  n_bytes += vlib_buffer_length_in_chain (vm, b[2]);
+	  n_bytes += vlib_buffer_length_in_chain (vm, b[3]);
+
+	  if (next_index == VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT)
+	    {
+	      vnet_update_l2_len (b[0]);
+	      vnet_update_l2_len (b[1]);
+	      vnet_update_l2_len (b[2]);
+	      vnet_update_l2_len (b[3]);
+	    }
+
+	  /* increment TX interface stat */
+	  vlib_increment_combined_counter (im->combined_sw_if_counters +
+					   VNET_INTERFACE_COUNTER_TX,
+					   thread_index, new_rx_sw_if_index,
+					   4 /* pkts */ , n_bytes);
+	  b += 4;
+	  next += 4;
+	  n_left_from -= 4;
+	  continue;
+	}
+
+      /*
+       * Slow path: we know that at least one of the pkts
+       * was transmitted on a different sw_if_index, so
+       * check each sw_if_index against the cached data and proceed
+       * accordingly.
+       *
+       * This shouldn't happen, but code can (and does) bypass the
+       * per-interface output node, so deal with it.
+       */
+      if (PREDICT_FALSE (vnet_buffer (b[0])->sw_if_index[VLIB_TX]
+			 != new_rx_sw_if_index))
+	{
+	  config = l2input_intf_config
+	    (vnet_buffer (b[0])->sw_if_index[VLIB_TX]);
+	  next_index =
+	    config->bridge ? VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT :
+	    VNET_SIMULATED_ETHERNET_TX_NEXT_ETHERNET_INPUT;
+	  new_tx_sw_if_index = config->bvi ? L2INPUT_BVI : ~0;
+	  new_rx_sw_if_index = vnet_buffer (b[0])->sw_if_index[VLIB_TX];
+	}
+      next[0] = next_index;
+      vnet_buffer (b[0])->sw_if_index[VLIB_RX] = new_rx_sw_if_index;
+      vnet_buffer (b[0])->sw_if_index[VLIB_TX] = new_tx_sw_if_index;
+      n_bytes = vlib_buffer_length_in_chain (vm, b[0]);
+      if (next_index == VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT)
+	vnet_update_l2_len (b[0]);
+
       vlib_increment_combined_counter (im->combined_sw_if_counters +
 				       VNET_INTERFACE_COUNTER_TX,
-				       thread_index, sw_if_index, n_pkts,
-				       n_bytes);
+				       thread_index, new_rx_sw_if_index,
+				       1 /* pkts */ , n_bytes);
+
+      if (PREDICT_FALSE (vnet_buffer (b[1])->sw_if_index[VLIB_TX]
+			 != new_rx_sw_if_index))
+	{
+	  config = l2input_intf_config
+	    (vnet_buffer (b[1])->sw_if_index[VLIB_TX]);
+	  next_index =
+	    config->bridge ? VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT :
+	    VNET_SIMULATED_ETHERNET_TX_NEXT_ETHERNET_INPUT;
+	  new_rx_sw_if_index = vnet_buffer (b[1])->sw_if_index[VLIB_TX];
+	  new_tx_sw_if_index = config->bvi ? L2INPUT_BVI : ~0;
+	}
+      next[1] = next_index;
+      vnet_buffer (b[1])->sw_if_index[VLIB_RX] = new_rx_sw_if_index;
+      vnet_buffer (b[1])->sw_if_index[VLIB_TX] = new_tx_sw_if_index;
+      n_bytes = vlib_buffer_length_in_chain (vm, b[1]);
+      if (next_index == VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT)
+	vnet_update_l2_len (b[1]);
+
+      vlib_increment_combined_counter (im->combined_sw_if_counters +
+				       VNET_INTERFACE_COUNTER_TX,
+				       thread_index, new_rx_sw_if_index,
+				       1 /* pkts */ , n_bytes);
+
+      if (PREDICT_FALSE (vnet_buffer (b[2])->sw_if_index[VLIB_TX]
+			 != new_rx_sw_if_index))
+	{
+	  config = l2input_intf_config
+	    (vnet_buffer (b[2])->sw_if_index[VLIB_TX]);
+	  next_index =
+	    config->bridge ? VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT :
+	    VNET_SIMULATED_ETHERNET_TX_NEXT_ETHERNET_INPUT;
+	  new_rx_sw_if_index = vnet_buffer (b[2])->sw_if_index[VLIB_TX];
+	  new_tx_sw_if_index = config->bvi ? L2INPUT_BVI : ~0;
+	}
+      next[2] = next_index;
+      vnet_buffer (b[2])->sw_if_index[VLIB_RX] = new_rx_sw_if_index;
+      vnet_buffer (b[2])->sw_if_index[VLIB_TX] = new_tx_sw_if_index;
+      n_bytes = vlib_buffer_length_in_chain (vm, b[2]);
+      if (next_index == VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT)
+	vnet_update_l2_len (b[2]);
+
+      vlib_increment_combined_counter (im->combined_sw_if_counters +
+				       VNET_INTERFACE_COUNTER_TX,
+				       thread_index, new_rx_sw_if_index,
+				       1 /* pkts */ , n_bytes);
+
+      if (PREDICT_FALSE (vnet_buffer (b[3])->sw_if_index[VLIB_TX]
+			 != new_rx_sw_if_index))
+	{
+	  config = l2input_intf_config
+	    (vnet_buffer (b[3])->sw_if_index[VLIB_TX]);
+	  next_index =
+	    config->bridge ? VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT :
+	    VNET_SIMULATED_ETHERNET_TX_NEXT_ETHERNET_INPUT;
+	  new_rx_sw_if_index = vnet_buffer (b[3])->sw_if_index[VLIB_TX];
+	  new_tx_sw_if_index = config->bvi ? L2INPUT_BVI : ~0;
+	}
+      next[3] = next_index;
+      vnet_buffer (b[3])->sw_if_index[VLIB_RX] = new_rx_sw_if_index;
+      vnet_buffer (b[3])->sw_if_index[VLIB_TX] = new_tx_sw_if_index;
+      n_bytes = vlib_buffer_length_in_chain (vm, b[3]);
+      if (next_index == VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT)
+	vnet_update_l2_len (b[3]);
+
+      vlib_increment_combined_counter (im->combined_sw_if_counters +
+				       VNET_INTERFACE_COUNTER_TX,
+				       thread_index, new_rx_sw_if_index,
+				       1 /* pkts */ , n_bytes);
+      b += 4;
+      next += 4;
+      n_left_from -= 4;
+    }
+  while (n_left_from > 0)
+    {
+      if (PREDICT_FALSE (vnet_buffer (b[0])->sw_if_index[VLIB_TX]
+			 != new_rx_sw_if_index))
+	{
+	  config = l2input_intf_config
+	    (vnet_buffer (b[0])->sw_if_index[VLIB_TX]);
+	  next_index =
+	    config->bridge ? VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT :
+	    VNET_SIMULATED_ETHERNET_TX_NEXT_ETHERNET_INPUT;
+	  new_tx_sw_if_index = config->bvi ? L2INPUT_BVI : ~0;
+	  new_rx_sw_if_index = vnet_buffer (b[0])->sw_if_index[VLIB_TX];
+	}
+      next[0] = next_index;
+      vnet_buffer (b[0])->sw_if_index[VLIB_RX] = new_rx_sw_if_index;
+      vnet_buffer (b[0])->sw_if_index[VLIB_TX] = new_tx_sw_if_index;
+      n_bytes = vlib_buffer_length_in_chain (vm, b[0]);
+      if (next_index == VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT)
+	vnet_update_l2_len (b[0]);
+
+      vlib_increment_combined_counter (im->combined_sw_if_counters +
+				       VNET_INTERFACE_COUNTER_TX,
+				       thread_index, new_rx_sw_if_index,
+				       1 /* pkts */ , n_bytes);
+      b += 1;
+      next += 1;
+      n_left_from -= 1;
     }
 
-  return n_left_from;
+  vlib_buffer_enqueue_to_next (vm, node, from, nexts, frame->n_vectors);
+
+  return frame->n_vectors;
 }
 
 static u8 *
@@ -472,15 +638,28 @@ simulated_ethernet_admin_up_down (vnet_main_t * vnm, u32 hw_if_index,
   return 0;
 }
 
+static clib_error_t *
+simulated_ethernet_mac_change (vnet_hw_interface_t * hi,
+			       const u8 * old_address, const u8 * mac_address)
+{
+  l2input_interface_mac_change (hi->sw_if_index, old_address, mac_address);
+
+  return (NULL);
+}
+
+
 /* *INDENT-OFF* */
 VNET_DEVICE_CLASS (ethernet_simulated_device_class) = {
   .name = "Loopback",
   .format_device_name = format_simulated_ethernet_name,
   .tx_function = simulated_ethernet_interface_tx,
   .admin_up_down_function = simulated_ethernet_admin_up_down,
+  .mac_addr_change_function = simulated_ethernet_mac_change,
 };
 /* *INDENT-ON* */
 
+VLIB_DEVICE_TX_FUNCTION_MULTIARCH (ethernet_simulated_device_class,
+				   simulated_ethernet_interface_tx);
 
 /*
  * Maintain a bitmap of allocated loopback instance numbers.
@@ -572,7 +751,7 @@ vnet_create_loopback_interface (u32 * sw_if_indexp, u8 * mac_address,
 
   *sw_if_indexp = (u32) ~ 0;
 
-  memset (address, 0, sizeof (address));
+  clib_memset (address, 0, sizeof (address));
 
   /*
    * Allocate a loopback instance.  Either select on dynamically
@@ -616,9 +795,18 @@ vnet_create_loopback_interface (u32 * sw_if_indexp, u8 * mac_address,
      "ethernet-input", VNET_SIMULATED_ETHERNET_TX_NEXT_ETHERNET_INPUT);
   ASSERT (slot == VNET_SIMULATED_ETHERNET_TX_NEXT_ETHERNET_INPUT);
 
+  slot = vlib_node_add_named_next_with_slot
+    (vm, hw_if->tx_node_index,
+     "l2-input", VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT);
+  ASSERT (slot == VNET_SIMULATED_ETHERNET_TX_NEXT_L2_INPUT);
+
   {
     vnet_sw_interface_t *si = vnet_get_hw_sw_interface (vnm, hw_if_index);
     *sw_if_indexp = si->sw_if_index;
+
+    /* By default don't flood to loopbacks, as packets just keep
+     * coming back ... If this loopback becomes a BVI, we'll change it */
+    si->flood_class = VNET_FLOOD_CLASS_NO_FLOOD;
   }
 
   return 0;
@@ -635,7 +823,7 @@ create_simulated_ethernet_interfaces (vlib_main_t * vm,
   u8 is_specified = 0;
   u32 user_instance = 0;
 
-  memset (mac_address, 0, sizeof (mac_address));
+  clib_memset (mac_address, 0, sizeof (mac_address));
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
@@ -710,25 +898,18 @@ int
 vnet_delete_loopback_interface (u32 sw_if_index)
 {
   vnet_main_t *vnm = vnet_get_main ();
-  vnet_sw_interface_t *si;
-  u32 hw_if_index;
-  vnet_hw_interface_t *hw;
-  u32 instance;
 
   if (pool_is_free_index (vnm->interface_main.sw_interfaces, sw_if_index))
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
-  si = vnet_get_sw_interface (vnm, sw_if_index);
-  hw_if_index = si->hw_if_index;
-  hw = vnet_get_hw_interface (vnm, hw_if_index);
-  instance = hw->dev_instance;
+  vnet_hw_interface_t *hw = vnet_get_sup_hw_interface (vnm, sw_if_index);
+  if (hw == 0 || hw->dev_class_index != ethernet_simulated_device_class.index)
+    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
-  if (loopback_instance_free (instance) < 0)
-    {
-      return VNET_API_ERROR_INVALID_SW_IF_INDEX;
-    }
+  if (loopback_instance_free (hw->dev_instance) < 0)
+    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
-  ethernet_delete_interface (vnm, hw_if_index);
+  ethernet_delete_interface (vnm, hw->hw_if_index);
 
   return 0;
 }
@@ -737,29 +918,28 @@ int
 vnet_delete_sub_interface (u32 sw_if_index)
 {
   vnet_main_t *vnm = vnet_get_main ();
+  vnet_sw_interface_t *si;
   int rv = 0;
 
   if (pool_is_free_index (vnm->interface_main.sw_interfaces, sw_if_index))
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
-
-  vnet_interface_main_t *im = &vnm->interface_main;
-  vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, sw_if_index);
-
+  si = vnet_get_sw_interface (vnm, sw_if_index);
   if (si->type == VNET_SW_INTERFACE_TYPE_SUB ||
+      si->type == VNET_SW_INTERFACE_TYPE_PIPE ||
       si->type == VNET_SW_INTERFACE_TYPE_P2P)
     {
-      vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, sw_if_index);
+      vnet_interface_main_t *im = &vnm->interface_main;
+      vnet_hw_interface_t *hi = vnet_get_sup_hw_interface (vnm, sw_if_index);
       u64 sup_and_sub_key =
 	((u64) (si->sup_sw_if_index) << 32) | (u64) si->sub.id;
-
-      hash_unset_mem (im->sw_if_index_by_sup_and_sub, &sup_and_sub_key);
+      hash_unset_mem_free (&im->sw_if_index_by_sup_and_sub, &sup_and_sub_key);
+      hash_unset (hi->sub_interface_sw_if_index_by_id, si->sub.id);
       vnet_delete_sw_interface (vnm, sw_if_index);
     }
   else
-    {
-      rv = VNET_API_ERROR_INVALID_SUB_SW_IF_INDEX;
-    }
+    rv = VNET_API_ERROR_INVALID_SUB_SW_IF_INDEX;
+
   return rv;
 }
 

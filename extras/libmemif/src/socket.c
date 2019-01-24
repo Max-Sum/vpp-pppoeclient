@@ -32,6 +32,7 @@
 
 #include <socket.h>
 #include <memif.h>
+#include <memif_private.h>
 
 /* sends msg to socket */
 static_fn int
@@ -70,8 +71,9 @@ memif_msg_send (int fd, memif_msg_t * msg, int afd)
 static_fn int
 memif_msg_enq_ack (memif_connection_t * c)
 {
+  libmemif_main_t *lm = &libmemif_main;
   memif_msg_queue_elt_t *e =
-    (memif_msg_queue_elt_t *) malloc (sizeof (memif_msg_queue_elt_t));
+    (memif_msg_queue_elt_t *) lm->alloc (sizeof (memif_msg_queue_elt_t));
   if (e == NULL)
     return memif_syscall_error_handler (errno);
 
@@ -105,12 +107,13 @@ memif_msg_send_hello (int fd)
   msg.type = MEMIF_MSG_TYPE_HELLO;
   h->min_version = MEMIF_VERSION;
   h->max_version = MEMIF_VERSION;
-  h->max_s2m_ring = MEMIF_MAX_M2S_RING;
+  h->max_s2m_ring = MEMIF_MAX_S2M_RING;
   h->max_m2s_ring = MEMIF_MAX_M2S_RING;
   h->max_region = MEMIF_MAX_REGION;
   h->max_log2_ring_size = MEMIF_MAX_LOG2_RING_SIZE;
 
-  strncpy ((char *) h->name, lm->app_name, strlen (lm->app_name));
+  strncpy ((char *) h->name, (char *) lm->app_name,
+	   strlen ((char *) lm->app_name));
 
   /* msg hello is not enqueued but sent directly,
      because it is the first msg to be sent */
@@ -121,8 +124,9 @@ memif_msg_send_hello (int fd)
 static_fn int
 memif_msg_enq_init (memif_connection_t * c)
 {
+  libmemif_main_t *lm = &libmemif_main;
   memif_msg_queue_elt_t *e =
-    (memif_msg_queue_elt_t *) malloc (sizeof (memif_msg_queue_elt_t));
+    (memif_msg_queue_elt_t *) lm->alloc (sizeof (memif_msg_queue_elt_t));
   if (e == NULL)
     return memif_syscall_error_handler (errno);
   memset (e, 0, sizeof (memif_msg_queue_elt_t));
@@ -136,9 +140,9 @@ memif_msg_enq_init (memif_connection_t * c)
   i->id = c->args.interface_id;
   i->mode = c->args.mode;
 
-  strncpy ((char *) i->name, (char *) c->args.instance_name,
-	   strlen ((char *) c->args.instance_name));
-  if (c->args.secret)
+  strncpy ((char *) i->name, (char *) lm->app_name,
+	   strlen ((char *) lm->app_name));
+  if (strlen ((char *) c->args.secret) > 0)
     strncpy ((char *) i->secret, (char *) c->args.secret, sizeof (i->secret));
 
   e->next = NULL;
@@ -162,11 +166,11 @@ memif_msg_enq_init (memif_connection_t * c)
 static_fn int
 memif_msg_enq_add_region (memif_connection_t * c, uint8_t region_index)
 {
-  /* maybe check if region is valid? */
+  libmemif_main_t *lm = &libmemif_main;
   memif_region_t *mr = &c->regions[region_index];
 
   memif_msg_queue_elt_t *e =
-    (memif_msg_queue_elt_t *) malloc (sizeof (memif_msg_queue_elt_t));
+    (memif_msg_queue_elt_t *) lm->alloc (sizeof (memif_msg_queue_elt_t));
   if (e == NULL)
     return memif_syscall_error_handler (errno);
 
@@ -199,8 +203,9 @@ memif_msg_enq_add_region (memif_connection_t * c, uint8_t region_index)
 static_fn int
 memif_msg_enq_add_ring (memif_connection_t * c, uint8_t index, uint8_t dir)
 {
+  libmemif_main_t *lm = &libmemif_main;
   memif_msg_queue_elt_t *e =
-    (memif_msg_queue_elt_t *) malloc (sizeof (memif_msg_queue_elt_t));
+    (memif_msg_queue_elt_t *) lm->alloc (sizeof (memif_msg_queue_elt_t));
   if (e == NULL)
     return memif_syscall_error_handler (errno);
 
@@ -222,6 +227,7 @@ memif_msg_enq_add_ring (memif_connection_t * c, uint8_t index, uint8_t dir)
   ar->region = mq->region;
   ar->log2_ring_size = mq->log2_ring_size;
   ar->flags = (dir == MEMIF_RING_S2M) ? MEMIF_MSG_ADD_RING_FLAG_S2M : 0;
+  ar->private_hdr_size = 0;
 
   e->next = NULL;
   if (c->msg_queue == NULL)
@@ -244,8 +250,9 @@ memif_msg_enq_add_ring (memif_connection_t * c, uint8_t index, uint8_t dir)
 static_fn int
 memif_msg_enq_connect (memif_connection_t * c)
 {
+  libmemif_main_t *lm = &libmemif_main;
   memif_msg_queue_elt_t *e =
-    (memif_msg_queue_elt_t *) malloc (sizeof (memif_msg_queue_elt_t));
+    (memif_msg_queue_elt_t *) lm->alloc (sizeof (memif_msg_queue_elt_t));
   if (e == NULL)
     return memif_syscall_error_handler (errno);
 
@@ -278,8 +285,9 @@ memif_msg_enq_connect (memif_connection_t * c)
 static_fn int
 memif_msg_enq_connected (memif_connection_t * c)
 {
+  libmemif_main_t *lm = &libmemif_main;
   memif_msg_queue_elt_t *e =
-    (memif_msg_queue_elt_t *) malloc (sizeof (memif_msg_queue_elt_t));
+    (memif_msg_queue_elt_t *) lm->alloc (sizeof (memif_msg_queue_elt_t));
   if (e == NULL)
     return memif_syscall_error_handler (errno);
 
@@ -367,7 +375,6 @@ memif_msg_receive_init (memif_socket_t * ms, int fd, memif_msg_t * msg)
   uint8_t err_string[96];
   memset (err_string, 0, sizeof (char) * 96);
   int err = MEMIF_ERR_SUCCESS;	/* 0 */
-  int err_disc;
   if (i->version != MEMIF_VERSION)
     {
       DBG ("MEMIF_VER_ERR");
@@ -416,10 +423,10 @@ memif_msg_receive_init (memif_socket_t * ms, int fd, memif_msg_t * msg)
   strncpy ((char *) c->remote_name, (char *) i->name,
 	   strlen ((char *) i->name));
 
-  if (c->args.secret)
+  if (strlen ((char *) c->args.secret) > 0)
     {
       int r;
-      if (i->secret)
+      if (strlen ((char *) i->secret) > 0)
 	{
 	  if (strlen ((char *) c->args.secret) != strlen ((char *) i->secret))
 	    {
@@ -476,6 +483,8 @@ static_fn int
 memif_msg_receive_add_region (memif_connection_t * c, memif_msg_t * msg,
 			      int fd)
 {
+  libmemif_main_t *lm = &libmemif_main;
+
   memif_msg_add_region_t *ar = &msg->add_region;
   memif_region_t *mr;
   if (fd < 0)
@@ -485,14 +494,20 @@ memif_msg_receive_add_region (memif_connection_t * c, memif_msg_t * msg,
     return MEMIF_ERR_MAXREG;
 
   mr =
-    (memif_region_t *) realloc (c->regions,
-				sizeof (memif_region_t) * (ar->index + 1));
+    (memif_region_t *) lm->realloc (c->regions,
+				    sizeof (memif_region_t) *
+				    (++c->regions_num));
   if (mr == NULL)
     return memif_syscall_error_handler (errno);
+  memset (mr + ar->index, 0, sizeof (memif_region_t));
   c->regions = mr;
   c->regions[ar->index].fd = fd;
   c->regions[ar->index].region_size = ar->size;
-  c->regions[ar->index].shm = NULL;
+  c->regions[ar->index].addr = NULL;
+
+  /* region 0 is never external */
+  if (lm->get_external_region_addr && (ar->index != 0))
+    c->regions[ar->index].is_external = 1;
 
   return MEMIF_ERR_SUCCESS;	/* 0 */
 }
@@ -502,12 +517,17 @@ memif_msg_receive_add_region (memif_connection_t * c, memif_msg_t * msg,
 static_fn int
 memif_msg_receive_add_ring (memif_connection_t * c, memif_msg_t * msg, int fd)
 {
+  libmemif_main_t *lm = &libmemif_main;
+
   memif_msg_add_ring_t *ar = &msg->add_ring;
 
   memif_queue_t *mq;
 
   if (fd < 0)
     return MEMIF_ERR_NO_INTFD;
+
+  if (ar->private_hdr_size != 0)
+    return MEMIF_ERR_PRIVHDR;
 
   if (ar->flags & MEMIF_MSG_ADD_RING_FLAG_S2M)
     {
@@ -517,8 +537,10 @@ memif_msg_receive_add_ring (memif_connection_t * c, memif_msg_t * msg, int fd)
 	return MEMIF_ERR_MAXRING;
 
       mq =
-	(memif_queue_t *) realloc (c->rx_queues,
-				   sizeof (memif_queue_t) * (ar->index + 1));
+	(memif_queue_t *) lm->realloc (c->rx_queues,
+				       sizeof (memif_queue_t) *
+				       (++c->rx_queues_num));
+      memset (mq + ar->index, 0, sizeof (memif_queue_t));
       if (mq == NULL)
 	return memif_syscall_error_handler (errno);
       c->rx_queues = mq;
@@ -536,8 +558,10 @@ memif_msg_receive_add_ring (memif_connection_t * c, memif_msg_t * msg, int fd)
 	return MEMIF_ERR_MAXRING;
 
       mq =
-	(memif_queue_t *) realloc (c->tx_queues,
-				   sizeof (memif_queue_t) * (ar->index + 1));
+	(memif_queue_t *) lm->realloc (c->tx_queues,
+				       sizeof (memif_queue_t) *
+				       (++c->tx_queues_num));
+      memset (mq + ar->index, 0, sizeof (memif_queue_t));
       if (mq == NULL)
 	return memif_syscall_error_handler (errno);
       c->tx_queues = mq;
@@ -605,7 +629,9 @@ memif_msg_receive_connected (memif_connection_t * c, memif_msg_t * msg)
   if (c->on_interrupt != NULL)
     {
       for (i = 0; i < c->run_args.num_s2m_rings; i++)
-	lm->control_fd_update (c->rx_queues[i].int_fd, MEMIF_FD_EVENT_READ);
+	{
+	  lm->control_fd_update (c->rx_queues[i].int_fd, MEMIF_FD_EVENT_READ);
+	}
     }
 
   c->on_connect ((void *) c, c->private_ctx);
@@ -664,7 +690,6 @@ memif_msg_receive (int ifd)
 	return MEMIF_ERR_MFMSG;
     }
 
-  struct ucred *cr = 0;
   struct cmsghdr *cmsg;
 
   cmsg = CMSG_FIRSTHDR (&mh);
@@ -674,7 +699,7 @@ memif_msg_receive (int ifd)
 	{
 	  if (cmsg->cmsg_type == SCM_CREDENTIALS)
 	    {
-	      cr = (struct ucred *) CMSG_DATA (cmsg);
+	      /* Do nothing */ ;
 	    }
 	  else if (cmsg->cmsg_type == SCM_RIGHTS)
 	    {
@@ -703,8 +728,11 @@ memif_msg_receive (int ifd)
 	return err;
       if ((err = memif_msg_enq_init (c)) != MEMIF_ERR_SUCCESS)
 	return err;
-      if ((err = memif_msg_enq_add_region (c, 0)) != MEMIF_ERR_SUCCESS)
-	return err;
+      for (i = 0; i < c->regions_num; i++)
+	{
+	  if ((err = memif_msg_enq_add_region (c, i)) != MEMIF_ERR_SUCCESS)
+	    return err;
+	}
       for (i = 0; i < c->run_args.num_s2m_rings; i++)
 	{
 	  if ((err =
@@ -812,6 +840,7 @@ memif_conn_fd_read_ready (memif_connection_t * c)
 int
 memif_conn_fd_write_ready (memif_connection_t * c)
 {
+  libmemif_main_t *lm = &libmemif_main;
   int err = MEMIF_ERR_SUCCESS;	/* 0 */
 
 
@@ -832,7 +861,7 @@ memif_conn_fd_write_ready (memif_connection_t * c)
         MEMIF_FD_EVENT_READ | MEMIF_FD_EVENT_WRITE | MEMIF_FD_EVENT_MOD);
 */
   err = memif_msg_send (c->fd, &e->msg, e->fd);
-  free (e);
+  lm->free (e);
   goto done;
 
 done:

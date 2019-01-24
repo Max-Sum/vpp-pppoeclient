@@ -1,3 +1,16 @@
+;;; Copyright (c) 2016 Cisco and/or its affiliates.
+;;; Licensed under the Apache License, Version 2.0 (the "License");
+;;; you may not use this file except in compliance with the License.
+;;; You may obtain a copy of the License at:
+;;;
+;;;     http://www.apache.org/licenses/LICENSE-2.0
+;;;
+;;; Unless required by applicable law or agreed to in writing, software
+;;; distributed under the License is distributed on an "AS IS" BASIS,
+;;; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+;;; See the License for the specific language governing permissions and
+;;; limitations under the License.
+
 ;;; dual-loop-skel.el - Eliotic dual-loop node skeleton
 
 (require 'skeleton)
@@ -7,6 +20,7 @@
 nil
 '(setq node-name (skeleton-read "Node Name: "))
 '(setq uc-node-name (upcase node-name))
+'(setq main-p (concat (substring plugin-name 0 1) "mp"))
 "
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
@@ -287,12 +301,12 @@ VLIB_REGISTER_NODE (" node-name "_node) = {
 
 clib_error_t *" node-name "_init (vlib_main_t *vm)
 {
-  " node-name "_main_t *msm = &" node-name "_main;
+  " node-name "_main_t *" main-p " = &" node-name "_main;
     
   /* $$$$$ Initialize " node-name "_main_t structure here. $$$$$ */
-  msm->vlib_main = vm;
-  msm->vnet_main = vnet_get_main();
-  msm->ethernet_main = ethernet_get_main(vm);
+  " main-p "->vlib_main = vm;
+  " main-p "->vnet_main = vnet_get_main();
+  " main-p "->ethernet_main = ethernet_get_main(vm);
 
   return 0;
 }

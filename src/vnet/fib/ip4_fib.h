@@ -38,6 +38,9 @@
 
 typedef struct ip4_fib_t_
 {
+  /** Required for pool_get_aligned */
+  CLIB_CACHE_LINE_ALIGN_MARK(cacheline0);
+
   /**
    * Mtrie for fast lookups. Hash is used to maintain overlapping prefixes.
    * First member so it's in the first cacheline.
@@ -52,11 +55,6 @@ typedef struct ip4_fib_t_
 
   /* Index into FIB vector. */
   u32 index;
-
-  /* N-tuple classifier indices */
-  u32 fwd_classify_table_index;
-  u32 rev_classify_table_index;
-
 } ip4_fib_t;
 
 extern fib_node_index_t ip4_fib_table_lookup(const ip4_fib_t *fib,
@@ -99,6 +97,16 @@ extern void ip4_fib_table_walk(ip4_fib_t *fib,
                                void *ctx);
 
 /**
+ * @brief Walk all entries in a sub-tree of the FIB table
+ * N.B: This is NOT safe to deletes. If you need to delete walk the whole
+ * table and store elements in a vector, then delete the elements
+ */
+extern void ip4_fib_table_sub_tree_walk(ip4_fib_t *fib,
+                                        const fib_prefix_t *root,
+                                        fib_table_walk_fn_t fn,
+                                        void *ctx);
+
+/**
  * @brief Get the FIB at the given index
  */
 static inline ip4_fib_t *
@@ -131,6 +139,7 @@ extern u32 ip4_fib_table_find_or_create_and_lock(u32 table_id,
                                                  fib_source_t src);
 extern u32 ip4_fib_table_create_and_lock(fib_source_t src);
 
+extern u8 *format_ip4_fib_table_memory(u8 * s, va_list * args);
 
 static inline 
 u32 ip4_fib_index_from_table_id (u32 table_id)

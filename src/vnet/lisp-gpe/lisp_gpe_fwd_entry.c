@@ -409,7 +409,7 @@ find_fwd_entry (lisp_gpe_main_t * lgm,
 {
   uword *p;
 
-  memset (key, 0, sizeof (*key));
+  clib_memset (key, 0, sizeof (*key));
 
   if (GID_ADDR_IP_PREFIX == gid_address_type (&a->rmt_eid))
     {
@@ -486,7 +486,7 @@ vnet_lisp_gpe_add_fwd_counters (vnet_lisp_gpe_add_del_fwd_entry_args_t * a,
   if (LISP_GPE_FWD_ENTRY_TYPE_NORMAL != lfe->type)
     return;
 
-  memset (&key, 0, sizeof (key));
+  clib_memset (&key, 0, sizeof (key));
   key.fwd_entry_index = fwd_entry_index;
 
   vec_foreach (path, lfe->paths)
@@ -531,7 +531,7 @@ add_ip_fwd_entry (lisp_gpe_main_t * lgm,
     return VNET_API_ERROR_INVALID_VALUE;
 
   pool_get (lgm->lisp_fwd_entry_pool, lfe);
-  memset (lfe, 0, sizeof (*lfe));
+  clib_memset (lfe, 0, sizeof (*lfe));
   lfe->key = clib_mem_alloc (sizeof (key));
   memcpy (lfe->key, &key, sizeof (key));
 
@@ -787,6 +787,7 @@ lisp_gpe_l2_update_fwding (lisp_gpe_fwd_entry_t * lfe)
     {
       fib_path_list_contribute_forwarding (lfe->l2.path_list_index,
 					   FIB_FORW_CHAIN_TYPE_ETHERNET,
+					   FIB_PATH_LIST_FWD_FLAG_NONE,
 					   &lfe->l2.dpo);
       dpo_copy (&dpo, &lfe->l2.dpo);
     }
@@ -847,7 +848,7 @@ add_l2_fwd_entry (lisp_gpe_main_t * lgm,
     return VNET_API_ERROR_INVALID_VALUE;
 
   pool_get (lgm->lisp_fwd_entry_pool, lfe);
-  memset (lfe, 0, sizeof (*lfe));
+  clib_memset (lfe, 0, sizeof (*lfe));
   lfe->key = clib_mem_alloc (sizeof (key));
   memcpy (lfe->key, &key, sizeof (key));
 
@@ -915,7 +916,7 @@ lisp_nsh_fib_lookup (lisp_gpe_main_t * lgm, u32 spi_si_net_order)
   int rv;
   BVT (clib_bihash_kv) kv, value;
 
-  memset (&kv, 0, sizeof (kv));
+  clib_memset (&kv, 0, sizeof (kv));
   kv.key[0] = spi_si_net_order;
   rv = BV (clib_bihash_search_inline_2) (&lgm->nsh_fib, &kv, &value);
 
@@ -950,7 +951,7 @@ lisp_nsh_fib_add_del_entry (u32 spi_si_host_order, u32 lfei, u8 is_add)
   BVT (clib_bihash_kv) kv, value;
   u32 old_val = ~0;
 
-  memset (&kv, 0, sizeof (kv));
+  clib_memset (&kv, 0, sizeof (kv));
   kv.key[0] = clib_host_to_net_u32 (spi_si_host_order);
   kv.value = 0ULL;
 
@@ -1048,6 +1049,7 @@ lisp_gpe_nsh_update_fwding (lisp_gpe_fwd_entry_t * lfe)
     {
       fib_path_list_contribute_forwarding (lfe->nsh.path_list_index,
 					   FIB_FORW_CHAIN_TYPE_NSH,
+					   FIB_PATH_LIST_FWD_FLAG_NONE,
 					   &lfe->nsh.dpo);
 
       /*
@@ -1121,7 +1123,7 @@ add_nsh_fwd_entry (lisp_gpe_main_t * lgm,
     return VNET_API_ERROR_INVALID_VALUE;
 
   pool_get (lgm->lisp_fwd_entry_pool, lfe);
-  memset (lfe, 0, sizeof (*lfe));
+  clib_memset (lfe, 0, sizeof (*lfe));
   lfe->key = clib_mem_alloc (sizeof (key));
   memcpy (lfe->key, &key, sizeof (key));
 
@@ -1287,6 +1289,9 @@ vnet_lisp_flush_stats (void)
   vlib_combined_counter_main_t *cm = &lgm->counters;
   u32 i;
 
+  if (cm->counters == NULL)
+    return 0;
+
   for (i = 0; i < vlib_combined_counter_n_counters (cm); i++)
     vlib_zero_combined_counter (cm, i);
 
@@ -1302,7 +1307,7 @@ lisp_del_adj_stats (lisp_gpe_main_t * lgm, u32 fwd_entry_index, u32 ti)
   uword *p;
   u8 *s;
 
-  memset (&key, 0, sizeof (key));
+  clib_memset (&key, 0, sizeof (key));
   key.fwd_entry_index = fwd_entry_index;
   key.tunnel_index = ti;
 
@@ -1371,9 +1376,9 @@ vnet_lisp_gpe_fwd_entry_flush (void)
 }
 
 static u8 *
-format_lisp_fwd_path (u8 * s, va_list ap)
+format_lisp_fwd_path (u8 * s, va_list * ap)
 {
-  lisp_fwd_path_t *lfp = va_arg (ap, lisp_fwd_path_t *);
+  lisp_fwd_path_t *lfp = va_arg (*ap, lisp_fwd_path_t *);
 
   s = format (s, "weight:%d ", lfp->weight);
   s = format (s, "adj:[%U]\n",
@@ -1392,12 +1397,12 @@ typedef enum lisp_gpe_fwd_entry_format_flag_t_
 
 
 static u8 *
-format_lisp_gpe_fwd_entry (u8 * s, va_list ap)
+format_lisp_gpe_fwd_entry (u8 * s, va_list * ap)
 {
   lisp_gpe_main_t *lgm = &lisp_gpe_main;
-  lisp_gpe_fwd_entry_t *lfe = va_arg (ap, lisp_gpe_fwd_entry_t *);
+  lisp_gpe_fwd_entry_t *lfe = va_arg (*ap, lisp_gpe_fwd_entry_t *);
   lisp_gpe_fwd_entry_format_flag_t flags =
-    va_arg (ap, lisp_gpe_fwd_entry_format_flag_t);
+    va_arg (*ap, lisp_gpe_fwd_entry_format_flag_t);
 
   s = format (s, "VNI:%d VRF:%d EID: %U -> %U  [index:%d]",
 	      lfe->key->vni, lfe->eid_table_id,
@@ -1538,7 +1543,7 @@ vnet_lisp_gpe_fwd_entries_get_by_vni (u32 vni)
   ({
     if (lfe->key->vni == vni)
       {
-        memset (&e, 0, sizeof (e));
+        clib_memset (&e, 0, sizeof (e));
         e.dp_table = lfe->eid_table_id;
         e.vni = lfe->key->vni;
         if (lfe->type == LISP_GPE_FWD_ENTRY_TYPE_NEGATIVE)

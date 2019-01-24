@@ -20,7 +20,9 @@
 #ifndef included_punt_h
 #define included_punt_h
 
-#include <sys/un.h>
+#include <linux/un.h>
+#include <stdbool.h>
+
 typedef enum
 {
 #define punt_error(n,s) PUNT_ERROR_##n,
@@ -62,6 +64,7 @@ typedef struct __attribute__ ((packed))
  */
 typedef struct
 {
+  u8 protocol;
   u16 port;
   struct sockaddr_un caddr;
 } punt_client_t;
@@ -80,6 +83,15 @@ typedef struct
 } punt_main_t;
 extern punt_main_t punt_main;
 
+typedef struct punt_socket_detail_t_
+{
+  u8 ipv;
+  u8 l4_protocol;
+  u16 l4_port;
+  u8 pathname[108];
+} punt_socket_detail_t;
+
+punt_socket_detail_t *punt_socket_entries (u8 ipv);
 #endif
 
 /*

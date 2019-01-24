@@ -170,7 +170,7 @@ serialize_cstring (serialize_main_t * m, char *s)
   if (len > 0)
     {
       p = serialize_get (m, len);
-      clib_memcpy (p, s, len);
+      clib_memcpy_fast (p, s, len);
     }
 }
 
@@ -191,7 +191,7 @@ unserialize_cstring (serialize_main_t * m, char **s)
     {
       r = vec_new (char, len + 1);
       p = unserialize_get (m, len);
-      clib_memcpy (r, p, len);
+      clib_memcpy_fast (r, p, len);
 
       /* Null terminate. */
       r[len] = 0;
@@ -206,7 +206,7 @@ serialize_vec_8 (serialize_main_t * m, va_list * va)
   u8 *s = va_arg (*va, u8 *);
   u32 n = va_arg (*va, u32);
   u8 *p = serialize_get (m, n * sizeof (u8));
-  clib_memcpy (p, s, n * sizeof (u8));
+  clib_memcpy_fast (p, s, n * sizeof (u8));
 }
 
 void
@@ -215,7 +215,7 @@ unserialize_vec_8 (serialize_main_t * m, va_list * va)
   u8 *s = va_arg (*va, u8 *);
   u32 n = va_arg (*va, u32);
   u8 *p = unserialize_get (m, n);
-  clib_memcpy (s, p, n);
+  clib_memcpy_fast (s, p, n);
 }
 
 #define _(n_bits)							\
@@ -313,7 +313,7 @@ unserialize_vector_ha (serialize_main_t * m,
   if (l > max_length)
     serialize_error (&m->header,
 		     clib_error_create ("bad vector length %d", l));
-  p = v = _vec_resize (0, l, (uword) l * elt_bytes, header_bytes,
+  p = v = _vec_resize ((void *) 0, l, (uword) l * elt_bytes, header_bytes,
 		       /* align */ align);
 
   while (l != 0)
@@ -444,7 +444,8 @@ unserialize_pool_helper (serialize_main_t * m,
       return 0;
     }
 
-  v = _vec_resize (0, l, (uword) l * elt_bytes, sizeof (p[0]), align);
+  v = _vec_resize ((void *) 0, l, (uword) l * elt_bytes, sizeof (p[0]),
+		   align);
   p = pool_header (v);
 
   vec_unserialize (m, &p->free_indices, unserialize_vec_32);
@@ -571,7 +572,7 @@ unserialize_heap (serialize_main_t * m, va_list * va)
       return;
     }
 
-  memset (&h, 0, sizeof (h));
+  clib_memset (&h, 0, sizeof (h));
 #define _(f) unserialize_integer (m, &h.f, sizeof (h.f));
   foreach_serialize_heap_header_integer;
 #undef _
@@ -626,7 +627,7 @@ serialize_magic (serialize_main_t * m, void *magic, u32 magic_bytes)
   void *p;
   serialize_integer (m, magic_bytes, sizeof (magic_bytes));
   p = serialize_get (m, magic_bytes);
-  clib_memcpy (p, magic, magic_bytes);
+  clib_memcpy_fast (p, magic, magic_bytes);
 }
 
 void
@@ -709,7 +710,7 @@ serialize_write_not_inline (serialize_main_header_t * m,
       if (n_left_o > 0 && n_left_b > 0)
 	{
 	  uword n = clib_min (n_left_b, n_left_o);
-	  clib_memcpy (s->buffer + cur_bi, s->overflow_buffer, n);
+	  clib_memcpy_fast (s->buffer + cur_bi, s->overflow_buffer, n);
 	  cur_bi += n;
 	  n_left_b -= n;
 	  n_left_o -= n;
@@ -881,7 +882,7 @@ unserialize_close (serialize_main_t * m)
 void
 serialize_open_data (serialize_main_t * m, u8 * data, uword n_data_bytes)
 {
-  memset (m, 0, sizeof (m[0]));
+  clib_memset (m, 0, sizeof (m[0]));
   m->stream.buffer = data;
   m->stream.n_buffer_bytes = n_data_bytes;
 }
@@ -907,7 +908,7 @@ serialize_vector_write (serialize_main_header_t * m, serialize_stream_t * s)
 void
 serialize_open_vector (serialize_main_t * m, u8 * vector)
 {
-  memset (m, 0, sizeof (m[0]));
+  clib_memset (m, 0, sizeof (m[0]));
   m->header.data_function = serialize_vector_write;
   m->stream.buffer = vector;
   m->stream.current_buffer_index = 0;
@@ -925,7 +926,7 @@ serialize_close_vector (serialize_main_t * m)
   if (s->buffer)
     _vec_len (s->buffer) = s->current_buffer_index;
   result = s->buffer;
-  memset (m, 0, sizeof (m[0]));
+  clib_memset (m, 0, sizeof (m[0]));
   return result;
 }
 
@@ -1147,7 +1148,7 @@ unserialize_multiple_4 (serialize_main_t * m,
 #include <fcntl.h>
 
 static void
-unix_file_write (serialize_main_header_t * m, serialize_stream_t * s)
+clib_file_write (serialize_main_header_t * m, serialize_stream_t * s)
 {
   int fd, n;
 
@@ -1168,7 +1169,7 @@ unix_file_write (serialize_main_header_t * m, serialize_stream_t * s)
 }
 
 static void
-unix_file_read (serialize_main_header_t * m, serialize_stream_t * s)
+clib_file_read (serialize_main_header_t * m, serialize_stream_t * s)
 {
   int fd, n;
 
@@ -1188,10 +1189,10 @@ unix_file_read (serialize_main_header_t * m, serialize_stream_t * s)
 }
 
 static void
-serialize_open_unix_file_descriptor_helper (serialize_main_t * m, int fd,
+serialize_open_clib_file_descriptor_helper (serialize_main_t * m, int fd,
 					    uword is_read)
 {
-  memset (m, 0, sizeof (m[0]));
+  clib_memset (m, 0, sizeof (m[0]));
   vec_resize (m->stream.buffer, 4096);
 
   if (!is_read)
@@ -1200,24 +1201,24 @@ serialize_open_unix_file_descriptor_helper (serialize_main_t * m, int fd,
       _vec_len (m->stream.buffer) = 0;
     }
 
-  m->header.data_function = is_read ? unix_file_read : unix_file_write;
+  m->header.data_function = is_read ? clib_file_read : clib_file_write;
   m->stream.data_function_opaque = fd;
 }
 
 void
-serialize_open_unix_file_descriptor (serialize_main_t * m, int fd)
+serialize_open_clib_file_descriptor (serialize_main_t * m, int fd)
 {
-  serialize_open_unix_file_descriptor_helper (m, fd, /* is_read */ 0);
+  serialize_open_clib_file_descriptor_helper (m, fd, /* is_read */ 0);
 }
 
 void
-unserialize_open_unix_file_descriptor (serialize_main_t * m, int fd)
+unserialize_open_clib_file_descriptor (serialize_main_t * m, int fd)
 {
-  serialize_open_unix_file_descriptor_helper (m, fd, /* is_read */ 1);
+  serialize_open_clib_file_descriptor_helper (m, fd, /* is_read */ 1);
 }
 
 static clib_error_t *
-serialize_open_unix_file_helper (serialize_main_t * m, char *file,
+serialize_open_clib_file_helper (serialize_main_t * m, char *file,
 				 uword is_read)
 {
   int fd, mode;
@@ -1227,20 +1228,20 @@ serialize_open_unix_file_helper (serialize_main_t * m, char *file,
   if (fd < 0)
     return clib_error_return_unix (0, "open `%s'", file);
 
-  serialize_open_unix_file_descriptor_helper (m, fd, is_read);
+  serialize_open_clib_file_descriptor_helper (m, fd, is_read);
   return 0;
 }
 
 clib_error_t *
-serialize_open_unix_file (serialize_main_t * m, char *file)
+serialize_open_clib_file (serialize_main_t * m, char *file)
 {
-  return serialize_open_unix_file_helper (m, file, /* is_read */ 0);
+  return serialize_open_clib_file_helper (m, file, /* is_read */ 0);
 }
 
 clib_error_t *
-unserialize_open_unix_file (serialize_main_t * m, char *file)
+unserialize_open_clib_file (serialize_main_t * m, char *file)
 {
-  return serialize_open_unix_file_helper (m, file, /* is_read */ 1);
+  return serialize_open_clib_file_helper (m, file, /* is_read */ 1);
 }
 
 #endif /* CLIB_UNIX */

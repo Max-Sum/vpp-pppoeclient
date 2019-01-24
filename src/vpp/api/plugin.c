@@ -24,13 +24,13 @@
 plugin_main_t vat_plugin_main;
 
 static int
-load_one_plugin (plugin_main_t * pm, plugin_info_t * pi)
+load_one_vat_plugin (plugin_main_t * pm, plugin_info_t * pi)
 {
   void *handle, *register_handle;
   clib_error_t *(*fp) (vat_main_t *);
   clib_error_t *error;
 
-  handle = dlopen ((char *) pi->name, RTLD_LAZY);
+  handle = dlopen ((char *) pi->filename, RTLD_LAZY);
 
   /*
    * Note: this can happen if the plugin has an undefined symbol reference,
@@ -40,14 +40,18 @@ load_one_plugin (plugin_main_t * pm, plugin_info_t * pi)
   if (handle == 0)
     {
       clib_warning ("%s", dlerror ());
-      return -1;
+      return 0;
     }
 
   pi->handle = handle;
 
   register_handle = dlsym (pi->handle, "vat_plugin_register");
   if (register_handle == 0)
-    return 0;
+    {
+      clib_warning ("%s: symbol vat_plugin_register not found", pi->name);
+      dlclose (handle);
+      return 0;
+    }
 
   fp = register_handle;
 
@@ -115,6 +119,7 @@ vat_load_new_plugins (plugin_main_t * pm)
       while ((entry = readdir (dp)))
 	{
 	  u8 *plugin_name;
+	  u8 *file_name;
 
 	  if (pm->plugin_name_filter)
 	    {
@@ -124,13 +129,14 @@ vat_load_new_plugins (plugin_main_t * pm)
 		  goto next;
 	    }
 
-	  plugin_name = format (0, "%s/%s%c", plugin_path[i],
-				entry->d_name, 0);
+	  file_name = format (0, "%s/%s%c", plugin_path[i], entry->d_name, 0);
+	  plugin_name = format (0, "%s%c", entry->d_name, 0);
 
 	  /* unreadable */
-	  if (stat ((char *) plugin_name, &statb) < 0)
+	  if (stat ((char *) file_name, &statb) < 0)
 	    {
 	    ignore:
+	      vec_free (file_name);
 	      vec_free (plugin_name);
 	      continue;
 	    }
@@ -144,15 +150,17 @@ vat_load_new_plugins (plugin_main_t * pm)
 	    {
 	      vec_add2 (pm->plugin_info, pi, 1);
 	      pi->name = plugin_name;
+	      pi->filename = file_name;
 	      pi->file_info = statb;
 
-	      if (load_one_plugin (pm, pi))
+	      if (load_one_vat_plugin (pm, pi))
 		{
+		  vec_free (file_name);
 		  vec_free (plugin_name);
 		  _vec_len (pm->plugin_info) = vec_len (pm->plugin_info) - 1;
 		  continue;
 		}
-	      memset (pi, 0, sizeof (*pi));
+	      clib_memset (pi, 0, sizeof (*pi));
 	      hash_set_mem (pm->plugin_by_name_hash, plugin_name,
 			    pi - pm->plugin_info);
 	    }
@@ -180,9 +188,22 @@ int
 vat_plugin_init (vat_main_t * vam)
 {
   plugin_main_t *pm = &vat_plugin_main;
+  u8 *vlib_get_vat_plugin_path (void);
+  u8 *vlib_get_vat_plugin_name_filter (void);
+  u8 *plugin_path;
+  u8 *plugin_name_filter;
 
+  plugin_path = vlib_get_vat_plugin_path ();
+  plugin_name_filter = vlib_get_vat_plugin_name_filter ();
+
+  if (plugin_path)
+    vat_plugin_path = (char *) plugin_path;
+
+  if (plugin_name_filter)
+    vat_plugin_name_filter = (char *) plugin_name_filter;
 
   pm->plugin_path = format (0, "%s%c", vat_plugin_path, 0);
+
   if (vat_plugin_name_filter)
     pm->plugin_name_filter = format (0, "%s%c", vat_plugin_name_filter, 0);
 

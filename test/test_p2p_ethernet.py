@@ -9,10 +9,11 @@ from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP, UDP
 from scapy.layers.inet6 import IPv6
 
-from framework import VppTestCase, VppTestRunner, running_extended_tests
+from framework import VppTestCase, VppTestRunner
 from vpp_sub_interface import VppP2PSubint
-from vpp_ip_route import VppIpRoute, VppRoutePath, DpoProto
-from util import mactobinary
+from vpp_ip import DpoProto
+from vpp_ip_route import VppIpRoute, VppRoutePath
+from vpp_papi import mac_pton
 
 
 class P2PEthernetAPI(VppTestCase):
@@ -32,12 +33,12 @@ class P2PEthernetAPI(VppTestCase):
             i.admin_up()
 
     def create_p2p_ethernet(self, parent_if, sub_id, remote_mac):
-        p2p = VppP2PSubint(self, parent_if, sub_id, mactobinary(remote_mac))
+        p2p = VppP2PSubint(self, parent_if, sub_id, mac_pton(remote_mac))
         self.p2p_sub_ifs.append(p2p)
 
     def delete_p2p_ethernet(self, parent_if, remote_mac):
         self.vapi.delete_p2pethernet_subif(parent_if.sw_if_index,
-                                           mactobinary(remote_mac))
+                                           mac_pton(remote_mac))
 
     def test_api(self):
         """delete/create p2p subif"""
@@ -78,49 +79,17 @@ class P2PEthernetAPI(VppTestCase):
             try:
                 macs.append(':'.join(re.findall('..', '{:02x}'.format(mac+i))))
                 self.vapi.create_p2pethernet_subif(self.pg2.sw_if_index,
-                                                   mactobinary(macs[i-1]),
+                                                   mac_pton(macs[i-1]),
                                                    i)
             except Exception:
-                print "Failed to create subif %d %s" % (i, macs[i-1])
+                self.logger.info("Failed to create subif %d %s" % (
+                    i, macs[i-1]))
                 raise
 
         intfs = self.vapi.cli("show interface").split("\n")
         count = 0
         for intf in intfs:
             if intf.startswith('pg2.'):
-                count += 1
-        self.assertEqual(count, clients)
-
-        self.logger.info("FFP_TEST_FINISH_0001")
-
-    @unittest.skipUnless(running_extended_tests(), "part of extended tests")
-    def test_p2p_subif_creation_10k(self):
-        """create 100k of p2p subifs"""
-        self.logger.info("FFP_TEST_START_0001")
-
-        macs = []
-        clients = 100000
-        mac = int("dead00000000", 16)
-
-        s_time = datetime.datetime.now()
-        for i in range(1, clients+1):
-            if i % 1000 == 0:
-                e_time = datetime.datetime.now()
-                print "Created 1000 subifs in %s secs" % (e_time - s_time)
-                s_time = e_time
-            try:
-                macs.append(':'.join(re.findall('..', '{:02x}'.format(mac+i))))
-                self.vapi.create_p2pethernet_subif(self.pg3.sw_if_index,
-                                                   mactobinary(macs[i-1]),
-                                                   i)
-            except Exception:
-                print "Failed to create subif %d %s" % (i, macs[i-1])
-                raise
-
-        intfs = self.vapi.cli("show interface").split("\n")
-        count = 0
-        for intf in intfs:
-            if intf.startswith('pg3.'):
                 count += 1
         self.assertEqual(count, clients)
 
@@ -159,27 +128,33 @@ class P2PEthernetIPV6(VppTestCase):
         super(P2PEthernetIPV6, self).setUp()
         for p in self.packets:
             self.packets.remove(p)
-        self.create_p2p_ethernet(self.pg0, 1, self.pg0._remote_hosts[0].mac)
-        self.create_p2p_ethernet(self.pg0, 2, self.pg0._remote_hosts[1].mac)
-        self.p2p_sub_ifs[0].config_ip6()
-        self.p2p_sub_ifs[1].config_ip6()
+        self.p2p_sub_ifs.append(
+            self.create_p2p_ethernet(self.pg0, 1,
+                                     self.pg0._remote_hosts[0].mac))
+        self.p2p_sub_ifs.append(
+            self.create_p2p_ethernet(self.pg0, 2,
+                                     self.pg0._remote_hosts[1].mac))
         self.vapi.cli("trace add p2p-ethernet-input 50")
 
     def tearDown(self):
-        self.delete_p2p_ethernet(self.pg0, self.pg0._remote_hosts[0].mac)
-        self.delete_p2p_ethernet(self.pg0, self.pg0._remote_hosts[1].mac)
+        while len(self.p2p_sub_ifs):
+            p2p = self.p2p_sub_ifs.pop()
+            self.delete_p2p_ethernet(p2p)
+
         super(P2PEthernetIPV6, self).tearDown()
 
     def create_p2p_ethernet(self, parent_if, sub_id, remote_mac):
-        p2p = VppP2PSubint(self, parent_if, sub_id, mactobinary(remote_mac))
+        p2p = VppP2PSubint(self, parent_if, sub_id, mac_pton(remote_mac))
         p2p.admin_up()
         p2p.config_ip6()
         p2p.disable_ipv6_ra()
-        self.p2p_sub_ifs.append(p2p)
+        return p2p
 
-    def delete_p2p_ethernet(self, parent_if, remote_mac):
-        self.vapi.delete_p2pethernet_subif(parent_if.sw_if_index,
-                                           mactobinary(remote_mac))
+    def delete_p2p_ethernet(self, p2p):
+        p2p.unconfig_ip6()
+        p2p.admin_down()
+        self.vapi.delete_p2pethernet_subif(p2p.parent.sw_if_index,
+                                           p2p.p2p_remote_mac)
 
     def create_stream(self, src_mac=None, dst_mac=None,
                       src_ip=None, dst_ip=None, size=None):
@@ -201,16 +176,6 @@ class P2PEthernetIPV6(VppTestCase):
         if count is None:
             count = len(packets)
         return dst_if.get_capture(count)
-
-    def verify_counters(self, counter_id, expected_value):
-        counters = self.vapi.cli("sh errors").split('\n')
-        counter_value = -1
-        for i in range(1, len(counters)-1):
-            results = counters[i].split()
-            if results[1] == counter_id:
-                counter_value = int(results[0])
-                break
-        self.assertEqual(counter_value, expected_value)
 
     def test_no_p2p_subif(self):
         """standard routing without p2p subinterfaces"""
@@ -250,7 +215,7 @@ class P2PEthernetIPV6(VppTestCase):
                                dst_ip="9001::100"))
 
         self.send_packets(self.pg0, self.pg1, self.packets)
-        self.verify_counters('p2p-ethernet-input', 1)
+        self.assert_packet_counter_equal('p2p-ethernet-input', 1)
 
         route_9001.remove_vpp_config()
         self.logger.info("FFP_TEST_FINISH_0002")
@@ -388,15 +353,18 @@ class P2PEthernetIPV4(VppTestCase):
         super(P2PEthernetIPV4, self).setUp()
         for p in self.packets:
             self.packets.remove(p)
-        self.create_p2p_ethernet(self.pg0, 1, self.pg0._remote_hosts[0].mac)
-        self.create_p2p_ethernet(self.pg0, 2, self.pg0._remote_hosts[1].mac)
-        self.p2p_sub_ifs[0].config_ip4()
-        self.p2p_sub_ifs[1].config_ip4()
+        self.p2p_sub_ifs.append(
+            self.create_p2p_ethernet(self.pg0, 1,
+                                     self.pg0._remote_hosts[0].mac))
+        self.p2p_sub_ifs.append(
+            self.create_p2p_ethernet(self.pg0, 2,
+                                     self.pg0._remote_hosts[1].mac))
         self.vapi.cli("trace add p2p-ethernet-input 50")
 
     def tearDown(self):
-        self.delete_p2p_ethernet(self.pg0, self.pg0._remote_hosts[0].mac)
-        self.delete_p2p_ethernet(self.pg0, self.pg0._remote_hosts[1].mac)
+        while len(self.p2p_sub_ifs):
+            p2p = self.p2p_sub_ifs.pop()
+            self.delete_p2p_ethernet(p2p)
         super(P2PEthernetIPV4, self).tearDown()
 
     def create_stream(self, src_mac=None, dst_mac=None,
@@ -420,25 +388,17 @@ class P2PEthernetIPV4(VppTestCase):
             count = len(packets)
         return dst_if.get_capture(count)
 
-    def verify_counters(self, counter_id, expected_value):
-        counters = self.vapi.cli("sh errors").split('\n')
-        counter_value = -1
-        for i in range(1, len(counters)-1):
-            results = counters[i].split()
-            if results[1] == counter_id:
-                counter_value = int(results[0])
-                break
-        self.assertEqual(counter_value, expected_value)
-
     def create_p2p_ethernet(self, parent_if, sub_id, remote_mac):
-        p2p = VppP2PSubint(self, parent_if, sub_id, mactobinary(remote_mac))
+        p2p = VppP2PSubint(self, parent_if, sub_id, mac_pton(remote_mac))
         p2p.admin_up()
         p2p.config_ip4()
-        self.p2p_sub_ifs.append(p2p)
+        return p2p
 
-    def delete_p2p_ethernet(self, parent_if, remote_mac):
-        self.vapi.delete_p2pethernet_subif(parent_if.sw_if_index,
-                                           mactobinary(remote_mac))
+    def delete_p2p_ethernet(self, p2p):
+        p2p.unconfig_ip4()
+        p2p.admin_down()
+        self.vapi.delete_p2pethernet_subif(p2p.parent.sw_if_index,
+                                           p2p.p2p_remote_mac)
 
     def test_ip4_rx_p2p_subif(self):
         """receive ipv4 packet via p2p subinterface"""
@@ -457,7 +417,7 @@ class P2PEthernetIPV4(VppTestCase):
 
         self.send_packets(self.pg0, self.pg1, self.packets)
 
-        self.verify_counters('p2p-ethernet-input', 1)
+        self.assert_packet_counter_equal('p2p-ethernet-input', 1)
 
         route_9000.remove_vpp_config()
         self.logger.info("FFP_TEST_FINISH_0002")

@@ -30,6 +30,8 @@ typedef struct _vnet_feature_arc_registration
   /** Start nodes */
   char **start_nodes;
   int n_start_nodes;
+  /** End of the arc (optional, for consistency-checking) */
+  char *last_in_arc;
   /* Feature arc index, assigned by init function */
   u8 feature_arc_index;
   u8 *arc_index_ptr;
@@ -43,7 +45,7 @@ typedef clib_error_t *(vnet_feature_enable_disable_function_t)
 typedef struct _vnet_feature_registration
 {
   /** next registration in list of all registrations*/
-  struct _vnet_feature_registration *next;
+  struct _vnet_feature_registration *next, *next_in_arc;
   /** Feature arc name */
   char *arc_name;
   /** Graph node name */
@@ -60,6 +62,21 @@ typedef struct _vnet_feature_registration
   vnet_feature_enable_disable_function_t *enable_disable_cb;
 } vnet_feature_registration_t;
 
+/** constraint registration object */
+typedef struct _vnet_feature_constraint_registration
+{
+  /** next constraint set in list of all registrations*/
+  struct _vnet_feature_constraint_registration *next, *next_in_arc;
+  /** Feature arc name */
+  char *arc_name;
+
+  /** Feature arc index, assigned by init function */
+  u8 feature_arc_index;
+
+  /** Node names, to run in the specified order */
+  char **node_names;
+} vnet_feature_constraint_registration_t;
+
 typedef struct vnet_feature_config_main_t_
 {
   vnet_config_main_t config_main;
@@ -75,6 +92,8 @@ typedef struct
   /** feature path configuration lists */
   vnet_feature_registration_t *next_feature;
   vnet_feature_registration_t **next_feature_by_arc;
+  vnet_feature_constraint_registration_t *next_constraint;
+  vnet_feature_constraint_registration_t **next_constraint_by_arc;
   uword **next_feature_by_name;
 
   /** feature config main objects */
@@ -99,6 +118,7 @@ typedef struct
 
 extern vnet_feature_main_t feature_main;
 
+#ifndef CLIB_MARCH_VARIANT
 #define VNET_FEATURE_ARC_INIT(x,...)				\
   __VA_ARGS__ vnet_feature_arc_registration_t vnet_feat_arc_##x;\
 static void __vnet_add_feature_arc_registration_##x (void)	\
@@ -108,6 +128,14 @@ static void __vnet_add_feature_arc_registration_##x (void)	\
   vnet_feature_main_t * fm = &feature_main;			\
   vnet_feat_arc_##x.next = fm->next_arc;			\
   fm->next_arc = & vnet_feat_arc_##x;				\
+}								\
+static void __vnet_rm_feature_arc_registration_##x (void)	\
+  __attribute__((__destructor__)) ;				\
+static void __vnet_rm_feature_arc_registration_##x (void)	\
+{								\
+  vnet_feature_main_t * fm = &feature_main;			\
+  vnet_feature_arc_registration_t *r = &vnet_feat_arc_##x;	\
+  VLIB_REMOVE_FROM_LINKED_LIST (fm->next_arc, r, next);		\
 }								\
 __VA_ARGS__ vnet_feature_arc_registration_t vnet_feat_arc_##x
 
@@ -121,7 +149,53 @@ static void __vnet_add_feature_registration_##x (void)		\
   vnet_feat_##x.next = fm->next_feature;			\
   fm->next_feature = & vnet_feat_##x;				\
 }								\
+static void __vnet_rm_feature_registration_##x (void)		\
+  __attribute__((__destructor__)) ;				\
+static void __vnet_rm_feature_registration_##x (void)		\
+{								\
+  vnet_feature_main_t * fm = &feature_main;			\
+  vnet_feature_registration_t *r = &vnet_feat_##x;		\
+  VLIB_REMOVE_FROM_LINKED_LIST (fm->next_feature, r, next);	\
+}								\
 __VA_ARGS__ vnet_feature_registration_t vnet_feat_##x
+
+#define VNET_FEATURE_ARC_ORDER(x,...)                                   \
+  __VA_ARGS__ vnet_feature_constraint_registration_t 			\
+vnet_feature_constraint_##x;                                            \
+static void __vnet_add_constraint_registration_##x (void)		\
+  __attribute__((__constructor__)) ;                                    \
+static void __vnet_add_constraint_registration_##x (void)		\
+{                                                                       \
+  vnet_feature_main_t * fm = &feature_main;                             \
+  vnet_feature_constraint_##x.next = fm->next_constraint;               \
+  fm->next_constraint = & vnet_feature_constraint_##x;                  \
+}                                                                       \
+static void __vnet_rm_constraint_registration_##x (void)		\
+  __attribute__((__destructor__)) ;                                     \
+static void __vnet_rm_constraint_registration_##x (void)		\
+{                                                                       \
+  vnet_feature_main_t * fm = &feature_main;                             \
+  vnet_feature_constraint_registration_t *r = &vnet_feature_constraint_##x; \
+  VLIB_REMOVE_FROM_LINKED_LIST (fm->next_constraint, r, next);          \
+}                                                                       \
+__VA_ARGS__ vnet_feature_constraint_registration_t vnet_feature_constraint_##x
+
+#else
+#define VNET_FEATURE_ARC_INIT(x,...)				\
+extern vnet_feature_arc_registration_t __clib_unused vnet_feat_arc_##x; \
+static vnet_feature_arc_registration_t __clib_unused __clib_unused_vnet_feat_arc_##x
+#define VNET_FEATURE_INIT(x,...)				\
+extern vnet_feature_registration_t __clib_unused vnet_feat_##x; \
+static vnet_feature_registration_t __clib_unused __clib_unused_vnet_feat_##x
+
+#define VNET_FEATURE_ARC_ORDER(x,...)                           \
+extern vnet_feature_constraint_registration_t                   \
+__clib_unused vnet_feature_constraint_##x;                      \
+static vnet_feature_constraint_registration_t __clib_unused 	\
+__clib_unused_vnet_feature_constraint_##x
+
+
+#endif
 
 void
 vnet_config_update_feature_count (vnet_feature_main_t * fm, u8 arc,
@@ -188,7 +262,7 @@ vnet_feature_arc_start_with_data (u8 arc, u32 sw_if_index, u32 * next,
 
   if (PREDICT_FALSE (vnet_have_features (arc, sw_if_index)))
     {
-      b->feature_arc_index = arc;
+      vnet_buffer (b)->feature_arc_index = arc;
       b->current_config_index =
 	vec_elt (cm->config_index_by_sw_if_index, sw_if_index);
       return vnet_get_config_data (&cm->config_main, &b->current_config_index,
@@ -205,11 +279,11 @@ vnet_feature_arc_start (u8 arc, u32 sw_if_index, u32 * next0,
 }
 
 static_always_inline void *
-vnet_feature_next_with_data (u32 sw_if_index, u32 * next0,
-			     vlib_buffer_t * b0, u32 n_data_bytes)
+vnet_feature_next_with_data (u32 * next0, vlib_buffer_t * b0,
+			     u32 n_data_bytes)
 {
   vnet_feature_main_t *fm = &feature_main;
-  u8 arc = b0->feature_arc_index;
+  u8 arc = vnet_buffer (b0)->feature_arc_index;
   vnet_feature_config_main_t *cm = &fm->feature_config_mains[arc];
 
   return vnet_get_config_data (&cm->config_main,
@@ -218,9 +292,16 @@ vnet_feature_next_with_data (u32 sw_if_index, u32 * next0,
 }
 
 static_always_inline void
-vnet_feature_next (u32 sw_if_index, u32 * next0, vlib_buffer_t * b0)
+vnet_feature_next (u32 * next0, vlib_buffer_t * b0)
 {
-  vnet_feature_next_with_data (sw_if_index, next0, b0, 0);
+  vnet_feature_next_with_data (next0, b0, 0);
+}
+
+static_always_inline int
+vnet_device_input_have_features (u32 sw_if_index)
+{
+  vnet_feature_main_t *fm = &feature_main;
+  return vnet_have_features (fm->device_input_feature_arc_index, sw_if_index);
 }
 
 static_always_inline void
@@ -242,12 +323,10 @@ vnet_feature_start_device_input_x1 (u32 sw_if_index, u32 * next0,
        */
       u16 adv;
 
-      vnet_buffer (b0)->device_input_feat.saved_next_index = *next0;
       adv = device_input_next_node_advance[*next0];
-      vnet_buffer (b0)->device_input_feat.buffer_advance = adv;
       vlib_buffer_advance (b0, -adv);
 
-      b0->feature_arc_index = feature_arc_index;
+      vnet_buffer (b0)->feature_arc_index = feature_arc_index;
       b0->current_config_index =
 	vec_elt (cm->config_index_by_sw_if_index, sw_if_index);
       vnet_get_config_data (&cm->config_main, &b0->current_config_index,
@@ -276,18 +355,14 @@ vnet_feature_start_device_input_x2 (u32 sw_if_index,
        */
       u16 adv;
 
-      vnet_buffer (b0)->device_input_feat.saved_next_index = *next0;
       adv = device_input_next_node_advance[*next0];
-      vnet_buffer (b0)->device_input_feat.buffer_advance = adv;
       vlib_buffer_advance (b0, -adv);
 
-      vnet_buffer (b1)->device_input_feat.saved_next_index = *next1;
       adv = device_input_next_node_advance[*next1];
-      vnet_buffer (b1)->device_input_feat.buffer_advance = adv;
       vlib_buffer_advance (b1, -adv);
 
-      b0->feature_arc_index = feature_arc_index;
-      b1->feature_arc_index = feature_arc_index;
+      vnet_buffer (b0)->feature_arc_index = feature_arc_index;
+      vnet_buffer (b1)->feature_arc_index = feature_arc_index;
       b0->current_config_index =
 	vec_elt (cm->config_index_by_sw_if_index, sw_if_index);
       b1->current_config_index = b0->current_config_index;
@@ -323,30 +398,22 @@ vnet_feature_start_device_input_x4 (u32 sw_if_index,
        */
       u16 adv;
 
-      vnet_buffer (b0)->device_input_feat.saved_next_index = *next0;
       adv = device_input_next_node_advance[*next0];
-      vnet_buffer (b0)->device_input_feat.buffer_advance = adv;
       vlib_buffer_advance (b0, -adv);
 
-      vnet_buffer (b1)->device_input_feat.saved_next_index = *next1;
       adv = device_input_next_node_advance[*next1];
-      vnet_buffer (b1)->device_input_feat.buffer_advance = adv;
       vlib_buffer_advance (b1, -adv);
 
-      vnet_buffer (b2)->device_input_feat.saved_next_index = *next2;
       adv = device_input_next_node_advance[*next2];
-      vnet_buffer (b2)->device_input_feat.buffer_advance = adv;
       vlib_buffer_advance (b2, -adv);
 
-      vnet_buffer (b3)->device_input_feat.saved_next_index = *next3;
       adv = device_input_next_node_advance[*next3];
-      vnet_buffer (b3)->device_input_feat.buffer_advance = adv;
       vlib_buffer_advance (b3, -adv);
 
-      b0->feature_arc_index = feature_arc_index;
-      b1->feature_arc_index = feature_arc_index;
-      b2->feature_arc_index = feature_arc_index;
-      b3->feature_arc_index = feature_arc_index;
+      vnet_buffer (b0)->feature_arc_index = feature_arc_index;
+      vnet_buffer (b1)->feature_arc_index = feature_arc_index;
+      vnet_buffer (b2)->feature_arc_index = feature_arc_index;
+      vnet_buffer (b3)->feature_arc_index = feature_arc_index;
 
       b0->current_config_index =
 	vec_elt (cm->config_index_by_sw_if_index, sw_if_index);
@@ -367,14 +434,17 @@ vnet_feature_start_device_input_x4 (u32 sw_if_index,
 
 #define VNET_FEATURES(...)  (char*[]) { __VA_ARGS__, 0}
 
-clib_error_t *vnet_feature_arc_init (vlib_main_t * vm,
-				     vnet_config_main_t * vcm,
-				     char **feature_start_nodes,
-				     int num_feature_start_nodes,
-				     vnet_feature_registration_t *
-				     first_reg, char ***feature_nodes);
+clib_error_t *vnet_feature_arc_init
+  (vlib_main_t * vm,
+   vnet_config_main_t * vcm,
+   char **feature_start_nodes,
+   int num_feature_start_nodes,
+   vnet_feature_registration_t * first_reg,
+   vnet_feature_constraint_registration_t * first_const_set,
+   char ***in_feature_nodes);
 
-void vnet_interface_features_show (vlib_main_t * vm, u32 sw_if_index);
+void vnet_interface_features_show (vlib_main_t * vm, u32 sw_if_index,
+				   int verbose);
 
 #endif /* included_feature_h */
 

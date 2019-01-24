@@ -38,7 +38,9 @@
  */
 
 #include <vlib/vlib.h>
+#include <vlib/unix/unix.h>
 #include <vppinfra/cpu.h>
+#include <vppinfra/elog.h>
 #include <unistd.h>
 #include <ctype.h>
 
@@ -582,6 +584,23 @@ vlib_cli_dispatch_sub_commands (vlib_main_t * vm,
 	    }
 	  else
 	    {
+	      if (PREDICT_FALSE (vm->elog_trace_cli_commands))
+		{
+                  /* *INDENT-OFF* */
+                  ELOG_TYPE_DECLARE (e) =
+                    {
+                      .format = "cli-cmd: %s",
+                      .format_args = "T4",
+                    };
+                  /* *INDENT-ON* */
+		  struct
+		  {
+		    u32 c;
+		  } *ed;
+		  ed = ELOG_DATA (&vm->elog_main, e);
+		  ed->c = elog_global_id_for_msg_name (c->path);
+		}
+
 	      if (!c->is_mp_safe)
 		vlib_worker_thread_barrier_sync (vm);
 
@@ -589,6 +608,32 @@ vlib_cli_dispatch_sub_commands (vlib_main_t * vm,
 
 	      if (!c->is_mp_safe)
 		vlib_worker_thread_barrier_release (vm);
+
+	      if (PREDICT_FALSE (vm->elog_trace_cli_commands))
+		{
+                  /* *INDENT-OFF* */
+                  ELOG_TYPE_DECLARE (e) =
+                    {
+                      .format = "cli-cmd: %s %s",
+                      .format_args = "T4T4",
+                    };
+                  /* *INDENT-ON* */
+		  struct
+		  {
+		    u32 c, err;
+		  } *ed;
+		  ed = ELOG_DATA (&vm->elog_main, e);
+		  ed->c = elog_global_id_for_msg_name (c->path);
+		  if (c_error)
+		    {
+		      vec_add1 (c_error->what, 0);
+		      ed->err = elog_global_id_for_msg_name
+			((const char *) c_error->what);
+		      _vec_len (c_error->what) -= 1;
+		    }
+		  else
+		    ed->err = elog_global_id_for_msg_name ("OK");
+		}
 
 	      if (c_error)
 		{
@@ -699,11 +744,14 @@ vlib_cli_output (vlib_main_t * vm, char *fmt, ...)
   vec_free (s);
 }
 
+void *vl_msg_push_heap (void) __attribute__ ((weak));
+void vl_msg_pop_heap (void *oldheap) __attribute__ ((weak));
+
 static clib_error_t *
 show_memory_usage (vlib_main_t * vm,
 		   unformat_input_t * input, vlib_cli_command_t * cmd)
 {
-  int verbose = 0;
+  int verbose __attribute__ ((unused)) = 0, api_segment = 0;
   clib_error_t *error;
   u32 index = 0;
 
@@ -711,6 +759,8 @@ show_memory_usage (vlib_main_t * vm,
     {
       if (unformat (input, "verbose"))
 	verbose = 1;
+      else if (unformat (input, "api-segment"))
+	api_segment = 1;
       else
 	{
 	  error = clib_error_return (0, "unknown input `%U'",
@@ -719,21 +769,79 @@ show_memory_usage (vlib_main_t * vm,
 	}
     }
 
+  if (api_segment)
+    {
+      void *oldheap = vl_msg_push_heap ();
+      u8 *s_in_svm =
+	format (0, "%U\n", format_mheap, clib_mem_get_heap (), 1);
+      vl_msg_pop_heap (oldheap);
+      u8 *s = vec_dup (s_in_svm);
+
+      oldheap = vl_msg_push_heap ();
+      vec_free (s_in_svm);
+      vl_msg_pop_heap (oldheap);
+      vlib_cli_output (vm, "API segment start:");
+      vlib_cli_output (vm, "%v", s);
+      vlib_cli_output (vm, "API segment end:");
+      vec_free (s);
+    }
+
+#if USE_DLMALLOC == 0
   /* *INDENT-OFF* */
   foreach_vlib_main (
   ({
-      vlib_cli_output (vm, "Thread %d %v\n", index, vlib_worker_threads[index].name);
-      vlib_cli_output (vm, "%U\n", format_mheap, clib_per_cpu_mheaps[index], verbose);
+      mheap_t *h = mheap_header (clib_per_cpu_mheaps[index]);
+      vlib_cli_output (vm, "%sThread %d %s\n", index ? "\n":"", index,
+		       vlib_worker_threads[index].name);
+      vlib_cli_output (vm, "  %U\n", format_page_map, pointer_to_uword (h) -
+		       h->vm_alloc_offset_from_header,
+		       h->vm_alloc_size);
+      vlib_cli_output (vm, "  %U\n", format_mheap, clib_per_cpu_mheaps[index],
+                       verbose);
       index++;
   }));
   /* *INDENT-ON* */
+#else
+  {
+    uword clib_mem_trace_enable_disable (uword enable);
+    uword was_enabled;
+
+    /*
+     * Note: the foreach_vlib_main cause allocator traffic,
+     * so shut off tracing before we go there...
+     */
+    was_enabled = clib_mem_trace_enable_disable (0);
+
+    /* *INDENT-OFF* */
+    foreach_vlib_main (
+    ({
+      struct dlmallinfo mi;
+      void *mspace;
+      mspace = clib_per_cpu_mheaps[index];
+
+      mi = mspace_mallinfo (mspace);
+      vlib_cli_output (vm, "%sThread %d %s\n", index ? "\n":"", index,
+		       vlib_worker_threads[index].name);
+      vlib_cli_output (vm, "  %U\n", format_page_map,
+                       pointer_to_uword (mspace_least_addr(mspace)),
+                       mi.arena);
+      vlib_cli_output (vm, "  %U\n", format_mheap, clib_per_cpu_mheaps[index],
+                       verbose);
+      index++;
+    }));
+    /* *INDENT-ON* */
+
+    /* Restore the trace flag */
+    clib_mem_trace_enable_disable (was_enabled);
+  }
+#endif /* USE_DLMALLOC */
   return 0;
 }
 
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_memory_usage_command, static) = {
   .path = "show memory",
-  .short_help = "Show current memory usage",
+  .short_help = "[verbose | api-segment] Show current memory usage",
   .function = show_memory_usage,
 };
 /* *INDENT-ON* */
@@ -744,7 +852,7 @@ show_cpu (vlib_main_t * vm, unformat_input_t * input,
 {
 #define _(a,b,c) vlib_cli_output (vm, "%-25s " b, a ":", c);
   _("Model name", "%U", format_cpu_model_name);
-  _("Microarchitecture", "%U", format_cpu_uarch);
+  _("Microarch model (family)", "%U", format_cpu_uarch);
   _("Flags", "%U", format_cpu_flags);
   _("Base frequency", "%.2f GHz",
     ((f64) vm->clib_time.clocks_per_second) * 1e-9);
@@ -771,30 +879,48 @@ VLIB_CLI_COMMAND (show_cpu_command, static) = {
 };
 
 /* *INDENT-ON* */
+
 static clib_error_t *
 enable_disable_memory_trace (vlib_main_t * vm,
 			     unformat_input_t * input,
 			     vlib_cli_command_t * cmd)
 {
-  clib_error_t *error = 0;
+  unformat_input_t _line_input, *line_input = &_line_input;
   int enable;
+  int api_segment = 0;
+  void *oldheap;
 
-  if (!unformat_user (input, unformat_vlib_enable_disable, &enable))
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
-      error = clib_error_return (0, "expecting enable/on or disable/off");
-      goto done;
+      if (unformat (line_input, "%U", unformat_vlib_enable_disable, &enable))
+	;
+      else if (unformat (line_input, "api-segment"))
+	api_segment = 1;
+      else
+	{
+	  unformat_free (line_input);
+	  return clib_error_return (0, "invalid input");
+	}
     }
+  unformat_free (line_input);
 
+  if (api_segment)
+    oldheap = vl_msg_push_heap ();
   clib_mem_trace (enable);
+  if (api_segment)
+    vl_msg_pop_heap (oldheap);
 
-done:
-  return error;
+  return 0;
 }
 
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (enable_disable_memory_trace_command, static) = {
   .path = "memory-trace",
-  .short_help = "Enable/disable memory allocation trace",
+  .short_help = "on|off [api-segment] Enable/disable memory allocation trace",
   .function = enable_disable_memory_trace,
 };
 /* *INDENT-ON* */
@@ -804,6 +930,7 @@ static clib_error_t *
 test_heap_validate (vlib_main_t * vm, unformat_input_t * input,
 		    vlib_cli_command_t * cmd)
 {
+#if USE_DLMALLOC == 0
   clib_error_t *error = 0;
   void *heap;
   mheap_t *mheap;
@@ -851,6 +978,9 @@ test_heap_validate (vlib_main_t * vm, unformat_input_t * input,
     }
 
   return error;
+#else
+  return clib_error_return (0, "unimplemented...");
+#endif /* USE_DLMALLOC */
 }
 
 /* *INDENT-OFF* */
@@ -865,9 +995,23 @@ static clib_error_t *
 restart_cmd_fn (vlib_main_t * vm, unformat_input_t * input,
 		vlib_cli_command_t * cmd)
 {
-  char *newenviron[] = { NULL };
+  clib_file_main_t *fm = &file_main;
+  clib_file_t *f;
 
-  execve (vm->name, (char **) vm->argv, newenviron);
+  /* environ(7) does not indicate a header for this */
+  extern char **environ;
+
+  /* Close all known open files */
+  /* *INDENT-OFF* */
+  pool_foreach(f, fm->file_pool,
+    ({
+      if (f->file_descriptor > 2)
+        close(f->file_descriptor);
+    }));
+  /* *INDENT-ON* */
+
+  /* Exec ourself */
+  execve (vm->name, (char **) vm->argv, environ);
 
   return 0;
 }
@@ -1312,6 +1456,75 @@ VLIB_CLI_COMMAND (show_cli_command, static) = {
   .path = "show cli",
   .short_help = "Show cli commands",
   .function = show_cli_cmd_fn,
+};
+/* *INDENT-ON* */
+
+static clib_error_t *
+elog_trace_command_fn (vlib_main_t * vm,
+		       unformat_input_t * input, vlib_cli_command_t * cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  int enable = 1;
+  int api = 0, cli = 0, barrier = 0;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    goto print_status;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "api"))
+	api = 1;
+      else if (unformat (line_input, "cli"))
+	cli = 1;
+      else if (unformat (line_input, "barrier"))
+	barrier = 1;
+      else if (unformat (line_input, "disable"))
+	enable = 0;
+      else if (unformat (line_input, "enable"))
+	enable = 1;
+      else
+	break;
+    }
+  unformat_free (line_input);
+
+  vm->elog_trace_api_messages = api ? enable : vm->elog_trace_api_messages;
+  vm->elog_trace_cli_commands = cli ? enable : vm->elog_trace_cli_commands;
+  vlib_worker_threads->barrier_elog_enabled =
+    barrier ? enable : vlib_worker_threads->barrier_elog_enabled;
+
+print_status:
+  vlib_cli_output (vm, "Current status:");
+
+  vlib_cli_output
+    (vm, "    Event log API message trace: %s\n    CLI command trace: %s",
+     vm->elog_trace_api_messages ? "on" : "off",
+     vm->elog_trace_cli_commands ? "on" : "off");
+  vlib_cli_output
+    (vm, "    Barrier sync trace: %s",
+     vlib_worker_threads->barrier_elog_enabled ? "on" : "off");
+
+  return 0;
+}
+
+/*?
+ * Control event logging of api, cli, and thread barrier events
+ * With no arguments, displays the current trace status.
+ * Name the event groups you wish to trace or stop tracing.
+ *
+ * @cliexpar
+ * @clistart
+ * elog trace api cli barrier
+ * elog trace api cli barrier disable
+ * elog trace
+ * @cliend
+ * @cliexcmd{elog trace [api][cli][barrier][disable]}
+?*/
+/* *INDENT-OFF* */
+VLIB_CLI_COMMAND (elog_trace_command, static) =
+{
+  .path = "elog trace",
+  .short_help = "elog trace [api][cli][barrier][disable]",
+  .function = elog_trace_command_fn,
 };
 /* *INDENT-ON* */
 

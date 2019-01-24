@@ -112,7 +112,7 @@ static void
       rv = VNET_API_ERROR_SAME_SRC_DST;
       goto out;
     }
-  memset (a, 0, sizeof (*a));
+  clib_memset (a, 0, sizeof (*a));
 
   a->is_add = mp->is_add;
   a->is_ip6 = mp->is_ipv6;
@@ -144,7 +144,7 @@ out:
 }
 
 static void send_vxlan_gpe_tunnel_details
-  (vxlan_gpe_tunnel_t * t, unix_shared_memory_queue_t * q, u32 context)
+  (vxlan_gpe_tunnel_t * t, vl_api_registration_t * reg, u32 context)
 {
   vl_api_vxlan_gpe_tunnel_details_t *rmp;
   ip4_main_t *im4 = &ip4_main;
@@ -152,7 +152,7 @@ static void send_vxlan_gpe_tunnel_details
   u8 is_ipv6 = !(t->flags & VXLAN_GPE_TUNNEL_IS_IPV4);
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  memset (rmp, 0, sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
   rmp->_vl_msg_id = ntohs (VL_API_VXLAN_GPE_TUNNEL_DETAILS);
   if (is_ipv6)
     {
@@ -175,22 +175,20 @@ static void send_vxlan_gpe_tunnel_details
   rmp->is_ipv6 = is_ipv6;
   rmp->context = context;
 
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void vl_api_vxlan_gpe_tunnel_dump_t_handler
   (vl_api_vxlan_gpe_tunnel_dump_t * mp)
 {
-  unix_shared_memory_queue_t *q;
+  vl_api_registration_t *reg;
   vxlan_gpe_main_t *vgm = &vxlan_gpe_main;
   vxlan_gpe_tunnel_t *t;
   u32 sw_if_index;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
-    {
-      return;
-    }
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
 
   sw_if_index = ntohl (mp->sw_if_index);
 
@@ -199,7 +197,7 @@ static void vl_api_vxlan_gpe_tunnel_dump_t_handler
       /* *INDENT-OFF* */
       pool_foreach (t, vgm->tunnels,
       ({
-        send_vxlan_gpe_tunnel_details(t, q, mp->context);
+        send_vxlan_gpe_tunnel_details(t, reg, mp->context);
       }));
       /* *INDENT-ON* */
     }
@@ -211,7 +209,7 @@ static void vl_api_vxlan_gpe_tunnel_dump_t_handler
 	  return;
 	}
       t = &vgm->tunnels[vgm->tunnel_index_by_sw_if_index[sw_if_index]];
-      send_vxlan_gpe_tunnel_details (t, q, mp->context);
+      send_vxlan_gpe_tunnel_details (t, reg, mp->context);
     }
 }
 
@@ -219,7 +217,7 @@ static void vl_api_vxlan_gpe_tunnel_dump_t_handler
 /*
  * vpe_api_hookup
  * Add vpe's API message handlers to the table.
- * vlib has alread mapped shared memory and
+ * vlib has already mapped shared memory and
  * added the client registration handlers.
  * See .../vlib-api/vlibmemory/memclnt_vlib.c:memclnt_process()
  */

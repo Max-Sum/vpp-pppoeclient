@@ -56,9 +56,9 @@ struct vlib_main_t;
 #include <vlib/counter.h>
 #include <vlib/error.h>
 #include <vlib/init.h>
-#include <vlib/mc.h>
 #include <vlib/node.h>
 #include <vlib/trace.h>
+#include <vlib/log.h>
 
 /* Main include depends on other vlib/ includes so we put it last. */
 #include <vlib/main.h>
@@ -73,8 +73,8 @@ struct vlib_main_t;
 #include <vlib/node_funcs.h>
 #include <vlib/trace_funcs.h>
 #include <vlib/global_funcs.h>
-
 #include <vlib/buffer_node.h>
+#include <vppinfra/pcap_funcs.h>
 
 #endif /* included_vlib_h */
 

@@ -89,7 +89,7 @@ format_hex_bytes (u8 * s, va_list * va)
 
   /* Print short or long form depending on byte count. */
   uword short_form = n_bytes <= 32;
-  uword indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
 
   if (n_bytes == 0)
     return s;
@@ -112,7 +112,7 @@ format_hex_bytes (u8 * s, va_list * va)
 u8 *
 format_white_space (u8 * s, va_list * va)
 {
-  uword n = va_arg (*va, uword);
+  u32 n = va_arg (*va, u32);
   while (n-- > 0)
     vec_add1 (s, ' ');
   return s;
@@ -253,7 +253,7 @@ unformat_memory_size (unformat_input_t * input, va_list * va)
 }
 
 /* Format c identifier: e.g. a_name -> "a name".
-   Words for both vector names and null terminated c strings. */
+   Works for both vector names and null terminated c strings. */
 u8 *
 format_c_identifier (u8 * s, va_list * va)
 {
@@ -286,7 +286,7 @@ format_hexdump (u8 * s, va_list * args)
   const int line_len = 16;
   u8 *line_hex = 0;
   u8 *line_str = 0;
-  uword indent = format_get_indent (s);
+  u32 indent = format_get_indent (s);
 
   if (!len)
     return s;
@@ -313,7 +313,8 @@ format_hexdump (u8 * s, va_list * args)
 
   if (vec_len (line_hex))
     s = format (s, "%U%05x: %v[%v]",
-		format_white_space, indent, index, line_hex, line_str);
+		format_white_space, index ? indent : 0,
+		index, line_hex, line_str);
 
   vec_free (line_hex);
   vec_free (line_str);

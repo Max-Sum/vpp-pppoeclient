@@ -18,22 +18,6 @@
 #include <vlib/main.h>
 #include <linux/sched.h>
 
-/*
- * To enable detailed tracing of barrier usage, including call stacks and
- * timings, define BARRIER_TRACING here or in relevant TAGS.  If also used
- * with CLIB_DEBUG, timing will _not_ be representative of normal code
- * execution.
- *
- */
-
-// #define BARRIER_TRACING 1
-
-/*
- * Two options for barrier tracing output: syslog & elog.
- */
-
-// #define BARRIER_TRACING_ELOG 1
-
 extern vlib_main_t **vlib_mains;
 
 void vlib_set_thread_name (char *name);
@@ -118,14 +102,15 @@ typedef struct
   vlib_thread_registration_t *registration;
   u8 *name;
   u64 barrier_sync_count;
-#ifdef BARRIER_TRACING
+  u8 barrier_elog_enabled;
   const char *barrier_caller;
   const char *barrier_context;
-#endif
   volatile u32 *node_reforks_required;
 
   long lwp;
-  int lcore_id;
+  int cpu_id;
+  int core_id;
+  int socket_id;
   pthread_t thread_id;
 } vlib_worker_thread_t;
 
@@ -163,8 +148,18 @@ vlib_frame_queue_t;
 
 typedef struct
 {
+  vlib_frame_queue_elt_t **handoff_queue_elt_by_thread_index;
+  vlib_frame_queue_t **congested_handoff_queue_by_thread_index;
+} vlib_frame_queue_per_thread_data_t;
+
+typedef struct
+{
   u32 node_index;
+  u32 frame_queue_nelts;
+  u32 queue_hi_thresh;
+
   vlib_frame_queue_t **vlib_frame_queues;
+  vlib_frame_queue_per_thread_data_t *per_thread_data;
 
   /* for frame queue tracing */
   frame_queue_trace_t *frame_queue_traces;
@@ -206,12 +201,7 @@ u32 vlib_frame_queue_main_init (u32 node_index, u32 frame_queue_nelts);
 #define BARRIER_SYNC_TIMEOUT (1.0)
 #endif
 
-#ifdef BARRIER_TRACING
 #define vlib_worker_thread_barrier_sync(X) {vlib_worker_threads[0].barrier_caller=__FUNCTION__;vlib_worker_thread_barrier_sync_int(X);}
-#else
-#define vlib_worker_thread_barrier_sync(X) vlib_worker_thread_barrier_sync_int(X)
-#endif
-
 
 void vlib_worker_thread_barrier_sync_int (vlib_main_t * vm);
 void vlib_worker_thread_barrier_release (vlib_main_t * vm);
@@ -282,8 +272,8 @@ typedef enum
 typedef struct
 {
   clib_error_t *(*vlib_launch_thread_cb) (void *fp, vlib_worker_thread_t * w,
-					  unsigned lcore_id);
-  clib_error_t *(*vlib_thread_set_lcore_cb) (u32 thread, u16 lcore);
+					  unsigned cpu_id);
+  clib_error_t *(*vlib_thread_set_lcore_cb) (u32 thread, u16 cpu);
 } vlib_thread_callbacks_t;
 
 typedef struct
@@ -323,7 +313,7 @@ typedef struct
   u8 *thread_prefix;
 
   /* main thread lcore */
-  u8 main_lcore;
+  u32 main_lcore;
 
   /* Bitmap of available CPU cores */
   uword *cpu_core_bitmap;
@@ -362,6 +352,13 @@ static void __vlib_add_thread_registration_##x (void)   \
   x.next = tm->next;                                    \
   tm->next = &x;                                        \
 }                                                       \
+static void __vlib_rm_thread_registration_##x (void)    \
+  __attribute__((__destructor__)) ;                     \
+static void __vlib_rm_thread_registration_##x (void)    \
+{                                                       \
+  vlib_thread_main_t * tm = &vlib_thread_main;          \
+  VLIB_REMOVE_FROM_LINKED_LIST (tm->next, &x, next);    \
+}                                                       \
 __VA_ARGS__ vlib_thread_registration_t x
 
 always_inline u32
@@ -393,8 +390,31 @@ vlib_worker_thread_barrier_check (void)
 {
   if (PREDICT_FALSE (*vlib_worker_threads->wait_at_barrier))
     {
-      vlib_main_t *vm;
-      clib_smp_atomic_add (vlib_worker_threads->workers_at_barrier, 1);
+      vlib_main_t *vm = vlib_get_main ();
+      u32 thread_index = vm->thread_index;
+      f64 t = vlib_time_now (vm);
+
+      if (PREDICT_FALSE (vlib_worker_threads->barrier_elog_enabled))
+	{
+	  vlib_worker_thread_t *w = vlib_worker_threads + thread_index;
+	  /* *INDENT-OFF* */
+	  ELOG_TYPE_DECLARE (e) = {
+	    .format = "barrier-wait-thread-%d",
+	    .format_args = "i4",
+	  };
+	  /* *INDENT-ON* */
+
+	  struct
+	  {
+	    u32 thread_index;
+	  } __clib_packed *ed;
+
+	  ed = ELOG_TRACK_DATA (&vlib_global_main.elog_main, e,
+				w->elog_track);
+	  ed->thread_index = thread_index;
+	}
+
+      clib_atomic_fetch_add (vlib_worker_threads->workers_at_barrier, 1);
       if (CLIB_DEBUG > 0)
 	{
 	  vm = vlib_get_main ();
@@ -404,15 +424,58 @@ vlib_worker_thread_barrier_check (void)
 	;
       if (CLIB_DEBUG > 0)
 	vm->parked_at_barrier = 0;
-      clib_smp_atomic_add (vlib_worker_threads->workers_at_barrier, -1);
+      clib_atomic_fetch_add (vlib_worker_threads->workers_at_barrier, -1);
 
       if (PREDICT_FALSE (*vlib_worker_threads->node_reforks_required))
 	{
+	  if (PREDICT_FALSE (vlib_worker_threads->barrier_elog_enabled))
+	    {
+	      t = vlib_time_now (vm) - t;
+	      vlib_worker_thread_t *w = vlib_worker_threads + thread_index;
+              /* *INDENT-OFF* */
+              ELOG_TYPE_DECLARE (e) = {
+                .format = "barrier-refork-thread-%d",
+                .format_args = "i4",
+              };
+              /* *INDENT-ON* */
+
+	      struct
+	      {
+		u32 thread_index;
+	      } __clib_packed *ed;
+
+	      ed = ELOG_TRACK_DATA (&vlib_global_main.elog_main, e,
+				    w->elog_track);
+	      ed->thread_index = thread_index;
+	    }
+
 	  vlib_worker_thread_node_refork ();
-	  clib_smp_atomic_add (vlib_worker_threads->node_reforks_required,
-			       -1);
+	  clib_atomic_fetch_add (vlib_worker_threads->node_reforks_required,
+				 -1);
 	  while (*vlib_worker_threads->node_reforks_required)
 	    ;
+	}
+      if (PREDICT_FALSE (vlib_worker_threads->barrier_elog_enabled))
+	{
+	  t = vlib_time_now (vm) - t;
+	  vlib_worker_thread_t *w = vlib_worker_threads + thread_index;
+	  /* *INDENT-OFF* */
+	  ELOG_TYPE_DECLARE (e) = {
+	    .format = "barrier-released-thread-%d: %dus",
+	    .format_args = "i4i4",
+	  };
+	  /* *INDENT-ON* */
+
+	  struct
+	  {
+	    u32 thread_index;
+	    u32 duration;
+	  } __clib_packed *ed;
+
+	  ed = ELOG_TRACK_DATA (&vlib_global_main.elog_main, e,
+				w->elog_track);
+	  ed->thread_index = thread_index;
+	  ed->duration = (int) (1000000.0 * t);
 	}
     }
 }
@@ -426,6 +489,14 @@ vlib_get_worker_vlib_main (u32 worker_index)
   vm = vlib_mains[worker_index + 1];
   ASSERT (vm);
   return vm;
+}
+
+static inline u8
+vlib_thread_is_main_w_barrier (void)
+{
+  return (!vlib_num_workers ()
+	  || ((vlib_get_thread_index () == 0
+	       && vlib_worker_threads->wait_at_barrier[0])));
 }
 
 static inline void
@@ -448,7 +519,7 @@ vlib_get_frame_queue_elt (u32 frame_queue_index, u32 index)
   fq = fqm->vlib_frame_queues[index];
   ASSERT (fq);
 
-  new_tail = __sync_add_and_fetch (&fq->tail, 1);
+  new_tail = clib_atomic_add_fetch (&fq->tail, 1);
 
   /* Wait until a ring slot is available */
   while (new_tail >= fq->head_hint + fq->nelts)
@@ -526,6 +597,7 @@ vlib_process_signal_event_mt_helper (vlib_process_signal_event_mt_args_t *
 				     args);
 void vlib_rpc_call_main_thread (void *function, u8 * args, u32 size);
 
+u32 elog_global_id_for_msg_name (const char *msg_name);
 #endif /* included_vlib_threads_h */
 
 /*

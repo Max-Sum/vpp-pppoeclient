@@ -16,10 +16,12 @@
 #ifndef __FIB_TYPES_H__
 #define __FIB_TYPES_H__
 
+#include <stdbool.h>
 #include <vlib/vlib.h>
 #include <vnet/ip/ip6_packet.h>
 #include <vnet/mpls/packet.h>
 #include <vnet/dpo/dpo.h>
+#include <vnet/bier/bier_types.h>
 
 /**
  * A typedef of a node index.
@@ -50,6 +52,12 @@ typedef enum fib_protocol_t_ {
 #define FIB_PROTOCOL_MAX (FIB_PROTOCOL_MPLS + 1)
 
 /**
+ * Definition outside of enum so it does not need to be included in non-defaulted
+ * switch statements
+ */
+#define FIB_PROTOCOL_IP_MAX (FIB_PROTOCOL_IP6 + 1)
+
+/**
  * Not part of the enum so it does not have to be handled in switch statements
  */
 #define FIB_PROTOCOL_NONE (FIB_PROTOCOL_MAX+1)
@@ -63,6 +71,26 @@ typedef enum fib_protocol_t_ {
     for (_item = FIB_PROTOCOL_IP4;         \
 	 _item <= FIB_PROTOCOL_IP6;        \
 	 _item++)
+
+/**
+ * @brief Convert from boolean is_ip6 to FIB protocol.
+ * Drop MPLS on the floor in favor of IPv4.
+ */
+static inline fib_protocol_t
+fib_ip_proto(bool is_ip6)
+{
+  return (is_ip6) ? FIB_PROTOCOL_IP6 : FIB_PROTOCOL_IP4;
+}
+
+/**
+ * @brief Convert from fib_protocol to ip46_type
+ */
+extern ip46_type_t fib_proto_to_ip46(fib_protocol_t fproto);
+
+/**
+ * @brief Convert from ip46_type to fib_protocol
+ */
+extern fib_protocol_t fib_proto_from_ip46(ip46_type_t iproto);
 
 /**
  * @brief Convert from a protocol to a link type
@@ -88,6 +116,10 @@ typedef enum fib_forward_chain_type_t_ {
      * MPLS packets
      */
     FIB_FORW_CHAIN_TYPE_MPLS_NON_EOS,
+    /**
+     * Contribute an object that is to be used to forward BIER packets.
+     */
+    FIB_FORW_CHAIN_TYPE_BIER,
     /**
      * Contribute an object that is to be used to forward end-of-stack
      * MPLS packets. This is a convenient ID for clients. A real EOS chain
@@ -117,6 +149,7 @@ typedef enum fib_forward_chain_type_t_ {
 
 #define FIB_FORW_CHAINS {					\
     [FIB_FORW_CHAIN_TYPE_ETHERNET]      = "ethernet",     	\
+    [FIB_FORW_CHAIN_TYPE_BIER]          = "bier",     	        \
     [FIB_FORW_CHAIN_TYPE_UNICAST_IP4]   = "unicast-ip4",	\
     [FIB_FORW_CHAIN_TYPE_UNICAST_IP6]   = "unicast-ip6",	\
     [FIB_FORW_CHAIN_TYPE_MCAST_IP4]     = "multicast-ip4",	\
@@ -140,14 +173,24 @@ typedef enum fib_forward_chain_type_t_ {
 	 _item++)
 
 /**
- * @brief Convert from a chain type to the adjacencies link type
+ * @brief Convert from a chain type to the adjacency's link type
  */
 extern vnet_link_t fib_forw_chain_type_to_link_type(fib_forward_chain_type_t fct);
+
+/**
+ * @brief Convert from a adjacency's link type to chain type
+ */
+extern fib_forward_chain_type_t fib_forw_chain_type_from_link_type(vnet_link_t lt);
 
 /**
  * @brief Convert from a payload-protocol to a chain type.
  */
 extern fib_forward_chain_type_t fib_forw_chain_type_from_dpo_proto(dpo_proto_t proto);
+
+/**
+ * @brief Convert from a fib-protocol to a chain type.
+ */
+extern fib_forward_chain_type_t fib_forw_chain_type_from_fib_proto(fib_protocol_t proto);
 
 /**
  * @brief Convert from a chain type to the DPO proto it will install
@@ -231,6 +274,11 @@ extern dpo_proto_t fib_proto_to_dpo(fib_protocol_t fib_proto);
 extern fib_protocol_t dpo_proto_to_fib(dpo_proto_t dpo_proto);
 
 /**
+ * Convert from BIER next-hop proto to FIB proto
+ */
+extern fib_protocol_t bier_hdr_proto_to_fib(bier_hdr_proto_id_t bproto);
+
+/**
  * Enurmeration of special path/entry types
  */
 typedef enum fib_special_type_t_ {
@@ -261,8 +309,8 @@ typedef enum fib_special_type_t_ {
     for (_item = FIB_TYPE_SPEICAL_FIRST;		\
 	 _item <= FIB_SPEICAL_TYPE_LAST; _item++)
 
-extern u8 * format_fib_protocol(u8 * s, va_list ap);
-extern u8 * format_vnet_link(u8 *s, va_list ap);
+extern u8 * format_fib_protocol(u8 * s, va_list *ap);
+extern u8 * format_vnet_link(u8 *s, va_list *ap);
 
 /**
  * Path flags from the control plane
@@ -303,6 +351,34 @@ typedef enum fib_route_path_flags_t_
      * A local path with a RPF-ID => multicast traffic
      */
     FIB_ROUTE_PATH_RPF_ID = (1 << 7),
+    /**
+     * A deag path using the packet's source not destination address.
+     */
+    FIB_ROUTE_PATH_SOURCE_LOOKUP = (1 << 8),
+    /**
+     * A path via a UDP encap object.
+     */
+    FIB_ROUTE_PATH_UDP_ENCAP = (1 << 9),
+    /**
+     * A path that resolves via a BIER F-Mask
+     */
+    FIB_ROUTE_PATH_BIER_FMASK = (1 << 10),
+    /**
+     * A path that resolves via a BIER [ECMP] Table
+     */
+    FIB_ROUTE_PATH_BIER_TABLE = (1 << 11),
+    /**
+     * A path that resolves via a BIER impostion object
+     */
+    FIB_ROUTE_PATH_BIER_IMP = (1 << 12),
+    /**
+     * A path that resolves via another table
+     */
+    FIB_ROUTE_PATH_DEAG = (1 << 13),
+    /**
+     * A path that resolves via a DVR DPO
+     */
+    FIB_ROUTE_PATH_DVR = (1 << 14),
 } fib_route_path_flags_t;
 
 /**
@@ -315,6 +391,64 @@ typedef enum fib_route_path_flags_t_
 typedef u32 fib_rpf_id_t;
 
 #define MFIB_RPF_ID_NONE (0)
+
+/**
+ * MPLS LSP mode - only valid at the head and tail
+ */
+typedef enum fib_mpls_lsp_mode_t_
+{
+    /**
+     * Pipe Mode - the default.
+     *  TTL and DSCP markings are not carried between the layers
+     */
+    FIB_MPLS_LSP_MODE_PIPE,
+    /**
+     * Uniform mode.
+     *  TTL and DSCP are copied between the layers
+     */
+    FIB_MPLS_LSP_MODE_UNIFORM,
+} __attribute__((packed)) fib_mpls_lsp_mode_t;
+
+#define FIB_MPLS_LSP_MODES {			\
+    [FIB_MPLS_LSP_MODE_PIPE]     = "pipe",     	\
+    [FIB_MPLS_LSP_MODE_UNIFORM]  = "uniform",   \
+}
+
+/**
+ * Format an LSP mode type
+ */
+extern u8 * format_fib_mpls_lsp_mode(u8 *s, va_list *ap);
+
+/**
+ * Configuration for each label value in the output-stack
+ */
+typedef struct fib_mpls_label_t_
+{
+    /**
+     * The label value
+     */
+    mpls_label_t fml_value;
+
+    /**
+     * The LSP mode
+     */
+    fib_mpls_lsp_mode_t fml_mode;
+
+    /**
+     * TTL. valid only at imposition.
+     */
+    u8 fml_ttl;
+
+    /**
+     * EXP bits; valid only at imposition.
+     */
+    u8 fml_exp;
+} fib_mpls_label_t;
+
+/**
+ * Format an MPLS label
+ */
+extern u8 * format_fib_mpls_label(u8 *s, va_list *ap);
 
 /**
  * @brief 
@@ -341,42 +475,86 @@ typedef struct fib_route_path_t_ {
     dpo_proto_t frp_proto;
 
     union {
-	/**
-	 * The next-hop address.
-	 * Will be NULL for attached paths.
-	 * Will be all zeros for attached-next-hop paths on a p2p interface
-	 * Will be all zeros for a deag path.
-	 */
-	ip46_address_t frp_addr;
-
         struct {
+            union {
+                /**
+                 * The next-hop address.
+                 * Will be NULL for attached paths.
+                 * Will be all zeros for attached-next-hop paths on a p2p interface
+                 * Will be all zeros for a deag path.
+                 */
+                ip46_address_t frp_addr;
+
+                struct {
+                    /**
+                     * The MPLS local Label to reursively resolve through.
+                     * This is valid when the path type is MPLS.
+                     */
+                    mpls_label_t frp_local_label;
+                    /**
+                     * EOS bit for the resolving label
+                     */
+                    mpls_eos_bit_t frp_eos;
+                };
+            };
+            union {
+                /**
+                 * The interface.
+                 * Will be invalid for recursive paths.
+                 */
+                u32 frp_sw_if_index;
+                /**
+                 * The RPF-ID
+                 */
+                fib_rpf_id_t frp_rpf_id;
+            };
+            union {
+                /**
+                 * The FIB index to lookup the nexthop
+                 * Only valid for recursive paths.
+                 */
+                u32 frp_fib_index;
+                /**
+                 * The BIER table to resolve the fmask in
+                 */
+                u32 frp_bier_fib_index;
+            };
             /**
-             * The MPLS local Label to reursively resolve through.
-             * This is valid when the path type is MPLS.
+             * The outgoing MPLS label Stack. NULL implies no label.
              */
-            mpls_label_t frp_local_label;
+            fib_mpls_label_t *frp_label_stack;
+
             /**
-             * EOS bit for the resolving label
+	     * Exclusive DPO
+	     */
+	    dpo_id_t dpo;
+            /**
+             * MFIB interface flags
              */
-            mpls_eos_bit_t frp_eos;
+            u32 frp_mitf_flags;
         };
-    };
-    union {
         /**
-         * The interface.
-         * Will be invalid for recursive paths.
+         * A path that resolves via a BIER Table.
+         * This would be for a MPLS label at a BIER midpoint or tail
          */
-        u32 frp_sw_if_index;
+        bier_table_id_t frp_bier_tbl;
+
         /**
-         * The RPF-ID
+         * A path via a BIER imposition object.
+         * Present in an mfib path list
          */
-        fib_rpf_id_t frp_rpf_id;
+        index_t frp_bier_imp;
+
+        /**
+         * UDP encap ID
+         */
+        u32 frp_udp_encap_id;
+
+        /**
+         * Resolving via a BIER Fmask
+         */
+        index_t frp_bier_fmask;
     };
-    /**
-     * The FIB index to lookup the nexthop
-     * Only valid for recursive paths.
-     */
-    u32 frp_fib_index;
     /**
      * [un]equal cost path weight
      */
@@ -391,11 +569,17 @@ typedef struct fib_route_path_t_ {
      * flags on the path
      */
     fib_route_path_flags_t frp_flags;
-    /**
-     * The outgoing MPLS label Stack. NULL implies no label.
-     */
-    mpls_label_t *frp_label_stack;
 } fib_route_path_t;
+
+/**
+ * Unformat a fib_route_path_t from CLI input
+ */
+extern uword unformat_fib_route_path(unformat_input_t * input, va_list * args);
+
+/**
+ * A help string to list the FIB path options
+ */
+#define FIB_ROUTE_PATH_HELP "[next-hop-address] [next-hop-interface] [next-hop-table <value>] [weight <value>] [preference <value>] [udp-encap-id <value>] [ip4-lookup-in-table <value>] [ip6-lookup-in-table <value>] [mpls-lookup-in-table <value>] [resolve-via-host] [resolve-via-connected] [rx-ip4 <interface>] [out-labels <value value value>]"
 
 /**
  * @brief 

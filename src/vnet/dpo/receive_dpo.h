@@ -26,6 +26,12 @@
 typedef struct receive_dpo_t_
 {
     /**
+     * required for pool_get_aligned.
+     *  memebers used in the switch path come first!
+     */
+    CLIB_CACHE_LINE_ALIGN_MARK(cacheline0);
+
+    /**
      * The Software interface index on which traffic is received
      */
     u32 rd_sw_if_index;
@@ -40,6 +46,8 @@ typedef struct receive_dpo_t_
      */
     u16 rd_locks;
 } receive_dpo_t;
+
+extern int dpo_is_receive(const dpo_id_t *dpo);
 
 extern void receive_dpo_add_or_lock (dpo_proto_t proto,
                                      u32 sw_if_index,

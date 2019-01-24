@@ -135,7 +135,8 @@ vlib_node_set_runtime_data (vlib_main_t * vm, u32 node_index,
 	  STRUCT_OFFSET_OF (vlib_node_runtime_t, runtime_data));
 
   if (vec_len (n->runtime_data) > 0)
-    clib_memcpy (r->runtime_data, n->runtime_data, vec_len (n->runtime_data));
+    clib_memcpy_fast (r->runtime_data, n->runtime_data,
+		      vec_len (n->runtime_data));
 }
 
 /** \brief Set node dispatch state.
@@ -216,7 +217,7 @@ always_inline vlib_frame_t *
 vlib_get_frame_no_check (vlib_main_t * vm, uword frame_index)
 {
   vlib_frame_t *f;
-  f = vm->heap_base + (frame_index * VLIB_FRAME_ALIGN);
+  f = vm->heap_aligned_base + (frame_index * VLIB_FRAME_ALIGN);
   return f;
 }
 
@@ -227,7 +228,7 @@ vlib_frame_index_no_check (vlib_main_t * vm, vlib_frame_t * f)
 
   ASSERT (((uword) f & (VLIB_FRAME_ALIGN - 1)) == 0);
 
-  i = ((u8 *) f - (u8 *) vm->heap_base);
+  i = ((u8 *) f - (u8 *) vm->heap_aligned_base);
   ASSERT ((i / VLIB_FRAME_ALIGN) <= 0xFFFFFFFFULL);
 
   return i / VLIB_FRAME_ALIGN;
@@ -237,7 +238,7 @@ always_inline vlib_frame_t *
 vlib_get_frame (vlib_main_t * vm, uword frame_index)
 {
   vlib_frame_t *f = vlib_get_frame_no_check (vm, frame_index);
-  ASSERT (f->flags & VLIB_FRAME_IS_ALLOCATED);
+  ASSERT (f->frame_flags & VLIB_FRAME_IS_ALLOCATED);
   return f;
 }
 
@@ -271,9 +272,6 @@ vlib_frame_vector_args (vlib_frame_t * f)
 
 /** \brief Get pointer to frame scalar data.
 
- @warning This is almost certainly not the function you wish to call.
- See @ref vlib_frame_vector_args instead.
-
  @param f vlib_frame_t pointer
 
  @return arbitrary node scalar data
@@ -281,7 +279,7 @@ vlib_frame_vector_args (vlib_frame_t * f)
  @sa vlib_frame_vector_args
 */
 always_inline void *
-vlib_frame_args (vlib_frame_t * f)
+vlib_frame_scalar_args (vlib_frame_t * f)
 {
   return vlib_frame_vector_args (f) - f->scalar_size;
 }
@@ -775,6 +773,8 @@ vlib_process_signal_event_helper (vlib_node_main_t * nm,
   uword p_flags, add_to_pending, delete_from_wheel;
   void *data_to_be_written_by_caller;
 
+  ASSERT (n->type == VLIB_NODE_TYPE_PROCESS);
+
   ASSERT (!pool_is_free_index (p->event_type_pool, t));
 
   vec_validate (p->pending_event_data_by_type_index, t);
@@ -816,7 +816,15 @@ vlib_process_signal_event_helper (vlib_node_main_t * nm,
     {
       /* Waiting for both event and clock? */
       if (p_flags & VLIB_PROCESS_IS_SUSPENDED_WAITING_FOR_EVENT)
-	delete_from_wheel = 1;
+	{
+	  if (!TW (tw_timer_handle_is_free)
+	      ((TWT (tw_timer_wheel) *) nm->timing_wheel,
+	       p->stop_timer_handle))
+	    delete_from_wheel = 1;
+	  else
+	    /* timer just popped so process should already be on the list */
+	    add_to_pending = 0;
+	}
       else
 	/* Waiting only for clock.  Event will be queue and may be
 	   handled when timer expires. */
@@ -1005,7 +1013,7 @@ vlib_signal_one_time_waiting_process (vlib_main_t * vm,
 {
   vlib_process_signal_one_time_event (vm, p->node_index, p->one_time_event,
 				      /* data */ ~0);
-  memset (p, ~0, sizeof (p[0]));
+  clib_memset (p, ~0, sizeof (p[0]));
 }
 
 always_inline void
@@ -1121,6 +1129,14 @@ vlib_node_add_named_next (vlib_main_t * vm, uword node, char *name)
 {
   return vlib_node_add_named_next_with_slot (vm, node, name, ~0);
 }
+
+/**
+ * Get list of nodes
+ */
+void
+vlib_node_get_nodes (vlib_main_t * vm, u32 max_threads, int include_stats,
+		     int barrier_sync, vlib_node_t **** node_dupsp,
+		     vlib_main_t *** stat_vmsp);
 
 /* Query node given name. */
 vlib_node_t *vlib_get_node_by_name (vlib_main_t * vm, u8 * name);

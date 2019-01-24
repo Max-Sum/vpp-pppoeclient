@@ -26,8 +26,14 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <sys/timerfd.h>
+#include <string.h>
 
+#include <memif.h>
 #include <libmemif.h>
+
+#define MEMIF_NAME_LEN 32
+_Static_assert (strlen (MEMIF_DEFAULT_APP_NAME) <= MEMIF_NAME_LEN,
+		"MEMIF_DEFAULT_APP_NAME max length is 32");
 
 #define MEMIF_DEFAULT_SOCKET_DIR "/run/vpp"
 #define MEMIF_DEFAULT_SOCKET_FILENAME  "memif.sock"
@@ -46,44 +52,26 @@
 
 #define memif_min(a,b) (((a) < (b)) ? (a) : (b))
 
+#define EXPECT_TRUE(x) __builtin_expect((x),1)
+#define EXPECT_FALSE(x) __builtin_expect((x),0)
+
 #ifdef MEMIF_DBG
 #define DBG(...) do {                                                             \
                         printf("MEMIF_DEBUG:%s:%s:%d: ", __FILE__, __func__, __LINE__);  \
                         printf(__VA_ARGS__);                                            \
                         printf("\n");                                                   \
                         } while (0)
-
-#define DBG_UNIX(...) do {                                                        \
-                      printf("MEMIF_DEBUG_UNIX:%s:%s:%d: ", __FILE__, __func__, __LINE__);  \
-                      printf(__VA_ARGS__);                                    \
-                      printf("\n");                                           \
-                      } while (0)
-
-#define error_return_unix(...) do {                                             \
-                                DBG_UNIX(__VA_ARGS__);                          \
-                                return -1;                                      \
-                                } while (0)
-#define error_return(...) do {                                                  \
-                            DBG(__VA_ARGS__);                                   \
-                            return -1;                                          \
-                            } while (0)
 #else
 #define DBG(...)
-#define DBG_UNIX(...)
-#define error_return_unix(...) do {                                             \
-                                return -1;                                      \
-                                } while (0)
-#define error_return(...) do {                                                  \
-                            return -1;                                          \
-                            } while (0)
-
 #endif /* MEMIF_DBG */
 
 typedef struct
 {
-  void *shm;
+  void *addr;
   uint32_t region_size;
+  uint32_t buffer_offset;
   int fd;
+  uint8_t is_external;
 } memif_region_t;
 
 typedef struct
@@ -142,12 +130,15 @@ typedef struct memif_connection
   /* connection message queue */
   memif_msg_queue_elt_t *msg_queue;
 
-  uint8_t remote_if_name[32];
-  uint8_t remote_name[32];
+  uint8_t remote_if_name[MEMIF_NAME_LEN];
+  uint8_t remote_name[MEMIF_NAME_LEN];
   uint8_t remote_disconnect_string[96];
 
+  uint8_t regions_num;
   memif_region_t *regions;
 
+  uint8_t rx_queues_num;
+  uint8_t tx_queues_num;
   memif_queue_t *rx_queues;
   memif_queue_t *tx_queues;
 
@@ -155,18 +146,12 @@ typedef struct memif_connection
 #define MEMIF_CONNECTION_FLAG_WRITE (1 << 0)
 } memif_connection_t;
 
-/*
- * WIP
- */
 typedef struct
 {
-  int key;			/* fd or id */
+  int key;
   void *data_struct;
 } memif_list_elt_t;
 
-/*
- * WIP
- */
 typedef struct
 {
   int fd;
@@ -176,20 +161,22 @@ typedef struct
   memif_list_elt_t *interface_list;	/* memif master interfaces listening on this socket */
 } memif_socket_t;
 
-/*
- * WIP
- */
-/* probably function like memif_cleanup () will need to be called to close timerfd */
 typedef struct
 {
   memif_control_fd_update_t *control_fd_update;
   int timerfd;
   struct itimerspec arm, disarm;
   uint16_t disconn_slaves;
-  uint8_t *app_name;
+  uint8_t app_name[MEMIF_NAME_LEN];
 
-  /* master implementation... */
-  memif_socket_t ms;
+  memif_add_external_region_t *add_external_region;
+  memif_get_external_region_addr_t *get_external_region_addr;
+  memif_del_external_region_t *del_external_region;
+  memif_get_external_buffer_offset_t *get_external_buffer_offset;
+
+  memif_alloc_t *alloc;
+  memif_realloc_t *realloc;
+  memif_free_t *free;
 
   uint16_t control_list_len;
   uint16_t interrupt_list_len;
@@ -237,24 +224,31 @@ int free_list_elt (memif_list_elt_t * list, uint16_t len, int key);
 #endif
 #endif
 
+#ifndef HAVE_MEMFD_CREATE
 static inline int
 memfd_create (const char *name, unsigned int flags)
 {
   return syscall (__NR_memfd_create, name, flags);
 }
+#endif
 
 static inline void *
 memif_get_buffer (memif_connection_t * conn, memif_ring_t * ring,
 		  uint16_t index)
 {
-  return (conn->regions[ring->desc[index].region].shm +
+  return (conn->regions[ring->desc[index].region].addr +
 	  ring->desc[index].offset);
 }
 
 #ifndef F_LINUX_SPECIFIC_BASE
 #define F_LINUX_SPECIFIC_BASE 1024
 #endif
+
+#ifndef MFD_ALLOW_SEALING
 #define MFD_ALLOW_SEALING       0x0002U
+#endif
+
+#ifndef F_ADD_SEALS
 #define F_ADD_SEALS (F_LINUX_SPECIFIC_BASE + 9)
 #define F_GET_SEALS (F_LINUX_SPECIFIC_BASE + 10)
 
@@ -262,5 +256,6 @@ memif_get_buffer (memif_connection_t * conn, memif_ring_t * ring,
 #define F_SEAL_SHRINK   0x0002	/* prevent file from shrinking */
 #define F_SEAL_GROW     0x0004	/* prevent file from growing */
 #define F_SEAL_WRITE    0x0008	/* prevent writes */
+#endif
 
 #endif /* _MEMIF_PRIVATE_H_ */

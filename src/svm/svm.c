@@ -58,6 +58,43 @@ svm_get_root_rp (void)
 
 #define MUTEX_DEBUG
 
+u64
+svm_get_global_region_base_va ()
+{
+#if __aarch64__
+  /* On AArch64 VA space can have different size, from 36 to 48 bits.
+     Here we are trying to detect VA bits by parsing /proc/self/maps
+     address ranges */
+  int fd;
+  unformat_input_t input;
+  u64 start, end = 0;
+  u8 bits = 0;
+
+  if ((fd = open ("/proc/self/maps", 0)) < 0)
+    clib_unix_error ("open '/proc/self/maps'");
+
+  unformat_init_clib_file (&input, fd);
+  while (unformat_check_input (&input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (&input, "%llx-%llx", &start, &end))
+	end--;
+      unformat_skip_line (&input);
+    }
+  unformat_free (&input);
+  close (fd);
+
+  bits = count_leading_zeros (end);
+  bits = 64 - bits;
+  if (bits >= 36 && bits <= 48)
+    return ((1ul << bits) / 4) - (2 * SVM_GLOBAL_REGION_SIZE);
+  else
+    clib_unix_error ("unexpected va bits '%u'", bits);
+#endif
+
+  /* default value */
+  return 0x130000000ULL;
+}
+
 static void
 region_lock (svm_region_t * rp, int tag)
 {
@@ -199,6 +236,7 @@ format_svm_region (u8 * s, va_list * args)
 		}
 	    }
 	}
+#if USE_DLMALLOC == 0
       s = format (s, "  rgn heap stats: %U", format_mheap,
 		  rp->region_heap, 0);
       if ((rp->flags & SVM_FLAGS_MHEAP) && rp->data_heap)
@@ -207,6 +245,7 @@ format_svm_region (u8 * s, va_list * args)
 		      rp->data_heap, 1);
 	}
       s = format (s, "\n");
+#endif
     }
 
   return (s);
@@ -302,9 +341,19 @@ svm_data_region_create (svm_map_region_args_t * a, svm_region_t * rp)
 
   if (a->flags & SVM_FLAGS_MHEAP)
     {
+#if USE_DLMALLOC == 0
+      mheap_t *heap_header;
       rp->data_heap =
 	mheap_alloc_with_flags ((void *) (rp->data_base), map_size,
 				MHEAP_FLAG_DISABLE_VM);
+      heap_header = mheap_header (rp->data_heap);
+      heap_header->flags |= MHEAP_FLAG_THREAD_SAFE;
+#else
+      rp->data_heap = create_mspace_with_base (rp->data_base,
+					       map_size, 1 /* locked */ );
+      mspace_disable_expand (rp->data_heap);
+#endif
+
       rp->flags |= SVM_FLAGS_MHEAP;
     }
   return 0;
@@ -434,6 +483,117 @@ shm_name_from_svm_map_region_args (svm_map_region_args_t * a)
   return (shm_name);
 }
 
+void
+svm_region_init_mapped_region (svm_map_region_args_t * a, svm_region_t * rp)
+{
+  pthread_mutexattr_t attr;
+  pthread_condattr_t cattr;
+  int nbits, words, bit;
+  int overhead_space;
+  void *oldheap;
+  uword data_base;
+  ASSERT (rp);
+  int rv;
+
+  clib_memset (rp, 0, sizeof (*rp));
+
+  if (pthread_mutexattr_init (&attr))
+    clib_unix_warning ("mutexattr_init");
+
+  if (pthread_mutexattr_setpshared (&attr, PTHREAD_PROCESS_SHARED))
+    clib_unix_warning ("mutexattr_setpshared");
+
+  if (pthread_mutex_init (&rp->mutex, &attr))
+    clib_unix_warning ("mutex_init");
+
+  if (pthread_mutexattr_destroy (&attr))
+    clib_unix_warning ("mutexattr_destroy");
+
+  if (pthread_condattr_init (&cattr))
+    clib_unix_warning ("condattr_init");
+
+  if (pthread_condattr_setpshared (&cattr, PTHREAD_PROCESS_SHARED))
+    clib_unix_warning ("condattr_setpshared");
+
+  if (pthread_cond_init (&rp->condvar, &cattr))
+    clib_unix_warning ("cond_init");
+
+  if (pthread_condattr_destroy (&cattr))
+    clib_unix_warning ("condattr_destroy");
+
+  region_lock (rp, 1);
+
+  rp->virtual_base = a->baseva;
+  rp->virtual_size = a->size;
+
+#if USE_DLMALLOC == 0
+  rp->region_heap =
+    mheap_alloc_with_flags (uword_to_pointer
+			    (a->baseva + MMAP_PAGESIZE, void *),
+			    (a->pvt_heap_size !=
+			     0) ? a->pvt_heap_size : SVM_PVT_MHEAP_SIZE,
+			    MHEAP_FLAG_DISABLE_VM);
+#else
+  rp->region_heap = create_mspace_with_base
+    (uword_to_pointer (a->baseva + MMAP_PAGESIZE, void *),
+     (a->pvt_heap_size !=
+      0) ? a->pvt_heap_size : SVM_PVT_MHEAP_SIZE, 1 /* locked */ );
+
+  mspace_disable_expand (rp->region_heap);
+#endif
+
+  oldheap = svm_push_pvt_heap (rp);
+
+  rp->region_name = (char *) format (0, "%s%c", a->name, 0);
+  vec_add1 (rp->client_pids, getpid ());
+
+  nbits = rp->virtual_size / MMAP_PAGESIZE;
+
+  ASSERT (nbits > 0);
+  rp->bitmap_size = nbits;
+  words = (nbits + BITS (uword) - 1) / BITS (uword);
+  vec_validate (rp->bitmap, words - 1);
+
+  overhead_space = MMAP_PAGESIZE /* header */  +
+    ((a->pvt_heap_size != 0) ? a->pvt_heap_size : SVM_PVT_MHEAP_SIZE);
+
+  bit = 0;
+  data_base = (uword) rp->virtual_base;
+
+  if (a->flags & SVM_FLAGS_NODATA)
+    rp->flags |= SVM_FLAGS_NEED_DATA_INIT;
+
+  do
+    {
+      clib_bitmap_set_no_check (rp->bitmap, bit, 1);
+      bit++;
+      overhead_space -= MMAP_PAGESIZE;
+      data_base += MMAP_PAGESIZE;
+    }
+  while (overhead_space > 0);
+
+  rp->data_base = (void *) data_base;
+
+  /*
+   * Note: although the POSIX spec guarantees that only one
+   * process enters this block, we have to play games
+   * to hold off clients until e.g. the mutex is ready
+   */
+  rp->version = SVM_VERSION;
+
+  /* setup the data portion of the region */
+
+  rv = svm_data_region_create (a, rp);
+  if (rv)
+    {
+      clib_warning ("data_region_create: %d", rv);
+    }
+
+  region_unlock (rp);
+
+  svm_pop_heap (oldheap);
+}
+
 /*
  * svm_map_region
  */
@@ -442,15 +602,10 @@ svm_map_region (svm_map_region_args_t * a)
 {
   int svm_fd;
   svm_region_t *rp;
-  pthread_mutexattr_t attr;
-  pthread_condattr_t cattr;
   int deadman = 0;
   u8 junk = 0;
   void *oldheap;
-  int overhead_space;
   int rv;
-  uword data_base;
-  int nbits, words, bit;
   int pid_holding_region_lock;
   u8 *shm_name;
   int dead_region_recovery = 0;
@@ -502,93 +657,8 @@ svm_map_region (svm_map_region_args_t * a)
 	  return (0);
 	}
       close (svm_fd);
-      memset (rp, 0, sizeof (*rp));
 
-      if (pthread_mutexattr_init (&attr))
-	clib_unix_warning ("mutexattr_init");
-
-      if (pthread_mutexattr_setpshared (&attr, PTHREAD_PROCESS_SHARED))
-	clib_unix_warning ("mutexattr_setpshared");
-
-      if (pthread_mutex_init (&rp->mutex, &attr))
-	clib_unix_warning ("mutex_init");
-
-      if (pthread_mutexattr_destroy (&attr))
-	clib_unix_warning ("mutexattr_destroy");
-
-      if (pthread_condattr_init (&cattr))
-	clib_unix_warning ("condattr_init");
-
-      if (pthread_condattr_setpshared (&cattr, PTHREAD_PROCESS_SHARED))
-	clib_unix_warning ("condattr_setpshared");
-
-      if (pthread_cond_init (&rp->condvar, &cattr))
-	clib_unix_warning ("cond_init");
-
-      if (pthread_condattr_destroy (&cattr))
-	clib_unix_warning ("condattr_destroy");
-
-      region_lock (rp, 1);
-
-      rp->virtual_base = a->baseva;
-      rp->virtual_size = a->size;
-
-      rp->region_heap =
-	mheap_alloc_with_flags (uword_to_pointer
-				(a->baseva + MMAP_PAGESIZE, void *),
-				(a->pvt_heap_size !=
-				 0) ? a->pvt_heap_size : SVM_PVT_MHEAP_SIZE,
-				MHEAP_FLAG_DISABLE_VM);
-      oldheap = svm_push_pvt_heap (rp);
-
-      rp->region_name = (char *) format (0, "%s%c", a->name, 0);
-      vec_add1 (rp->client_pids, getpid ());
-
-      nbits = rp->virtual_size / MMAP_PAGESIZE;
-
-      ASSERT (nbits > 0);
-      rp->bitmap_size = nbits;
-      words = (nbits + BITS (uword) - 1) / BITS (uword);
-      vec_validate (rp->bitmap, words - 1);
-
-      overhead_space = MMAP_PAGESIZE /* header */  +
-	((a->pvt_heap_size != 0) ? a->pvt_heap_size : SVM_PVT_MHEAP_SIZE);
-
-      bit = 0;
-      data_base = (uword) rp->virtual_base;
-
-      if (a->flags & SVM_FLAGS_NODATA)
-	rp->flags |= SVM_FLAGS_NEED_DATA_INIT;
-
-      do
-	{
-	  clib_bitmap_set_no_check (rp->bitmap, bit, 1);
-	  bit++;
-	  overhead_space -= MMAP_PAGESIZE;
-	  data_base += MMAP_PAGESIZE;
-	}
-      while (overhead_space > 0);
-
-      rp->data_base = (void *) data_base;
-
-      /*
-       * Note: although the POSIX spec guarantees that only one
-       * process enters this block, we have to play games
-       * to hold off clients until e.g. the mutex is ready
-       */
-      rp->version = SVM_VERSION;
-
-      /* setup the data portion of the region */
-
-      rv = svm_data_region_create (a, rp);
-      if (rv)
-	{
-	  clib_warning ("data_region_create: %d", rv);
-	}
-
-      region_unlock (rp);
-
-      svm_pop_heap (oldheap);
+      svm_region_init_mapped_region (a, rp);
 
       return ((void *) rp);
     }
@@ -603,6 +673,10 @@ svm_map_region (svm_map_region_args_t * a)
 	  perror ("svm_region_map(mmap open)");
 	  return (0);
 	}
+
+      /* Reset ownership in case the client started first */
+      if (fchown (svm_fd, a->uid, a->gid) < 0)
+	clib_unix_warning ("segment chown [ok if client starts first]");
 
       time_left = 20;
       while (1)
@@ -672,6 +746,8 @@ svm_map_region (svm_map_region_args_t * a)
 	  close (svm_fd);
 	  return (0);
 	}
+
+      close (svm_fd);
 
       if ((uword) rp != rp->virtual_base)
 	{
@@ -790,10 +866,10 @@ svm_region_init (void)
 {
   svm_map_region_args_t _a, *a = &_a;
 
-  memset (a, 0, sizeof (*a));
+  clib_memset (a, 0, sizeof (*a));
   a->root_path = 0;
   a->name = SVM_GLOBAL_REGION_NAME;
-  a->baseva = SVM_GLOBAL_REGION_BASEVA;
+  a->baseva = svm_get_global_region_base_va ();
   a->size = SVM_GLOBAL_REGION_SIZE;
   a->flags = SVM_FLAGS_NODATA;
   a->uid = 0;
@@ -807,10 +883,10 @@ svm_region_init_chroot (const char *root_path)
 {
   svm_map_region_args_t _a, *a = &_a;
 
-  memset (a, 0, sizeof (*a));
+  clib_memset (a, 0, sizeof (*a));
   a->root_path = root_path;
   a->name = SVM_GLOBAL_REGION_NAME;
-  a->baseva = SVM_GLOBAL_REGION_BASEVA;
+  a->baseva = svm_get_global_region_base_va ();
   a->size = SVM_GLOBAL_REGION_SIZE;
   a->flags = SVM_FLAGS_NODATA;
   a->uid = 0;
@@ -824,10 +900,10 @@ svm_region_init_chroot_uid_gid (const char *root_path, int uid, int gid)
 {
   svm_map_region_args_t _a, *a = &_a;
 
-  memset (a, 0, sizeof (*a));
+  clib_memset (a, 0, sizeof (*a));
   a->root_path = root_path;
   a->name = SVM_GLOBAL_REGION_NAME;
-  a->baseva = SVM_GLOBAL_REGION_BASEVA;
+  a->baseva = svm_get_global_region_base_va ();
   a->size = SVM_GLOBAL_REGION_SIZE;
   a->flags = SVM_FLAGS_NODATA;
   a->uid = uid;
@@ -986,7 +1062,7 @@ svm_region_unlink (svm_region_t * rp)
  * a new region client showing up at the wrong moment.
  */
 void
-svm_region_unmap (void *rp_arg)
+svm_region_unmap_internal (void *rp_arg, u8 is_client)
 {
   int i, mypid = getpid ();
   int nclients_left;
@@ -1086,7 +1162,12 @@ found:
       vec_free (name);
 
       region_unlock (rp);
-      svm_region_unlink (rp);
+
+      /* If a client asks for the cleanup, don't unlink the backing
+       * file since we can't tell if it has been recreated. */
+      if (!is_client)
+	svm_region_unlink (rp);
+
       munmap ((void *) virtual_base, virtual_size);
       region_unlock (root_rp);
       svm_pop_heap (oldheap);
@@ -1099,11 +1180,23 @@ found:
   munmap ((void *) virtual_base, virtual_size);
 }
 
+void
+svm_region_unmap (void *rp_arg)
+{
+  svm_region_unmap_internal (rp_arg, 0 /* is_client */ );
+}
+
+void
+svm_region_unmap_client (void *rp_arg)
+{
+  svm_region_unmap_internal (rp_arg, 1 /* is_client */ );
+}
+
 /*
  * svm_region_exit
  */
-void
-svm_region_exit ()
+static void
+svm_region_exit_internal (u8 is_client)
 {
   void *oldheap;
   int i, mypid = getpid ();
@@ -1143,7 +1236,7 @@ svm_region_exit ()
 
 found:
 
-  if (vec_len (root_rp->client_pids) == 0)
+  if (!is_client && vec_len (root_rp->client_pids) == 0)
     svm_region_unlink (root_rp);
 
   region_unlock (root_rp);
@@ -1151,6 +1244,18 @@ found:
 
   root_rp = 0;
   munmap ((void *) virtual_base, virtual_size);
+}
+
+void
+svm_region_exit (void)
+{
+  svm_region_exit_internal (0 /* is_client */ );
+}
+
+void
+svm_region_exit_client (void)
+{
+  svm_region_exit_internal (1 /* is_client */ );
 }
 
 void

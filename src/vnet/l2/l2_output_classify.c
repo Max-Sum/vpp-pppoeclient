@@ -99,7 +99,7 @@ static char *l2_output_classify_error_strings[] = {
  * @em Uses:
  * - <code>(l2_output_classify_runtime_t *)
  *         rt->classify_table_index_by_sw_if_index</code>
- *	   Head of the per-interface, perprotocol classifier table chain
+ *	   Head of the per-interface, per-protocol classifier table chain
  * 	   for a specific interface. ~0 => send pkts to the next
  * 	   feature in the L2 feature chain.
  * - <code>vnet_buffer(b)->sw_if_index[VLIB_TX]</code>
@@ -160,7 +160,7 @@ l2_output_classify_node_fn (vlib_main_t * vm,
 
   /* First pass: compute hash */
 
-  while (n_left_from > 2)
+  while (n_left_from >= 4)
     {
       vlib_buffer_t *b0, *b1;
       u32 bi0, bi1;
@@ -175,15 +175,15 @@ l2_output_classify_node_fn (vlib_main_t * vm,
 
       /* prefetch next iteration */
       {
-	vlib_buffer_t *p1, *p2;
+	vlib_buffer_t *p2, *p3;
 
-	p1 = vlib_get_buffer (vm, from[1]);
 	p2 = vlib_get_buffer (vm, from[2]);
+	p3 = vlib_get_buffer (vm, from[3]);
 
-	vlib_prefetch_buffer_header (p1, STORE);
-	CLIB_PREFETCH (p1->data, CLIB_CACHE_LINE_BYTES, STORE);
 	vlib_prefetch_buffer_header (p2, STORE);
 	CLIB_PREFETCH (p2->data, CLIB_CACHE_LINE_BYTES, STORE);
+	vlib_prefetch_buffer_header (p3, STORE);
+	CLIB_PREFETCH (p3->data, CLIB_CACHE_LINE_BYTES, STORE);
       }
 
       bi0 = from[0];

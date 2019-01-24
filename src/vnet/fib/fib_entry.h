@@ -43,6 +43,10 @@ typedef enum fib_source_t_ {
      */
     FIB_SOURCE_CLASSIFY,
     /**
+     * A route the is being 'proxied' on behalf of another device
+     */
+    FIB_SOURCE_PROXY,
+    /**
      * Route added as a result of interface configuration.
      * this will also come from the API/CLI, but the distinction is
      * that is from confiiguration on an interface, not a 'ip route' command
@@ -57,6 +61,14 @@ typedef enum fib_source_t_ {
      */
     FIB_SOURCE_PLUGIN_HI,
     /**
+     * From the BIER subsystem
+     */
+    FIB_SOURCE_BIER,
+    /**
+     * From 6RD.
+     */
+    FIB_SOURCE_6RD,
+    /**
      * From the control plane API
      */
     FIB_SOURCE_API,
@@ -64,6 +76,10 @@ typedef enum fib_source_t_ {
      * From the CLI.
      */
     FIB_SOURCE_CLI,
+    /**
+     * A low (below routing) priority source a plugin can use
+     */
+    FIB_SOURCE_PLUGIN_LOW,
     /**
      * LISP
      */
@@ -73,10 +89,6 @@ typedef enum fib_source_t_ {
      */
     FIB_SOURCE_MAP,
     /**
-     * SIXRD
-     */
-    FIB_SOURCE_SIXRD,
-    /**
      * DHCP
      */
     FIB_SOURCE_DHCP,
@@ -84,6 +96,10 @@ typedef enum fib_source_t_ {
      * IPv6 Proxy ND
      */
     FIB_SOURCE_IP6_ND_PROXY,
+    /**
+     * IPv6 ND (seen in the link-local tables)
+     */
+    FIB_SOURCE_IP6_ND,
     /**
      * Adjacency source.
      * routes created as a result of ARP/ND entries. This is lower priority
@@ -120,9 +136,16 @@ typedef enum fib_source_t_ {
      */
     FIB_SOURCE_DEFAULT_ROUTE,
     /**
+     * The interpose source.
+     * This is not a real source, so don't use it to source a prefix.
+     * It exists here to provide a value against which to register to the
+     * VFT for providing the interpose actions to a real source.
+     */
+    FIB_SOURCE_INTERPOSE,
+    /**
      * Marker. add new entries before this one.
      */
-    FIB_SOURCE_LAST = FIB_SOURCE_DEFAULT_ROUTE,
+    FIB_SOURCE_LAST = FIB_SOURCE_INTERPOSE,
 } __attribute__ ((packed)) fib_source_t;
 
 STATIC_ASSERT (sizeof(fib_source_t) == 1,
@@ -136,21 +159,27 @@ STATIC_ASSERT (sizeof(fib_source_t) == 1,
 #define FIB_SOURCES {					\
     [FIB_SOURCE_SPECIAL] = "special",			\
     [FIB_SOURCE_INTERFACE] = "interface",		\
+    [FIB_SOURCE_PROXY] = "proxy",                       \
+    [FIB_SOURCE_BIER] = "BIER",			        \
+    [FIB_SOURCE_6RD] = "6RD",			        \
     [FIB_SOURCE_API] = "API",			        \
     [FIB_SOURCE_CLI] = "CLI",			        \
     [FIB_SOURCE_ADJ] = "adjacency",			\
     [FIB_SOURCE_MAP] = "MAP",			        \
     [FIB_SOURCE_SR] = "SR",			        \
-    [FIB_SOURCE_SIXRD] = "SixRD",			\
     [FIB_SOURCE_LISP] = "LISP", 			\
     [FIB_SOURCE_CLASSIFY] = "classify",			\
     [FIB_SOURCE_DHCP] = "DHCP",   			\
     [FIB_SOURCE_IP6_ND_PROXY] = "IPv6-proxy-nd",        \
+    [FIB_SOURCE_IP6_ND] = "IPv6-nd",                    \
     [FIB_SOURCE_RR] = "recursive-resolution",	        \
     [FIB_SOURCE_AE] = "attached_export",	        \
     [FIB_SOURCE_MPLS] = "mpls",           	        \
     [FIB_SOURCE_URPF_EXEMPT] = "urpf-exempt",	        \
     [FIB_SOURCE_DEFAULT_ROUTE] = "default-route",	\
+    [FIB_SOURCE_PLUGIN_HI] = "plugin-hi",               \
+    [FIB_SOURCE_PLUGIN_LOW] = "plugin-low",             \
+    [FIB_SOURCE_INTERPOSE] = "interpose",               \
 }
 
 #define FOR_EACH_FIB_SOURCE(_item) \
@@ -203,9 +232,24 @@ typedef enum fib_entry_attribute_t_ {
      */
     FIB_ENTRY_ATTRIBUTE_URPF_EXEMPT,
     /**
+     * The prefix/address exempted from attached export
+     */
+    FIB_ENTRY_ATTRIBUTE_NO_ATTACHED_EXPORT,
+    /**
+     * This FIB entry imposes its source information on all prefixes
+     * that is covers
+     */
+    FIB_ENTRY_ATTRIBUTE_COVERED_INHERIT,
+    /**
+     * The interpose attribute.
+     * place the forwarding provided by the source infront of the forwarding
+     * provided by the best source, or failing that, by the cover.
+     */
+    FIB_ENTRY_ATTRIBUTE_INTERPOSE,
+    /**
      * Marker. add new entries before this one.
      */
-    FIB_ENTRY_ATTRIBUTE_LAST = FIB_ENTRY_ATTRIBUTE_URPF_EXEMPT,
+    FIB_ENTRY_ATTRIBUTE_LAST = FIB_ENTRY_ATTRIBUTE_INTERPOSE,
 } fib_entry_attribute_t;
 
 #define FIB_ENTRY_ATTRIBUTES {		       		\
@@ -217,6 +261,9 @@ typedef enum fib_entry_attribute_t_ {
     [FIB_ENTRY_ATTRIBUTE_LOCAL]     = "local",		\
     [FIB_ENTRY_ATTRIBUTE_URPF_EXEMPT] = "uRPF-exempt",  \
     [FIB_ENTRY_ATTRIBUTE_MULTICAST] = "multicast",	\
+    [FIB_ENTRY_ATTRIBUTE_NO_ATTACHED_EXPORT] = "no-attached-export",	\
+    [FIB_ENTRY_ATTRIBUTE_COVERED_INHERIT] = "covered-inherit",  \
+    [FIB_ENTRY_ATTRIBUTE_INTERPOSE] = "interpose",  \
 }
 
 #define FOR_EACH_FIB_ATTRIBUTE(_item)			\
@@ -232,9 +279,14 @@ typedef enum fib_entry_flag_t_ {
     FIB_ENTRY_FLAG_EXCLUSIVE = (1 << FIB_ENTRY_ATTRIBUTE_EXCLUSIVE),
     FIB_ENTRY_FLAG_LOCAL     = (1 << FIB_ENTRY_ATTRIBUTE_LOCAL),
     FIB_ENTRY_FLAG_IMPORT    = (1 << FIB_ENTRY_ATTRIBUTE_IMPORT),
+    FIB_ENTRY_FLAG_NO_ATTACHED_EXPORT = (1 << FIB_ENTRY_ATTRIBUTE_NO_ATTACHED_EXPORT),
     FIB_ENTRY_FLAG_LOOSE_URPF_EXEMPT = (1 << FIB_ENTRY_ATTRIBUTE_URPF_EXEMPT),
     FIB_ENTRY_FLAG_MULTICAST = (1 << FIB_ENTRY_ATTRIBUTE_MULTICAST),
+    FIB_ENTRY_FLAG_COVERED_INHERIT = (1 << FIB_ENTRY_ATTRIBUTE_COVERED_INHERIT),
+    FIB_ENTRY_FLAG_INTERPOSE = (1 << FIB_ENTRY_ATTRIBUTE_INTERPOSE),
 } __attribute__((packed)) fib_entry_flag_t;
+
+extern u8 * format_fib_entry_flags(u8 *s, va_list *args);
 
 /**
  * Flags for the source data
@@ -249,27 +301,45 @@ typedef enum fib_entry_src_attribute_t_ {
      */
     FIB_ENTRY_SRC_ATTRIBUTE_ADDED = FIB_ENTRY_SRC_ATTRIBUTE_FIRST,
     /**
+     * the source is contributing forwarding
+     */
+    FIB_ENTRY_SRC_ATTRIBUTE_CONTRIBUTING,
+    /**
      * the source is active/best
      */
     FIB_ENTRY_SRC_ATTRIBUTE_ACTIVE,
     /**
+     * the source is inherited from its cover
+     */
+    FIB_ENTRY_SRC_ATTRIBUTE_INHERITED,
+    /**
      * Marker. add new entries before this one.
      */
-    FIB_ENTRY_SRC_ATTRIBUTE_LAST = FIB_ENTRY_SRC_ATTRIBUTE_ACTIVE,
+    FIB_ENTRY_SRC_ATTRIBUTE_LAST = FIB_ENTRY_SRC_ATTRIBUTE_INHERITED,
 } fib_entry_src_attribute_t;
 
-#define FIB_ENTRY_SRC_ATTRIBUTE_MAX (FIB_ENTRY_SRC_ATTRIBUTE_LAST+1)
 
 #define FIB_ENTRY_SRC_ATTRIBUTES {		 \
     [FIB_ENTRY_SRC_ATTRIBUTE_ADDED]  = "added",	 \
+    [FIB_ENTRY_SRC_ATTRIBUTE_CONTRIBUTING] = "contributing", \
     [FIB_ENTRY_SRC_ATTRIBUTE_ACTIVE] = "active", \
+    [FIB_ENTRY_SRC_ATTRIBUTE_INHERITED] = "inherited", \
 }
+
+#define FOR_EACH_FIB_SRC_ATTRIBUTE(_item)      		\
+    for (_item = FIB_ENTRY_SRC_ATTRIBUTE_FIRST;		\
+	 _item <= FIB_ENTRY_SRC_ATTRIBUTE_LAST;		\
+	 _item++)
 
 typedef enum fib_entry_src_flag_t_ {
     FIB_ENTRY_SRC_FLAG_NONE   = 0,
     FIB_ENTRY_SRC_FLAG_ADDED  = (1 << FIB_ENTRY_SRC_ATTRIBUTE_ADDED),
+    FIB_ENTRY_SRC_FLAG_CONTRIBUTING = (1 << FIB_ENTRY_SRC_ATTRIBUTE_CONTRIBUTING),
     FIB_ENTRY_SRC_FLAG_ACTIVE = (1 << FIB_ENTRY_SRC_ATTRIBUTE_ACTIVE),
+    FIB_ENTRY_SRC_FLAG_INHERITED = (1 << FIB_ENTRY_SRC_ATTRIBUTE_INHERITED),
 } __attribute__ ((packed)) fib_entry_src_flag_t;
+
+extern u8 * format_fib_entry_src_flags(u8 *s, va_list *args);
 
 /*
  * Keep the size of the flags field to 2 bytes, so it
@@ -291,10 +361,17 @@ typedef struct fib_entry_src_t_ {
      * The path-list created by the source
      */
     fib_node_index_t fes_pl;
+
+    /**
+     * Flags the source contributes to the entry
+     */
+    fib_entry_flag_t fes_entry_flags;
+
     /**
      * Which source this info block is for
      */
     fib_source_t fes_src;
+
     /**
      * Flags on the source
      */
@@ -306,11 +383,6 @@ typedef struct fib_entry_src_t_ {
      * of times a given source has been added. Which is even fewer
      */
     u8 fes_ref_count;
-
-    /**
-     * Flags the source contributes to the entry
-     */
-    fib_entry_flag_t fes_entry_flags;
     
     /**
      * Source specific info
@@ -326,6 +398,21 @@ typedef struct fib_entry_src_t_ {
 	     */
 	    u32 fesr_sibling;
 	} rr;
+	struct {
+	    /**
+	     * the index of the FIB entry that is the covering entry
+	     */
+	    fib_node_index_t fesi_cover;
+	    /**
+	     * This source's index in the cover's list
+	     */
+	    u32 fesi_sibling;
+            /**
+             * DPO type to interpose. The dpo type needs to have registered
+             * it's 'contribute interpose' callback function.
+             */
+            dpo_id_t fesi_dpo;
+	} interpose;
 	struct {
 	    /**
 	     * the index of the FIB entry that is the covering entry
@@ -363,7 +450,7 @@ typedef struct fib_entry_src_t_ {
 	     */
             fib_node_index_t fesl_fib_index;
 	} lisp;
-    };
+    } u;
 } fib_entry_src_t;
 
 /**
@@ -467,9 +554,15 @@ extern fib_entry_src_flag_t fib_entry_special_remove(fib_node_index_t fib_entry_
 extern fib_entry_src_flag_t fib_entry_path_remove(fib_node_index_t fib_entry_index,
 						  fib_source_t source,
 						  const fib_route_path_t *rpath);
+
+extern void fib_entry_inherit(fib_node_index_t cover,
+                              fib_node_index_t covered);
+
 extern fib_entry_src_flag_t fib_entry_delete(fib_node_index_t fib_entry_index,
 					     fib_source_t source);
 
+extern void fib_entry_recalculate_forwarding(
+    fib_node_index_t fib_entry_index);
 extern void fib_entry_contribute_urpf(fib_node_index_t path_index,
 				      index_t urpf);
 extern void fib_entry_contribute_forwarding(
@@ -510,8 +603,7 @@ extern u32 fib_entry_get_resolving_interface_for_source(
 
 extern void fib_entry_encode(fib_node_index_t fib_entry_index,
 			     fib_route_path_encode_t **api_rpaths);
-extern void fib_entry_get_prefix(fib_node_index_t fib_entry_index,
-				 fib_prefix_t *pfx);
+extern const fib_prefix_t *fib_entry_get_prefix(fib_node_index_t fib_entry_index);
 extern u32 fib_entry_get_fib_index(fib_node_index_t fib_entry_index);
 extern void fib_entry_set_source_data(fib_node_index_t fib_entry_index,
                                       fib_source_t source,
@@ -529,10 +621,13 @@ extern int fib_entry_is_sourced(fib_node_index_t fib_entry_index,
 
 extern fib_node_index_t fib_entry_get_path_list(fib_node_index_t fib_entry_index);
 extern int fib_entry_is_resolved(fib_node_index_t fib_entry_index);
+extern int fib_entry_is_host(fib_node_index_t fib_entry_index);
 extern void fib_entry_set_flow_hash_config(fib_node_index_t fib_entry_index,
                                            flow_hash_config_t hash_config);
 
 extern void fib_entry_module_init(void);
+
+extern u32 fib_entry_get_stats_index(fib_node_index_t fib_entry_index);
 
 /*
  * unsafe... beware the raw pointer.

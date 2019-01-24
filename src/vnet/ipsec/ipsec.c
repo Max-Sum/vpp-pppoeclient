@@ -19,10 +19,15 @@
 #include <vnet/api_errno.h>
 #include <vnet/ip/ip.h>
 #include <vnet/interface.h>
+#include <vnet/udp/udp.h>
 
 #include <vnet/ipsec/ipsec.h>
 #include <vnet/ipsec/ikev2.h>
 #include <vnet/ipsec/esp.h>
+#include <vnet/ipsec/ah.h>
+
+
+ipsec_main_t ipsec_main;
 
 u32
 ipsec_get_sa_index_by_sa_id (u32 sa_id)
@@ -68,16 +73,18 @@ ipsec_set_interface_spd (vlib_main_t * vm, u32 sw_if_index, u32 spd_id,
 		sw_if_index, spd_id, spd_index);
 
   /* enable IPsec on TX */
-  vnet_feature_enable_disable ("ip4-output", "ipsec-output-ip4", sw_if_index,
-			       is_add, 0, 0);
-  vnet_feature_enable_disable ("ip6-output", "ipsec-output-ip6", sw_if_index,
-			       is_add, 0, 0);
+  vnet_feature_enable_disable ("ip4-output", "ipsec4-output-feature",
+			       sw_if_index, is_add, 0, 0);
+  vnet_feature_enable_disable ("ip6-output", "ipsec6-output-feature",
+			       sw_if_index, is_add, 0, 0);
+
+  config.spd_index = spd_index;
 
   /* enable IPsec on RX */
-  vnet_feature_enable_disable ("ip4-unicast", "ipsec-input-ip4", sw_if_index,
-			       is_add, &config, sizeof (config));
-  vnet_feature_enable_disable ("ip6-unicast", "ipsec-input-ip6", sw_if_index,
-			       is_add, &config, sizeof (config));
+  vnet_feature_enable_disable ("ip4-unicast", "ipsec4-input-feature",
+			       sw_if_index, is_add, &config, sizeof (config));
+  vnet_feature_enable_disable ("ip6-unicast", "ipsec6-input-feature",
+			       sw_if_index, is_add, &config, sizeof (config));
 
   return 0;
 }
@@ -119,7 +126,7 @@ ipsec_add_del_spd (vlib_main_t * vm, u32 spd_id, int is_add)
   else				/* create new SPD */
     {
       pool_get (im->spds, spd);
-      memset (spd, 0, sizeof (*spd));
+      clib_memset (spd, 0, sizeof (*spd));
       spd_index = spd - im->spds;
       spd->id = spd_id;
       hash_set (im->spd_index_by_spd_id, spd_id, spd_index);
@@ -130,20 +137,15 @@ ipsec_add_del_spd (vlib_main_t * vm, u32 spd_id, int is_add)
 static int
 ipsec_spd_entry_sort (void *a1, void *a2)
 {
-  ipsec_main_t *im = &ipsec_main;
   u32 *id1 = a1;
   u32 *id2 = a2;
-  ipsec_spd_t *spd;
+  ipsec_spd_t *spd = ipsec_main.spd_to_sort;
   ipsec_policy_t *p1, *p2;
 
-  /* *INDENT-OFF* */
-  pool_foreach (spd, im->spds, ({
-    p1 = pool_elt_at_index(spd->policies, *id1);
-    p2 = pool_elt_at_index(spd->policies, *id2);
-    if (p1 && p2)
-      return p2->priority - p1->priority;
-  }));
-  /* *INDENT-ON* */
+  p1 = pool_elt_at_index (spd->policies, *id1);
+  p2 = pool_elt_at_index (spd->policies, *id2);
+  if (p1 && p2)
+    return p2->priority - p1->priority;
 
   return 0;
 }
@@ -186,19 +188,19 @@ ipsec_add_del_policy (vlib_main_t * vm, ipsec_policy_t * policy, int is_add)
       clib_memcpy (vp, policy, sizeof (*vp));
       policy_index = vp - spd->policies;
 
+      ipsec_main.spd_to_sort = spd;
+
       if (policy->is_outbound)
 	{
 	  if (policy->is_ipv6)
 	    {
 	      vec_add1 (spd->ipv6_outbound_policies, policy_index);
-	      clib_memcpy (vp, policy, sizeof (ipsec_policy_t));
 	      vec_sort_with_function (spd->ipv6_outbound_policies,
 				      ipsec_spd_entry_sort);
 	    }
 	  else
 	    {
 	      vec_add1 (spd->ipv4_outbound_policies, policy_index);
-	      clib_memcpy (vp, policy, sizeof (ipsec_policy_t));
 	      vec_sort_with_function (spd->ipv4_outbound_policies,
 				      ipsec_spd_entry_sort);
 	    }
@@ -211,7 +213,6 @@ ipsec_add_del_policy (vlib_main_t * vm, ipsec_policy_t * policy, int is_add)
 		{
 		  vec_add1 (spd->ipv6_inbound_protect_policy_indices,
 			    policy_index);
-		  clib_memcpy (vp, policy, sizeof (ipsec_policy_t));
 		  vec_sort_with_function
 		    (spd->ipv6_inbound_protect_policy_indices,
 		     ipsec_spd_entry_sort);
@@ -221,7 +222,6 @@ ipsec_add_del_policy (vlib_main_t * vm, ipsec_policy_t * policy, int is_add)
 		  vec_add1
 		    (spd->ipv6_inbound_policy_discard_and_bypass_indices,
 		     policy_index);
-		  clib_memcpy (vp, policy, sizeof (ipsec_policy_t));
 		  vec_sort_with_function
 		    (spd->ipv6_inbound_policy_discard_and_bypass_indices,
 		     ipsec_spd_entry_sort);
@@ -233,7 +233,6 @@ ipsec_add_del_policy (vlib_main_t * vm, ipsec_policy_t * policy, int is_add)
 		{
 		  vec_add1 (spd->ipv4_inbound_protect_policy_indices,
 			    policy_index);
-		  clib_memcpy (vp, policy, sizeof (ipsec_policy_t));
 		  vec_sort_with_function
 		    (spd->ipv4_inbound_protect_policy_indices,
 		     ipsec_spd_entry_sort);
@@ -243,7 +242,6 @@ ipsec_add_del_policy (vlib_main_t * vm, ipsec_policy_t * policy, int is_add)
 		  vec_add1
 		    (spd->ipv4_inbound_policy_discard_and_bypass_indices,
 		     policy_index);
-		  clib_memcpy (vp, policy, sizeof (ipsec_policy_t));
 		  vec_sort_with_function
 		    (spd->ipv4_inbound_policy_discard_and_bypass_indices,
 		     ipsec_spd_entry_sort);
@@ -251,6 +249,7 @@ ipsec_add_del_policy (vlib_main_t * vm, ipsec_policy_t * policy, int is_add)
 	    }
 	}
 
+      ipsec_main.spd_to_sort = NULL;
     }
   else
     {
@@ -363,13 +362,13 @@ ipsec_add_del_policy (vlib_main_t * vm, ipsec_policy_t * policy, int is_add)
                       if (vec_elt(spd->ipv4_inbound_policy_discard_and_bypass_indices, j) == i) {
                         vec_del1 (spd->ipv4_inbound_policy_discard_and_bypass_indices, j);
                         break;
+                      }
                     }
                   }
               }
           }
           pool_put (spd->policies, vp);
           break;
-        }
       }));
       /* *INDENT-ON* */
     }
@@ -377,7 +376,7 @@ ipsec_add_del_policy (vlib_main_t * vm, ipsec_policy_t * policy, int is_add)
   return 0;
 }
 
-static u8
+u8
 ipsec_is_sa_used (u32 sa_index)
 {
   ipsec_main_t *im = &ipsec_main;
@@ -407,6 +406,28 @@ ipsec_is_sa_used (u32 sa_index)
   return 0;
 }
 
+clib_error_t *
+ipsec_call_add_del_callbacks (ipsec_main_t * im, ipsec_sa_t * sa,
+			      u32 sa_index, int is_add)
+{
+  ipsec_ah_backend_t *ab;
+  ipsec_esp_backend_t *eb;
+  switch (sa->protocol)
+    {
+    case IPSEC_PROTOCOL_AH:
+      ab = pool_elt_at_index (im->ah_backends, im->ah_current_backend);
+      if (ab->add_del_sa_sess_cb)
+	return ab->add_del_sa_sess_cb (sa_index, is_add);
+      break;
+    case IPSEC_PROTOCOL_ESP:
+      eb = pool_elt_at_index (im->esp_backends, im->esp_current_backend);
+      if (eb->add_del_sa_sess_cb)
+	return eb->add_del_sa_sess_cb (sa_index, is_add);
+      break;
+    }
+  return 0;
+}
+
 int
 ipsec_add_del_sa (vlib_main_t * vm, ipsec_sa_t * new_sa, int is_add)
 {
@@ -414,6 +435,7 @@ ipsec_add_del_sa (vlib_main_t * vm, ipsec_sa_t * new_sa, int is_add)
   ipsec_sa_t *sa = 0;
   uword *p;
   u32 sa_index;
+  clib_error_t *err;
 
   clib_warning ("id %u spi %u", new_sa->id, new_sa->spi);
 
@@ -433,8 +455,8 @@ ipsec_add_del_sa (vlib_main_t * vm, ipsec_sa_t * new_sa, int is_add)
 	  return VNET_API_ERROR_SYSCALL_ERROR_1;	/* sa used in policy */
 	}
       hash_unset (im->sa_index_by_sa_id, sa->id);
-      if (im->cb.add_del_sa_sess_cb &&
-	  im->cb.add_del_sa_sess_cb (sa_index, is_add) < 0)
+      err = ipsec_call_add_del_callbacks (im, sa, sa_index, 0);
+      if (err)
 	return VNET_API_ERROR_SYSCALL_ERROR_1;
       pool_put (im->sad, sa);
     }
@@ -444,8 +466,8 @@ ipsec_add_del_sa (vlib_main_t * vm, ipsec_sa_t * new_sa, int is_add)
       clib_memcpy (sa, new_sa, sizeof (*sa));
       sa_index = sa - im->sad;
       hash_set (im->sa_index_by_sa_id, sa->id, sa_index);
-      if (im->cb.add_del_sa_sess_cb &&
-	  im->cb.add_del_sa_sess_cb (sa_index, is_add) < 0)
+      err = ipsec_call_add_del_callbacks (im, sa, sa_index, 1);
+      if (err)
 	return VNET_API_ERROR_SYSCALL_ERROR_1;
     }
   return 0;
@@ -458,6 +480,7 @@ ipsec_set_sa_key (vlib_main_t * vm, ipsec_sa_t * sa_update)
   uword *p;
   u32 sa_index;
   ipsec_sa_t *sa = 0;
+  clib_error_t *err;
 
   p = hash_get (im->sa_index_by_sa_id, sa_update->id);
   if (!p)
@@ -482,10 +505,10 @@ ipsec_set_sa_key (vlib_main_t * vm, ipsec_sa_t * sa_update)
       sa->integ_key_len = sa_update->integ_key_len;
     }
 
-  if (sa->crypto_key_len + sa->integ_key_len > 0)
+  if (0 < sa_update->crypto_key_len || 0 < sa_update->integ_key_len)
     {
-      if (im->cb.add_del_sa_sess_cb &&
-	  im->cb.add_del_sa_sess_cb (sa_index, 0) < 0)
+      err = ipsec_call_add_del_callbacks (im, sa, sa_index, 0);
+      if (err)
 	return VNET_API_ERROR_SYSCALL_ERROR_1;
     }
 
@@ -516,9 +539,164 @@ ipsec_check_support (ipsec_sa_t * sa)
     return clib_error_return (0, "unsupported aes-gcm-128 crypto-alg");
   if (sa->integ_alg == IPSEC_INTEG_ALG_NONE)
     return clib_error_return (0, "unsupported none integ-alg");
-  if (sa->integ_alg == IPSEC_INTEG_ALG_AES_GCM_128)
-    return clib_error_return (0, "unsupported aes-gcm-128 integ-alg");
 
+  return 0;
+}
+
+clib_error_t *
+ipsec_add_del_sa_sess_cb (ipsec_main_t * im, u32 sa_index, u8 is_add)
+{
+  ipsec_ah_backend_t *ah =
+    pool_elt_at_index (im->ah_backends, im->ah_current_backend);
+  if (ah->add_del_sa_sess_cb)
+    {
+      clib_error_t *err = ah->add_del_sa_sess_cb (sa_index, is_add);
+      if (err)
+	return err;
+    }
+  ipsec_esp_backend_t *esp =
+    pool_elt_at_index (im->esp_backends, im->esp_current_backend);
+  if (esp->add_del_sa_sess_cb)
+    {
+      clib_error_t *err = esp->add_del_sa_sess_cb (sa_index, is_add);
+      if (err)
+	return err;
+    }
+  return 0;
+}
+
+clib_error_t *
+ipsec_check_support_cb (ipsec_main_t * im, ipsec_sa_t * sa)
+{
+  clib_error_t *error = 0;
+
+  if (PREDICT_FALSE (sa->protocol == IPSEC_PROTOCOL_AH))
+    {
+      ipsec_ah_backend_t *ah =
+	pool_elt_at_index (im->ah_backends, im->ah_current_backend);
+      ASSERT (ah->check_support_cb);
+      error = ah->check_support_cb (sa);
+    }
+  else
+    {
+      ipsec_esp_backend_t *esp =
+	pool_elt_at_index (im->esp_backends, im->esp_current_backend);
+      ASSERT (esp->check_support_cb);
+      error = esp->check_support_cb (sa);
+    }
+  return error;
+}
+
+
+static void
+ipsec_add_node (vlib_main_t * vm, const char *node_name,
+		const char *prev_node_name, u32 * out_node_index,
+		u32 * out_next_index)
+{
+  vlib_node_t *prev_node, *node;
+  prev_node = vlib_get_node_by_name (vm, (u8 *) prev_node_name);
+  ASSERT (prev_node);
+  node = vlib_get_node_by_name (vm, (u8 *) node_name);
+  ASSERT (node);
+  *out_node_index = node->index;
+  *out_next_index = vlib_node_add_next (vm, prev_node->index, node->index);
+}
+
+u32
+ipsec_register_ah_backend (vlib_main_t * vm, ipsec_main_t * im,
+			   const char *name,
+			   const char *ah4_encrypt_node_name,
+			   const char *ah4_decrypt_node_name,
+			   const char *ah6_encrypt_node_name,
+			   const char *ah6_decrypt_node_name,
+			   check_support_cb_t ah_check_support_cb,
+			   add_del_sa_sess_cb_t ah_add_del_sa_sess_cb)
+{
+  ipsec_ah_backend_t *b;
+  pool_get (im->ah_backends, b);
+  b->name = format (NULL, "%s", name);
+
+  ipsec_add_node (vm, ah4_encrypt_node_name, "ipsec4-output-feature",
+		  &b->ah4_encrypt_node_index, &b->ah4_encrypt_next_index);
+  ipsec_add_node (vm, ah4_decrypt_node_name, "ipsec4-input-feature",
+		  &b->ah4_decrypt_node_index, &b->ah4_decrypt_next_index);
+  ipsec_add_node (vm, ah6_encrypt_node_name, "ipsec6-output-feature",
+		  &b->ah6_encrypt_node_index, &b->ah6_encrypt_next_index);
+  ipsec_add_node (vm, ah6_decrypt_node_name, "ipsec6-input-feature",
+		  &b->ah6_decrypt_node_index, &b->ah6_decrypt_next_index);
+
+  b->check_support_cb = ah_check_support_cb;
+  b->add_del_sa_sess_cb = ah_add_del_sa_sess_cb;
+  return b - im->ah_backends;
+}
+
+u32
+ipsec_register_esp_backend (vlib_main_t * vm, ipsec_main_t * im,
+			    const char *name,
+			    const char *esp4_encrypt_node_name,
+			    const char *esp4_decrypt_node_name,
+			    const char *esp6_encrypt_node_name,
+			    const char *esp6_decrypt_node_name,
+			    check_support_cb_t esp_check_support_cb,
+			    add_del_sa_sess_cb_t esp_add_del_sa_sess_cb)
+{
+  ipsec_esp_backend_t *b;
+  pool_get (im->esp_backends, b);
+  b->name = format (NULL, "%s", name);
+
+  ipsec_add_node (vm, esp4_encrypt_node_name, "ipsec4-output-feature",
+		  &b->esp4_encrypt_node_index, &b->esp4_encrypt_next_index);
+  ipsec_add_node (vm, esp4_decrypt_node_name, "ipsec4-input-feature",
+		  &b->esp4_decrypt_node_index, &b->esp4_decrypt_next_index);
+  ipsec_add_node (vm, esp6_encrypt_node_name, "ipsec6-output-feature",
+		  &b->esp6_encrypt_node_index, &b->esp6_encrypt_next_index);
+  ipsec_add_node (vm, esp6_decrypt_node_name, "ipsec6-input-feature",
+		  &b->esp6_decrypt_node_index, &b->esp6_decrypt_next_index);
+
+  b->check_support_cb = esp_check_support_cb;
+  b->add_del_sa_sess_cb = esp_add_del_sa_sess_cb;
+  return b - im->esp_backends;
+}
+
+int
+ipsec_select_ah_backend (ipsec_main_t * im, u32 backend_idx)
+{
+  if (pool_elts (im->sad) > 0
+      || pool_is_free_index (im->ah_backends, backend_idx))
+    {
+      return -1;
+    }
+  ipsec_ah_backend_t *b = pool_elt_at_index (im->ah_backends, backend_idx);
+  im->ah_current_backend = backend_idx;
+  im->ah4_encrypt_node_index = b->ah4_encrypt_node_index;
+  im->ah4_decrypt_node_index = b->ah4_decrypt_node_index;
+  im->ah4_encrypt_next_index = b->ah4_encrypt_next_index;
+  im->ah4_decrypt_next_index = b->ah4_decrypt_next_index;
+  im->ah6_encrypt_node_index = b->ah6_encrypt_node_index;
+  im->ah6_decrypt_node_index = b->ah6_decrypt_node_index;
+  im->ah6_encrypt_next_index = b->ah6_encrypt_next_index;
+  im->ah6_decrypt_next_index = b->ah6_decrypt_next_index;
+  return 0;
+}
+
+int
+ipsec_select_esp_backend (ipsec_main_t * im, u32 backend_idx)
+{
+  if (pool_elts (im->sad) > 0
+      || pool_is_free_index (im->esp_backends, backend_idx))
+    {
+      return -1;
+    }
+  ipsec_esp_backend_t *b = pool_elt_at_index (im->esp_backends, backend_idx);
+  im->esp_current_backend = backend_idx;
+  im->esp4_encrypt_node_index = b->esp4_encrypt_node_index;
+  im->esp4_decrypt_node_index = b->esp4_decrypt_node_index;
+  im->esp4_encrypt_next_index = b->esp4_encrypt_next_index;
+  im->esp4_decrypt_next_index = b->esp4_decrypt_next_index;
+  im->esp6_encrypt_node_index = b->esp6_encrypt_node_index;
+  im->esp6_decrypt_node_index = b->esp6_decrypt_node_index;
+  im->esp6_encrypt_next_index = b->esp6_encrypt_next_index;
+  im->esp6_decrypt_next_index = b->esp6_decrypt_next_index;
   return 0;
 }
 
@@ -528,11 +706,10 @@ ipsec_init (vlib_main_t * vm)
   clib_error_t *error;
   ipsec_main_t *im = &ipsec_main;
   vlib_thread_main_t *tm = vlib_get_thread_main ();
-  vlib_node_t *node;
 
   ipsec_rand_seed ();
 
-  memset (im, 0, sizeof (im[0]));
+  clib_memset (im, 0, sizeof (im[0]));
 
   im->vnet_main = vnet_get_main ();
   im->vlib_main = vm;
@@ -544,22 +721,34 @@ ipsec_init (vlib_main_t * vm)
   vec_validate_aligned (im->empty_buffers, tm->n_vlib_mains - 1,
 			CLIB_CACHE_LINE_BYTES);
 
-  node = vlib_get_node_by_name (vm, (u8 *) "error-drop");
+  vlib_node_t *node = vlib_get_node_by_name (vm, (u8 *) "error-drop");
   ASSERT (node);
   im->error_drop_node_index = node->index;
 
-  node = vlib_get_node_by_name (vm, (u8 *) "esp-encrypt");
-  ASSERT (node);
-  im->esp_encrypt_node_index = node->index;
+  u32 idx = ipsec_register_ah_backend (vm, im, "default openssl backend",
+				       "ah4-encrypt",
+				       "ah4-decrypt",
+				       "ah6-encrypt",
+				       "ah6-decrypt",
+				       ipsec_check_support,
+				       NULL);
 
-  node = vlib_get_node_by_name (vm, (u8 *) "esp-decrypt");
-  ASSERT (node);
-  im->esp_decrypt_node_index = node->index;
+  im->ah_default_backend = idx;
+  int rv = ipsec_select_ah_backend (im, idx);
+  ASSERT (0 == rv);
+  (void) (rv);			// avoid warning
 
-  im->esp_encrypt_next_index = IPSEC_OUTPUT_NEXT_ESP_ENCRYPT;
-  im->esp_decrypt_next_index = IPSEC_INPUT_NEXT_ESP_DECRYPT;
+  idx = ipsec_register_esp_backend (vm, im, "default openssl backend",
+				    "esp4-encrypt",
+				    "esp4-decrypt",
+				    "esp6-encrypt",
+				    "esp6-decrypt",
+				    ipsec_check_support, NULL);
+  im->esp_default_backend = idx;
 
-  im->cb.check_support_cb = ipsec_check_support;
+  rv = ipsec_select_esp_backend (im, idx);
+  ASSERT (0 == rv);
+  (void) (rv);			// avoid warning
 
   if ((error = vlib_call_init_function (vm, ipsec_cli_init)))
     return error;
@@ -567,7 +756,7 @@ ipsec_init (vlib_main_t * vm)
   if ((error = vlib_call_init_function (vm, ipsec_tunnel_if_init)))
     return error;
 
-  esp_init ();
+  ipsec_proto_init ();
 
   if ((error = ikev2_init (vm)))
     return error;

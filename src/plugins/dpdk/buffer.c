@@ -43,6 +43,8 @@
  * Allocate/free network buffers.
  */
 
+#include <unistd.h>
+
 #include <rte_config.h>
 
 #include <rte_common.h>
@@ -60,7 +62,7 @@
 #include <rte_per_lcore.h>
 #include <rte_branch_prediction.h>
 #include <rte_interrupts.h>
-#include <rte_pci.h>
+#include <rte_vfio.h>
 #include <rte_random.h>
 #include <rte_debug.h>
 #include <rte_ether.h>
@@ -71,21 +73,35 @@
 #include <rte_version.h>
 
 #include <vlib/vlib.h>
+#include <vlib/unix/unix.h>
 #include <vnet/vnet.h>
 #include <dpdk/device/dpdk.h>
 #include <dpdk/device/dpdk_priv.h>
-
+#include <dpdk/buffer.h>
 
 STATIC_ASSERT (VLIB_BUFFER_PRE_DATA_SIZE == RTE_PKTMBUF_HEADROOM,
 	       "VLIB_BUFFER_PRE_DATA_SIZE must be equal to RTE_PKTMBUF_HEADROOM");
 
-static_always_inline void
-dpdk_rte_pktmbuf_free (vlib_main_t * vm, vlib_buffer_t * b)
+typedef struct
 {
-  vlib_buffer_t *hb = b;
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+  struct rte_mbuf **mbuf_alloc_list;
+} dpdk_buffer_per_thread_data;
+
+typedef struct
+{
+  int vfio_container_fd;
+  dpdk_buffer_per_thread_data *ptd;
+} dpdk_buffer_main_t;
+
+dpdk_buffer_main_t dpdk_buffer_main;
+
+static_always_inline void
+dpdk_rte_pktmbuf_free (vlib_main_t * vm, u32 thread_index, vlib_buffer_t * b,
+		       int maybe_next)
+{
   struct rte_mbuf *mb;
   u32 next, flags;
-  mb = rte_mbuf_from_vlib_buffer (hb);
 
 next:
   flags = b->flags;
@@ -98,222 +114,126 @@ next:
       b->n_add_refs = 0;
     }
 
-  rte_pktmbuf_free_seg (mb);
+  if ((mb = rte_pktmbuf_prefree_seg (mb)))
+    rte_mempool_put (mb->pool, mb);
 
-  if (flags & VLIB_BUFFER_NEXT_PRESENT)
+  if (maybe_next && (flags & VLIB_BUFFER_NEXT_PRESENT))
     {
       b = vlib_get_buffer (vm, next);
       goto next;
     }
 }
 
-static void
-del_free_list (vlib_main_t * vm, vlib_buffer_free_list_t * f)
-{
-  u32 i;
-  vlib_buffer_t *b;
-
-  for (i = 0; i < vec_len (f->buffers); i++)
-    {
-      b = vlib_get_buffer (vm, f->buffers[i]);
-      dpdk_rte_pktmbuf_free (vm, b);
-    }
-
-  vec_free (f->name);
-  vec_free (f->buffers);
-}
-
-/* Add buffer free list. */
-static void
-dpdk_buffer_delete_free_list (vlib_main_t * vm, u32 free_list_index)
-{
-  vlib_buffer_main_t *bm = vm->buffer_main;
-  vlib_buffer_free_list_t *f;
-  u32 merge_index;
-  int i;
-
-  ASSERT (vlib_get_thread_index () == 0);
-
-  f = vlib_buffer_get_free_list (vm, free_list_index);
-
-  merge_index = vlib_buffer_get_free_list_with_size (vm, f->n_data_bytes);
-  if (merge_index != ~0 && merge_index != free_list_index)
-    {
-      vlib_buffer_merge_free_lists (pool_elt_at_index
-				    (bm->buffer_free_list_pool, merge_index),
-				    f);
-    }
-
-  del_free_list (vm, f);
-
-  /* Poison it. */
-  memset (f, 0xab, sizeof (f[0]));
-
-  pool_put (bm->buffer_free_list_pool, f);
-
-  for (i = 1; i < vec_len (vlib_mains); i++)
-    {
-      bm = vlib_mains[i]->buffer_main;
-      f = vlib_buffer_get_free_list (vlib_mains[i], free_list_index);;
-      memset (f, 0xab, sizeof (f[0]));
-      pool_put (bm->buffer_free_list_pool, f);
-    }
-}
-
 /* Make sure free list has at least given number of free buffers. */
-static uword
-fill_free_list (vlib_main_t * vm,
-		vlib_buffer_free_list_t * fl, uword min_free_buffers)
+uword
+CLIB_MULTIARCH_FN (dpdk_buffer_fill_free_list) (vlib_main_t * vm,
+						vlib_buffer_free_list_t * fl,
+						uword min_free_buffers)
 {
   dpdk_main_t *dm = &dpdk_main;
-  vlib_buffer_t *b0, *b1, *b2, *b3;
-  int n, i;
-  u32 bi0, bi1, bi2, bi3;
+  dpdk_buffer_main_t *dbm = &dpdk_buffer_main;
+  struct rte_mbuf **mb;
+  uword n_left, first;
+  word n_alloc;
   unsigned socket_id = rte_socket_id ();
+  u32 thread_index = vlib_get_thread_index ();
+  dpdk_buffer_per_thread_data *d = vec_elt_at_index (dbm->ptd, thread_index);
   struct rte_mempool *rmp = dm->pktmbuf_pools[socket_id];
-  struct rte_mbuf *mb0, *mb1, *mb2, *mb3;
+  dpdk_mempool_private_t *privp = rte_mempool_get_priv (rmp);
+  vlib_buffer_t bt;
+  u32 *bi;
 
   /* Too early? */
   if (PREDICT_FALSE (rmp == 0))
     return 0;
 
   /* Already have enough free buffers on free list? */
-  n = min_free_buffers - vec_len (fl->buffers);
-  if (n <= 0)
+  n_alloc = min_free_buffers - vec_len (fl->buffers);
+  if (n_alloc <= 0)
     return min_free_buffers;
 
   /* Always allocate round number of buffers. */
-  n = round_pow2 (n, CLIB_CACHE_LINE_BYTES / sizeof (u32));
+  n_alloc = round_pow2 (n_alloc, CLIB_CACHE_LINE_BYTES / sizeof (u32));
 
   /* Always allocate new buffers in reasonably large sized chunks. */
-  n = clib_max (n, fl->min_n_buffers_each_physmem_alloc);
+  n_alloc = clib_max (n_alloc, fl->min_n_buffers_each_alloc);
 
-  vec_validate_aligned (vm->mbuf_alloc_list, n - 1, CLIB_CACHE_LINE_BYTES);
+  vec_validate_aligned (d->mbuf_alloc_list, n_alloc - 1,
+			CLIB_CACHE_LINE_BYTES);
 
-  if (rte_mempool_get_bulk (rmp, vm->mbuf_alloc_list, n) < 0)
+  if (rte_mempool_get_bulk (rmp, (void *) d->mbuf_alloc_list, n_alloc) < 0)
     return 0;
 
-  _vec_len (vm->mbuf_alloc_list) = n;
+  clib_memset (&bt, 0, sizeof (vlib_buffer_t));
+  bt.buffer_pool_index = privp->buffer_pool_index;
 
-  i = 0;
+  _vec_len (d->mbuf_alloc_list) = n_alloc;
 
-  while (i < (n - 7))
+  first = vec_len (fl->buffers);
+  vec_resize_aligned (fl->buffers, n_alloc, CLIB_CACHE_LINE_BYTES);
+
+  n_left = n_alloc;
+  mb = d->mbuf_alloc_list;
+  bi = fl->buffers + first;
+
+  ASSERT (n_left % 8 == 0);
+
+  while (n_left >= 8)
     {
-      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf
-				   (vm->mbuf_alloc_list[i + 4]), STORE);
-      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf
-				   (vm->mbuf_alloc_list[i + 5]), STORE);
-      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf
-				   (vm->mbuf_alloc_list[i + 6]), STORE);
-      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf
-				   (vm->mbuf_alloc_list[i + 7]), STORE);
+      if (PREDICT_FALSE (n_left < 24))
+	goto no_prefetch;
 
-      mb0 = vm->mbuf_alloc_list[i];
-      mb1 = vm->mbuf_alloc_list[i + 1];
-      mb2 = vm->mbuf_alloc_list[i + 2];
-      mb3 = vm->mbuf_alloc_list[i + 3];
+      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf (mb[16]), STORE);
+      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf (mb[17]), STORE);
+      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf (mb[18]), STORE);
+      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf (mb[19]), STORE);
+      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf (mb[20]), STORE);
+      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf (mb[21]), STORE);
+      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf (mb[22]), STORE);
+      vlib_prefetch_buffer_header (vlib_buffer_from_rte_mbuf (mb[23]), STORE);
 
-      b0 = vlib_buffer_from_rte_mbuf (mb0);
-      b1 = vlib_buffer_from_rte_mbuf (mb1);
-      b2 = vlib_buffer_from_rte_mbuf (mb2);
-      b3 = vlib_buffer_from_rte_mbuf (mb3);
+    no_prefetch:
+      vlib_get_buffer_indices_with_offset (vm, (void **) mb, bi, 8,
+					   sizeof (struct rte_mbuf));
 
-      bi0 = vlib_get_buffer_index (vm, b0);
-      bi1 = vlib_get_buffer_index (vm, b1);
-      bi2 = vlib_get_buffer_index (vm, b2);
-      bi3 = vlib_get_buffer_index (vm, b3);
+      vlib_buffer_copy_template (vlib_buffer_from_rte_mbuf (mb[0]), &bt);
+      vlib_buffer_copy_template (vlib_buffer_from_rte_mbuf (mb[1]), &bt);
+      vlib_buffer_copy_template (vlib_buffer_from_rte_mbuf (mb[2]), &bt);
+      vlib_buffer_copy_template (vlib_buffer_from_rte_mbuf (mb[3]), &bt);
+      vlib_buffer_copy_template (vlib_buffer_from_rte_mbuf (mb[4]), &bt);
+      vlib_buffer_copy_template (vlib_buffer_from_rte_mbuf (mb[5]), &bt);
+      vlib_buffer_copy_template (vlib_buffer_from_rte_mbuf (mb[6]), &bt);
+      vlib_buffer_copy_template (vlib_buffer_from_rte_mbuf (mb[7]), &bt);
 
-      vec_add1_aligned (fl->buffers, bi0, CLIB_CACHE_LINE_BYTES);
-      vec_add1_aligned (fl->buffers, bi1, CLIB_CACHE_LINE_BYTES);
-      vec_add1_aligned (fl->buffers, bi2, CLIB_CACHE_LINE_BYTES);
-      vec_add1_aligned (fl->buffers, bi3, CLIB_CACHE_LINE_BYTES);
-
-      vlib_buffer_init_for_free_list (b0, fl);
-      vlib_buffer_init_for_free_list (b1, fl);
-      vlib_buffer_init_for_free_list (b2, fl);
-      vlib_buffer_init_for_free_list (b3, fl);
-
-      if (fl->buffer_init_function)
-	{
-	  fl->buffer_init_function (vm, fl, &bi0, 1);
-	  fl->buffer_init_function (vm, fl, &bi1, 1);
-	  fl->buffer_init_function (vm, fl, &bi2, 1);
-	  fl->buffer_init_function (vm, fl, &bi3, 1);
-	}
-      i += 4;
+      n_left -= 8;
+      mb += 8;
+      bi += 8;
     }
 
-  while (i < n)
-    {
-      mb0 = vm->mbuf_alloc_list[i];
+  if (fl->buffer_init_function)
+    fl->buffer_init_function (vm, fl, fl->buffers + first, n_alloc);
 
-      b0 = vlib_buffer_from_rte_mbuf (mb0);
-      bi0 = vlib_get_buffer_index (vm, b0);
+  fl->n_alloc += n_alloc;
 
-      vec_add1_aligned (fl->buffers, bi0, CLIB_CACHE_LINE_BYTES);
-
-      vlib_buffer_init_for_free_list (b0, fl);
-
-      if (fl->buffer_init_function)
-	fl->buffer_init_function (vm, fl, &bi0, 1);
-      i++;
-    }
-
-  fl->n_alloc += n;
-
-  return n;
+  return n_alloc;
 }
 
-static u32
-alloc_from_free_list (vlib_main_t * vm,
-		      vlib_buffer_free_list_t * free_list,
-		      u32 * alloc_buffers, u32 n_alloc_buffers)
+static_always_inline void
+dpdk_prefetch_buffer (vlib_buffer_t * b)
 {
-  u32 *dst, *src;
-  uword len, n_filled;
-
-  dst = alloc_buffers;
-
-  n_filled = fill_free_list (vm, free_list, n_alloc_buffers);
-  if (n_filled == 0)
-    return 0;
-
-  len = vec_len (free_list->buffers);
-  ASSERT (len >= n_alloc_buffers);
-
-  src = free_list->buffers + len - n_alloc_buffers;
-  clib_memcpy (dst, src, n_alloc_buffers * sizeof (u32));
-
-  _vec_len (free_list->buffers) -= n_alloc_buffers;
-
-  return n_alloc_buffers;
+  struct rte_mbuf *mb;
+  mb = rte_mbuf_from_vlib_buffer (b);
+  CLIB_PREFETCH (mb, 2 * CLIB_CACHE_LINE_BYTES, LOAD);
+  CLIB_PREFETCH (b, CLIB_CACHE_LINE_BYTES, LOAD);
 }
 
-/* Allocate a given number of buffers into given array.
-   Returns number actually allocated which will be either zero or
-   number requested. */
-u32
-dpdk_buffer_alloc (vlib_main_t * vm, u32 * buffers, u32 n_buffers)
+static_always_inline void
+recycle_or_free (vlib_main_t * vm, vlib_buffer_main_t * bm, u32 bi,
+		 vlib_buffer_t * b)
 {
-  vlib_buffer_main_t *bm = vm->buffer_main;
+  u32 thread_index = vlib_get_thread_index ();
 
-  return alloc_from_free_list
-    (vm,
-     pool_elt_at_index (bm->buffer_free_list_pool,
-			VLIB_BUFFER_DEFAULT_FREE_LIST_INDEX),
-     buffers, n_buffers);
-}
-
-
-u32
-dpdk_buffer_alloc_from_free_list (vlib_main_t * vm,
-				  u32 * buffers,
-				  u32 n_buffers, u32 free_list_index)
-{
-  vlib_buffer_main_t *bm = vm->buffer_main;
-  vlib_buffer_free_list_t *f;
-  f = pool_elt_at_index (bm->buffer_free_list_pool, free_list_index);
-  return alloc_from_free_list (vm, f, buffers, n_buffers);
+  dpdk_rte_pktmbuf_free (vm, thread_index, b, 1);
 }
 
 static_always_inline void
@@ -321,9 +241,11 @@ vlib_buffer_free_inline (vlib_main_t * vm,
 			 u32 * buffers, u32 n_buffers, u32 follow_buffer_next)
 {
   vlib_buffer_main_t *bm = vm->buffer_main;
-  vlib_buffer_free_list_t *fl;
-  u32 fi;
-  int i;
+  vlib_buffer_t *bufp[n_buffers], **b = bufp;
+  u32 thread_index = vm->thread_index;
+  int i = 0;
+  u32 simple_mask = VLIB_BUFFER_NEXT_PRESENT;
+  u32 n_left, *bi;
   u32 (*cb) (vlib_main_t * vm, u32 * buffers, u32 n_buffers,
 	     u32 follow_buffer_next);
 
@@ -335,78 +257,141 @@ vlib_buffer_free_inline (vlib_main_t * vm,
   if (!n_buffers)
     return;
 
-  for (i = 0; i < n_buffers; i++)
+  n_left = n_buffers;
+  bi = buffers;
+  b = bufp;
+  vlib_get_buffers (vm, bi, b, n_buffers);
+
+  while (n_left >= 4)
     {
-      vlib_buffer_t *b;
+      u32 or_flags;
+      vlib_buffer_t **p;
 
-      b = vlib_get_buffer (vm, buffers[i]);
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b);
-      fl = vlib_buffer_get_buffer_free_list (vm, b, &fi);
+      if (n_left < 16)
+	goto no_prefetch;
 
-      /* The only current use of this callback: multicast recycle */
-      if (PREDICT_FALSE (fl->buffers_added_to_freelist_function != 0))
+      p = b + 12;
+      dpdk_prefetch_buffer (p[0]);
+      dpdk_prefetch_buffer (p[1]);
+      dpdk_prefetch_buffer (p[2]);
+      dpdk_prefetch_buffer (p[3]);
+    no_prefetch:
+
+      for (i = 0; i < 4; i++)
+	VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[i]);
+
+      or_flags = b[0]->flags | b[1]->flags | b[2]->flags | b[3]->flags;
+
+      if (or_flags & simple_mask)
 	{
-	  int j;
-
-	  vlib_buffer_add_to_free_list
-	    (vm, fl, buffers[i], (b->flags & VLIB_BUFFER_RECYCLE) == 0);
-
-	  for (j = 0; j < vec_len (bm->announce_list); j++)
-	    {
-	      if (fl == bm->announce_list[j])
-		goto already_announced;
-	    }
-	  vec_add1 (bm->announce_list, fl);
-	already_announced:
-	  ;
+	  recycle_or_free (vm, bm, bi[0], b[0]);
+	  recycle_or_free (vm, bm, bi[1], b[1]);
+	  recycle_or_free (vm, bm, bi[2], b[2]);
+	  recycle_or_free (vm, bm, bi[3], b[3]);
 	}
       else
 	{
-	  if (PREDICT_TRUE ((b->flags & VLIB_BUFFER_RECYCLE) == 0))
-	    dpdk_rte_pktmbuf_free (vm, b);
+	  dpdk_rte_pktmbuf_free (vm, thread_index, b[0], 0);
+	  dpdk_rte_pktmbuf_free (vm, thread_index, b[1], 0);
+	  dpdk_rte_pktmbuf_free (vm, thread_index, b[2], 0);
+	  dpdk_rte_pktmbuf_free (vm, thread_index, b[3], 0);
 	}
+      bi += 4;
+      b += 4;
+      n_left -= 4;
     }
-  if (vec_len (bm->announce_list))
+  while (n_left)
     {
-      vlib_buffer_free_list_t *fl;
-      for (i = 0; i < vec_len (bm->announce_list); i++)
-	{
-	  fl = bm->announce_list[i];
-	  fl->buffers_added_to_freelist_function (vm, fl);
-	}
-      _vec_len (bm->announce_list) = 0;
+      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[0]);
+      recycle_or_free (vm, bm, bi[0], b[0]);
+      bi += 1;
+      b += 1;
+      n_left -= 1;
     }
 }
 
-static void
-dpdk_buffer_free (vlib_main_t * vm, u32 * buffers, u32 n_buffers)
+void
+CLIB_MULTIARCH_FN (dpdk_buffer_free) (vlib_main_t * vm, u32 * buffers,
+				      u32 n_buffers)
 {
   vlib_buffer_free_inline (vm, buffers, n_buffers,	/* follow_buffer_next */
 			   1);
 }
 
-static void
-dpdk_buffer_free_no_next (vlib_main_t * vm, u32 * buffers, u32 n_buffers)
+void
+CLIB_MULTIARCH_FN (dpdk_buffer_free_no_next) (vlib_main_t * vm, u32 * buffers,
+					      u32 n_buffers)
 {
   vlib_buffer_free_inline (vm, buffers, n_buffers,	/* follow_buffer_next */
 			   0);
 }
 
-static void
-dpdk_packet_template_init (vlib_main_t * vm,
-			   void *vt,
-			   void *packet_data,
-			   uword n_packet_data_bytes,
-			   uword min_n_buffers_each_physmem_alloc, u8 * name)
+#ifndef CLIB_MARCH_VARIANT
+clib_error_t *
+dpdk_pool_create (vlib_main_t * vm, u8 * pool_name, u32 elt_size,
+		  u32 num_elts, u32 pool_priv_size, u16 cache_size, u8 numa,
+		  struct rte_mempool **_mp, u32 * map_index)
 {
-  vlib_packet_template_t *t = (vlib_packet_template_t *) vt;
+  struct rte_mempool *mp;
+  enum rte_iova_mode iova_mode;
+  dpdk_mempool_private_t priv;
+  vlib_physmem_map_t *pm;
+  clib_error_t *error = 0;
+  size_t min_chunk_size, align;
+  int map_dma = 1;
+  u32 size;
+  i32 ret;
+  uword i;
 
-  vlib_worker_thread_barrier_sync (vm);
-  memset (t, 0, sizeof (t[0]));
+  mp = rte_mempool_create_empty ((char *) pool_name, num_elts, elt_size,
+				 512, pool_priv_size, numa, 0);
+  if (!mp)
+    return clib_error_return (0, "failed to create %s", pool_name);
 
-  vec_add (t->packet_data, packet_data, n_packet_data_bytes);
+  rte_mempool_set_ops_byname (mp, RTE_MBUF_DEFAULT_MEMPOOL_OPS, NULL);
 
-  vlib_worker_thread_barrier_release (vm);
+  size = rte_mempool_op_calc_mem_size_default (mp, num_elts, 21,
+					       &min_chunk_size, &align);
+
+  if ((error = vlib_physmem_shared_map_create (vm, (char *) pool_name, size,
+					       0, numa, map_index)))
+    {
+      rte_mempool_free (mp);
+      return error;
+    }
+  pm = vlib_physmem_get_map (vm, *map_index);
+
+  /* Call the mempool priv initializer */
+  priv.mbp_priv.mbuf_data_room_size = VLIB_BUFFER_PRE_DATA_SIZE +
+    VLIB_BUFFER_DATA_SIZE;
+  priv.mbp_priv.mbuf_priv_size = VLIB_BUFFER_HDR_SIZE;
+  rte_pktmbuf_pool_init (mp, &priv);
+
+  if (rte_eth_dev_count_avail () == 0)
+    map_dma = 0;
+
+  iova_mode = rte_eal_iova_mode ();
+  for (i = 0; i < pm->n_pages; i++)
+    {
+      size_t page_sz = 1ULL << pm->log2_page_size;
+      char *va = ((char *) pm->base) + i * page_sz;
+      uword pa = iova_mode == RTE_IOVA_VA ?
+	pointer_to_uword (va) : pm->page_table[i];
+      ret = rte_mempool_populate_iova (mp, va, pa, page_sz, 0, 0);
+      if (ret < 0)
+	{
+	  rte_mempool_free (mp);
+	  return clib_error_return (0, "failed to populate %s", pool_name);
+	}
+      /* -1 likely means there is no PCI devices assigned to vfio
+         container or noiommu mode is used  so we stop trying */
+      if (map_dma && rte_vfio_dma_map (pointer_to_uword (va), pa, page_sz))
+	map_dma = 0;
+    }
+
+  _mp[0] = mp;
+
+  return 0;
 }
 
 clib_error_t *
@@ -415,7 +400,10 @@ dpdk_buffer_pool_create (vlib_main_t * vm, unsigned num_mbufs,
 {
   dpdk_main_t *dm = &dpdk_main;
   struct rte_mempool *rmp;
-  int i;
+  clib_error_t *error = 0;
+  u8 *pool_name;
+  u32 elt_size, i;
+  u32 map_index;
 
   vec_validate_aligned (dm->pktmbuf_pools, socket_id, CLIB_CACHE_LINE_BYTES);
 
@@ -423,42 +411,42 @@ dpdk_buffer_pool_create (vlib_main_t * vm, unsigned num_mbufs,
   if (dm->pktmbuf_pools[socket_id])
     return 0;
 
-  u8 *pool_name = format (0, "mbuf_pool_socket%u%c", socket_id, 0);
+  pool_name = format (0, "dpdk_mbuf_pool_socket%u%c", socket_id, 0);
 
-  rmp = rte_pktmbuf_pool_create ((char *) pool_name,	/* pool name */
-				 num_mbufs,	/* number of mbufs */
-				 512,	/* cache size */
-				 VLIB_BUFFER_HDR_SIZE,	/* priv size */
-				 VLIB_BUFFER_PRE_DATA_SIZE + VLIB_BUFFER_DATA_SIZE,	/* dataroom size */
-				 socket_id);	/* cpu socket */
+  elt_size = sizeof (struct rte_mbuf) +
+    VLIB_BUFFER_HDR_SIZE /* priv size */  +
+    VLIB_BUFFER_PRE_DATA_SIZE + VLIB_BUFFER_DATA_SIZE;	/*data room size */
 
-  if (rmp)
-    {
-      {
-	struct rte_mempool_memhdr *memhdr;
-
-	STAILQ_FOREACH (memhdr, &rmp->mem_list, next)
-	  vlib_buffer_add_mem_range (vm, (uword) memhdr->addr, memhdr->len);
-      }
-      if (rmp)
-	{
-	  dm->pktmbuf_pools[socket_id] = rmp;
-	  vec_free (pool_name);
-	  return 0;
-	}
-    }
+  error = dpdk_pool_create (vm, pool_name, elt_size, num_mbufs,
+			    sizeof (dpdk_mempool_private_t), 512, socket_id,
+			    &rmp, &map_index);
 
   vec_free (pool_name);
+
+  if (!error)
+    {
+      /* call the object initializers */
+      rte_mempool_obj_iter (rmp, rte_pktmbuf_init, 0);
+
+      dpdk_mempool_private_t *privp = rte_mempool_get_priv (rmp);
+      privp->buffer_pool_index =
+	vlib_buffer_register_physmem_map (vm, map_index);
+
+      dm->pktmbuf_pools[socket_id] = rmp;
+
+      return 0;
+    }
+
+  clib_error_report (error);
 
   /* no usable pool for this socket, try to use pool from another one */
   for (i = 0; i < vec_len (dm->pktmbuf_pools); i++)
     {
       if (dm->pktmbuf_pools[i])
 	{
-	  clib_warning
-	    ("WARNING: Failed to allocate mempool for CPU socket %u. "
-	     "Threads running on socket %u will use socket %u mempool.",
-	     socket_id, socket_id, i);
+	  clib_warning ("WARNING: Failed to allocate mempool for CPU socket "
+			"%u. Threads running on socket %u will use socket %u "
+			"mempool.", socket_id, socket_id, i);
 	  dm->pktmbuf_pools[socket_id] = dm->pktmbuf_pools[i];
 	  return 0;
 	}
@@ -479,8 +467,8 @@ buffer_state_validation_init (vlib_main_t * vm)
 {
   void *oldheap;
 
-  vlib_buffer_state_heap = mheap_alloc (0, 10 << 20);
-
+  vlib_buffer_state_heap =
+    mheap_alloc_with_lock (0, 10 << 20, 0 /* locked */ );
   oldheap = clib_mem_set_heap (vlib_buffer_state_heap);
 
   vlib_buffer_state_validation_hash = hash_create (0, sizeof (uword));
@@ -554,16 +542,57 @@ dpdk_buffer_poison_trajectory_all (void)
 }
 #endif
 
+static clib_error_t *
+dpdk_buffer_init (vlib_main_t * vm)
+{
+  dpdk_buffer_main_t *dbm = &dpdk_buffer_main;
+  vlib_thread_main_t *tm = vlib_get_thread_main ();
+
+  vec_validate_aligned (dbm->ptd, tm->n_vlib_mains - 1,
+			CLIB_CACHE_LINE_BYTES);
+
+  dbm->vfio_container_fd = -1;
+
+  return 0;
+}
+
+VLIB_INIT_FUNCTION (dpdk_buffer_init);
+
 /* *INDENT-OFF* */
 VLIB_BUFFER_REGISTER_CALLBACKS (dpdk, static) = {
-  .vlib_buffer_alloc_cb = &dpdk_buffer_alloc,
-  .vlib_buffer_alloc_from_free_list_cb = &dpdk_buffer_alloc_from_free_list,
+  .vlib_buffer_fill_free_list_cb = &dpdk_buffer_fill_free_list,
   .vlib_buffer_free_cb = &dpdk_buffer_free,
   .vlib_buffer_free_no_next_cb = &dpdk_buffer_free_no_next,
-  .vlib_packet_template_init_cb = &dpdk_packet_template_init,
-  .vlib_buffer_delete_free_list_cb = &dpdk_buffer_delete_free_list,
 };
 /* *INDENT-ON* */
+
+#if __x86_64__
+vlib_buffer_fill_free_list_cb_t __clib_weak dpdk_buffer_fill_free_list_avx512;
+vlib_buffer_fill_free_list_cb_t __clib_weak dpdk_buffer_fill_free_list_avx2;
+vlib_buffer_free_cb_t __clib_weak dpdk_buffer_free_avx512;
+vlib_buffer_free_cb_t __clib_weak dpdk_buffer_free_avx2;
+vlib_buffer_free_no_next_cb_t __clib_weak dpdk_buffer_free_no_next_avx512;
+vlib_buffer_free_no_next_cb_t __clib_weak dpdk_buffer_free_no_next_avx2;
+
+static void __clib_constructor
+dpdk_input_multiarch_select (void)
+{
+  vlib_buffer_callbacks_t *cb = &__dpdk_buffer_callbacks;
+  if (dpdk_buffer_fill_free_list_avx512 && clib_cpu_supports_avx512f ())
+    {
+      cb->vlib_buffer_fill_free_list_cb = dpdk_buffer_fill_free_list_avx512;
+      cb->vlib_buffer_free_cb = dpdk_buffer_free_avx512;
+      cb->vlib_buffer_free_no_next_cb = dpdk_buffer_free_no_next_avx512;
+    }
+  else if (dpdk_buffer_fill_free_list_avx2 && clib_cpu_supports_avx2 ())
+    {
+      cb->vlib_buffer_fill_free_list_cb = dpdk_buffer_fill_free_list_avx2;
+      cb->vlib_buffer_free_cb = dpdk_buffer_free_avx2;
+      cb->vlib_buffer_free_no_next_cb = dpdk_buffer_free_no_next_avx2;
+    }
+}
+#endif
+#endif
 
 /** @endcond */
 /*

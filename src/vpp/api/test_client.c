@@ -78,7 +78,7 @@ typedef struct
   int oam_events_on;
 
   /* convenience */
-  unix_shared_memory_queue_t *vl_input_queue;
+  svm_queue_t *vl_input_queue;
   u32 my_client_index;
 } test_main_t;
 
@@ -93,7 +93,7 @@ vlib_main_t **vlib_mains;
 void
 vlib_cli_output (struct vlib_main_t *vm, char *fmt, ...)
 {
-  clib_warning ("vlib_cli_output callled...");
+  clib_warning ("vlib_cli_output called...");
 }
 
 u8 *
@@ -133,11 +133,29 @@ vl_api_sw_interface_details_t_handler (vl_api_sw_interface_details_t * mp)
     case VNET_HW_INTERFACE_FLAG_SPEED_1G:
       speed = "1Gbps";
       break;
+    case VNET_HW_INTERFACE_FLAG_SPEED_2_5G:
+      speed = "2.5Gbps";
+      break;
+    case VNET_HW_INTERFACE_FLAG_SPEED_5G:
+      speed = "5Gbps";
+      break;
     case VNET_HW_INTERFACE_FLAG_SPEED_10G:
       speed = "10Gbps";
       break;
+    case VNET_HW_INTERFACE_FLAG_SPEED_20G:
+      speed = "20Gbps";
+      break;
+    case VNET_HW_INTERFACE_FLAG_SPEED_25G:
+      speed = "25Gbps";
+      break;
     case VNET_HW_INTERFACE_FLAG_SPEED_40G:
       speed = "40Gbps";
+      break;
+    case VNET_HW_INTERFACE_FLAG_SPEED_50G:
+      speed = "50Gbps";
+      break;
+    case VNET_HW_INTERFACE_FLAG_SPEED_56G:
+      speed = "56Gbps";
       break;
     case VNET_HW_INTERFACE_FLAG_SPEED_100G:
       speed = "100Gbps";
@@ -161,10 +179,8 @@ vl_api_sw_interface_details_t_handler (vl_api_sw_interface_details_t * mp)
 static void
 vl_api_sw_interface_set_flags_t_handler (vl_api_sw_interface_set_flags_t * mp)
 {
-  fformat (stdout, "set flags: sw_if_index %d, admin %s link %s\n",
-	   ntohl (mp->sw_if_index),
-	   mp->admin_up_down ? "up" : "down",
-	   mp->link_up_down ? "up" : "down");
+  fformat (stdout, "set flags: sw_if_index %d, admin %s\n",
+	   ntohl (mp->sw_if_index), mp->admin_up_down ? "up" : "down");
 }
 
 static void
@@ -640,7 +656,7 @@ link_up_down_enable_disable (test_main_t * tm, int enable)
 
   /* Request admin / link up down messages */
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_WANT_INTERFACE_EVENTS);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -656,7 +672,7 @@ stats_enable_disable (test_main_t * tm, int enable)
   vl_api_want_stats_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_WANT_STATS);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -672,7 +688,7 @@ oam_events_enable_disable (test_main_t * tm, int enable)
   vl_api_want_oam_events_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_WANT_OAM_EVENTS);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -689,7 +705,7 @@ oam_add_del (test_main_t * tm, int is_add)
   ip4_address_t tmp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_OAM_ADD_DEL);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -711,7 +727,7 @@ dump (test_main_t * tm)
   vl_api_sw_interface_dump_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_DUMP);
   mp->client_index = tm->my_client_index;
   mp->name_filter_valid = 1;
@@ -727,12 +743,11 @@ add_del_ip4_route (test_main_t * tm, int enable_disable)
   u32 tmp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_IP_ADD_DEL_ROUTE);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
   mp->table_id = ntohl (0);
-  mp->create_vrf_if_needed = 1;
 
   mp->next_hop_sw_if_index = ntohl (5);
   mp->is_add = enable_disable;
@@ -757,7 +772,7 @@ add_del_ip6_route (test_main_t * tm, int enable_disable)
   u64 tmp[2];
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_IP_ADD_DEL_ROUTE);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -789,7 +804,7 @@ add_del_interface_address (test_main_t * tm, int enable_disable)
   u32 tmp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_ADD_DEL_ADDRESS);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -810,7 +825,7 @@ add_del_v6_interface_address (test_main_t * tm, int enable_disable)
   u64 tmp[2];
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_ADD_DEL_ADDRESS);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -834,7 +849,7 @@ del_all_interface_addresses (test_main_t * tm)
   vl_api_sw_interface_add_del_address_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_ADD_DEL_ADDRESS);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -850,7 +865,7 @@ set_interface_table (test_main_t * tm, int is_ipv6, u32 vrf_id)
   vl_api_sw_interface_set_table_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_SET_TABLE);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -867,7 +882,7 @@ connect_unix_tap (test_main_t * tm, char *name)
   vl_api_tap_connect_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_TAP_CONNECT);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -882,7 +897,7 @@ create_vlan_subif (test_main_t * tm, u32 vlan_id)
   vl_api_create_vlan_subif_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_CREATE_VLAN_SUBIF);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -899,19 +914,19 @@ add_del_proxy_arp (test_main_t * tm, int is_add)
   u32 tmp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_PROXY_ARP_ADD_DEL);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
-  mp->vrf_id = ntohl (11);
+  mp->proxy.vrf_id = ntohl (11);
   mp->is_add = is_add;
 
   /* proxy fib 11, 1.1.1.1 -> 1.1.1.10 */
   tmp = ntohl (0x01010101);
-  clib_memcpy (mp->low_address, &tmp, 4);
+  clib_memcpy (mp->proxy.low_address, &tmp, 4);
 
   tmp = ntohl (0x0101010a);
-  clib_memcpy (mp->hi_address, &tmp, 4);
+  clib_memcpy (mp->proxy.hi_address, &tmp, 4);
 
   vl_msg_api_send_shmem (tm->vl_input_queue, (u8 *) & mp);
 }
@@ -922,7 +937,7 @@ proxy_arp_intfc_enable_disable (test_main_t * tm, int enable_disable)
   vl_api_proxy_arp_intfc_enable_disable_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_PROXY_ARP_INTFC_ENABLE_DISABLE);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -939,14 +954,14 @@ add_ip4_neighbor (test_main_t * tm, int add_del)
   u32 tmp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_IP_NEIGHBOR_ADD_DEL);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
   mp->sw_if_index = ntohl (6);
   mp->is_add = add_del;
 
-  memset (mp->mac_address, 0xbe, sizeof (mp->mac_address));
+  clib_memset (mp->mac_address, 0xbe, sizeof (mp->mac_address));
 
   tmp = ntohl (0x0101010a);
   clib_memcpy (mp->dst_address, &tmp, 4);
@@ -961,7 +976,7 @@ add_ip6_neighbor (test_main_t * tm, int add_del)
   u64 tmp[2];
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_IP_NEIGHBOR_ADD_DEL);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -969,7 +984,7 @@ add_ip6_neighbor (test_main_t * tm, int add_del)
   mp->is_add = add_del;
   mp->is_ipv6 = 1;
 
-  memset (mp->mac_address, 0xbe, sizeof (mp->mac_address));
+  clib_memset (mp->mac_address, 0xbe, sizeof (mp->mac_address));
 
   tmp[0] = clib_host_to_net_u64 (0xdb01000000000000ULL);
   tmp[1] = clib_host_to_net_u64 (0x11ULL);
@@ -986,7 +1001,7 @@ reset_fib (test_main_t * tm, u8 is_ip6)
   vl_api_reset_fib_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_RESET_FIB);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -1002,12 +1017,12 @@ dhcpv6_set_vss (test_main_t * tm)
   vl_api_dhcp_proxy_set_vss_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_DHCP_PROXY_SET_VSS);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
   mp->oui = ntohl (6);
-  mp->fib_id = ntohl (60);
+  mp->tbl_id = ntohl (60);
   mp->is_add = 1;
   mp->is_ipv6 = 1;
   vl_msg_api_send_shmem (tm->vl_input_queue, (u8 *) & mp);
@@ -1019,12 +1034,12 @@ dhcpv4_set_vss (test_main_t * tm)
   vl_api_dhcp_proxy_set_vss_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_DHCP_PROXY_SET_VSS);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
   mp->oui = ntohl (4);
-  mp->fib_id = ntohl (40);
+  mp->tbl_id = ntohl (40);
   mp->is_add = 1;
   mp->is_ipv6 = 0;
   vl_msg_api_send_shmem (tm->vl_input_queue, (u8 *) & mp);
@@ -1043,7 +1058,7 @@ dhcp_set_proxy (test_main_t * tm, int ipv6)
   vl_api_dhcp_proxy_config_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_DHCP_PROXY_CONFIG);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -1080,7 +1095,7 @@ set_ip_flow_hash (test_main_t * tm, u8 is_ip6)
   vl_api_set_ip_flow_hash_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_SET_IP_FLOW_HASH);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -1098,7 +1113,7 @@ ip6nd_ra_config (test_main_t * tm, int is_no)
   vl_api_sw_interface_ip6nd_ra_config_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
 
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -1119,7 +1134,7 @@ ip6nd_ra_prefix (test_main_t * tm, int is_no)
   u64 tmp[2];
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
 
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -1149,7 +1164,7 @@ ip6_enable_disable (test_main_t * tm, int enable)
   vl_api_sw_interface_ip6_enable_disable_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
 
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -1166,7 +1181,7 @@ loop_create (test_main_t * tm)
   vl_api_create_loopback_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
 
   mp->_vl_msg_id = ntohs (VL_API_CREATE_LOOPBACK);
   mp->client_index = tm->my_client_index;
@@ -1181,7 +1196,7 @@ ip6_set_link_local_address (test_main_t * tm)
   u64 tmp[2];
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
 
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -1205,7 +1220,7 @@ set_flags (test_main_t * tm, int up_down)
   vl_api_sw_interface_set_flags_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
 
   mp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_SET_FLAGS);
   mp->client_index = tm->my_client_index;
@@ -1222,7 +1237,7 @@ l2_patch_add_del (test_main_t * tm, int is_add)
   vl_api_l2_patch_add_del_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_L2_PATCH_ADD_DEL);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -1239,7 +1254,7 @@ l2_xconnect (test_main_t * tm)
   vl_api_sw_interface_set_l2_xconnect_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_SET_L2_XCONNECT);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;
@@ -1256,7 +1271,7 @@ l2_bridge (test_main_t * tm)
   vl_api_sw_interface_set_l2_bridge_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_SET_L2_BRIDGE);
   mp->client_index = tm->my_client_index;
   mp->context = 0xdeadbeef;

@@ -124,16 +124,18 @@ class Conn(L4_Conn):
         return new_rule
 
 
-@unittest.skipUnless(running_extended_tests(), "part of extended tests")
+@unittest.skipUnless(running_extended_tests, "part of extended tests")
 class ACLPluginConnTestCase(VppTestCase):
     """ ACL plugin connection-oriented extended testcases """
 
     @classmethod
-    def setUpClass(self):
-        super(ACLPluginConnTestCase, self).setUpClass()
+    def setUpClass(cls):
+        super(ACLPluginConnTestCase, cls).setUpClass()
         # create pg0 and pg1
-        self.create_pg_interfaces(range(2))
-        for i in self.pg_interfaces:
+        cls.create_pg_interfaces(range(2))
+        cmd = "set acl-plugin session table event-trace 1"
+        cls.logger.info(cls.vapi.cli(cmd))
+        for i in cls.pg_interfaces:
             i.admin_up()
             i.config_ip4()
             i.config_ip6()
@@ -151,6 +153,7 @@ class ACLPluginConnTestCase(VppTestCase):
             self.logger.info(self.vapi.cli("show acl-plugin acl"))
             self.logger.info(self.vapi.cli("show acl-plugin interface"))
             self.logger.info(self.vapi.cli("show acl-plugin tables"))
+            self.logger.info(self.vapi.cli("show event-logger all"))
 
     def run_basic_conn_test(self, af, acl_side):
         """ Basic conn timeout test """

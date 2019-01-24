@@ -3,18 +3,18 @@
 # socket_test.sh -- script to run socket tests.
 #
 script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-vpp_dir="$WS_ROOT/build-root/install-vpp-native/vpp/bin/"
-vpp_debug_dir="$WS_ROOT/build-root/install-vpp_debug-native/vpp/bin/"
+vpp_dir="$WS_ROOT/build-root/build-vpp-native/vpp/bin/"
+vpp_debug_dir="$WS_ROOT/build-root/build-vpp_debug-native/vpp/bin/"
 vpp_shm_dir="/dev/shm/"
 vpp_run_dir="/run/vpp"
-lib64_dir="$WS_ROOT/build-root/install-vpp-native/vpp/lib64/"
-lib64_debug_dir="$WS_ROOT/build-root/install-vpp_debug-native/vpp/lib64/"
-dpdk_devbind="/usr/share/dpdk/usertools/dpdk-devbind.py"
+lib_dir="$WS_ROOT/build-root/install-vpp-native/vpp/lib/"
+lib_debug_dir="$WS_ROOT/build-root/install-vpp_debug-native/vpp/lib/"
+dpdk_devbind="$WS_ROOT/extras/vpp_config/scripts/dpdk-devbind.py"
 docker_vpp_dir="/vpp/"
 docker_app_dir="/vpp/"
-docker_lib64_dir="/vpp-lib64/"
+docker_lib_dir="/vpp-lib/"
 docker_os="ubuntu"
-vcl_ldpreload_lib="libvcl_ldpreload.so.0.0.0"
+vcl_ldpreload_lib="libvcl_ldpreload.so"
 user_gid="$(id -g)"
 vpp_app="vpp"
 sock_srvr_app="sock_test_server"
@@ -24,9 +24,9 @@ sock_srvr_port="22000"
 iperf_srvr_app="iperf3 -V4d -s"
 iperf_clnt_app="iperf3 -V4d -c \$srvr_addr"
 gdb_in_emacs="gdb_in_emacs"
-vppcom_conf="vppcom.conf"
-vppcom_conf_dir="$WS_ROOT/src/uri/"
-docker_vppcom_conf_dir="/etc/vpp/"
+vcl_config="vcl.conf"
+vcl_config_dir="$WS_ROOT/src/vcl/"
+docker_vcl_config_dir="/etc/vpp/"
 xterm_geom="100x60"
 bash_header="#! /bin/bash"
 tmp_cmdfile_prefix="/tmp/socket_test_cmd"
@@ -49,7 +49,6 @@ trap_signals="SIGINT SIGTERM EXIT"
 VPP_GDB_CMDFILE="${VPP_GDB_CMDFILE:-${def_gdb_cmdfile_prefix}.vpp}"
 VPPCOM_CLIENT_GDB_CMDFILE="${VPPCOM_CLIENT_GDB_CMDFILE:-${def_gdb_cmdfile_prefix}.vppcom_client}"
 VPPCOM_SERVER_GDB_CMDFILE="${VPPCOM_SERVER_GDB_CMDFILE:-${def_gdb_cmdfile_prefix}.vppcom_server}"
-VCL_LDPRELOAD_LIB_DIR="${VCL_LDPRELOAD_LIB_DIR:-/usr/local/lib}"
 
 usage() {
     cat <<EOF
@@ -67,10 +66,10 @@ OPTIONS:
   -l                  Leave ${tmp_cmdfile_prefix}* files after test run.
   -b                  Run bash after application exit.
   -d                  Run the vpp_debug version of all apps.
-  -c                  Set VPPCOM_CONF to use the vppcom_test.conf file.
+  -c                  Set VCL_CONFIG to use the vcl_test.conf file.
   -i                  Run iperf3 for client/server app in native tests.
   -n                  Name of ethernet for VPP to use in multi-host cfg.
-  -6                  Use ipv6 addressing.
+  -f                  Full thru host stack vpp configuration. 
   -m c[lient]         Run client in multi-host cfg (server on remote host)
      s[erver]         Run server in multi-host cfg (client on remote host)
   -e a[ll]            Run all in emacs+gdb.
@@ -84,6 +83,8 @@ OPTIONS:
   -t                  Use tabs in one xterm if available (e.g. xfce4-terminal).
 
 OPTIONS passed to client/server:
+  -6                  Use IPv6.
+  -D                  Use UDP as the transport.
   -S <ip address>     Server IP address.
   -P <server port>    Server Port number.
   -E <data>           Run Echo test.
@@ -97,7 +98,7 @@ OPTIONS passed to client/server:
   -X                  Exit client/server after running test.
 
 Environment variables:
-  VPPCOM_CONF                Pathname of vppcom configuration file.
+  VCL_CONFIG                Pathname of vppcom configuration file.
   VPP_GDB_CMDFILE            Pathname of gdb command file for vpp.
   VPPCOM_CLIENT_GDB_CMDFILE  Pathname of gdb command file for client.
   VPPCOM_SERVER_GDB_CMDFILE  Pathname of gdb command file for server.
@@ -118,8 +119,9 @@ declare -i leave_tmp_files=0
 declare -i bash_after_exit=0
 declare -i iperf3=0
 declare -i use_ipv6=0
+declare -i transport_udp=0
 
-while getopts ":hitlbcd6n:m:e:g:p:E:I:N:P:R:S:T:UBVX" opt; do
+while getopts ":hitlbcd6fn:m:e:g:p:E:I:N:P:R:S:T:UBVXD" opt; do
     case $opt in
         h) usage ;;
         l) leave_tmp_files=1
@@ -129,16 +131,20 @@ while getopts ":hitlbcd6n:m:e:g:p:E:I:N:P:R:S:T:UBVX" opt; do
         i) iperf3=1
            ;;
         6) use_ipv6=1
+           sock_srvr_addr="::1"
+           sock_clnt_options="$sock_clnt_options -$opt"
+           sock_srvr_options="$sock_srvr_options -$opt"
+           ;;
+        f) full_thru_host_stack_vpp_cfg=1
            ;;
         t) xterm_geom="180x40"
            use_tabs="true"
            ;;
-        c) VPPCOM_CONF="${vppcom_conf_dir}vppcom_test.conf"
+        c) VCL_CONFIG="${vcl_config_dir}vcl_test.conf"
            ;;
         d) title_dbg="-DEBUG"
-           _debug="_debug"
            vpp_dir=$vpp_debug_dir
-           lib64_dir=$lib64_debug_dir
+           lib_dir=$lib_debug_dir
            ;;
         e) if [ $OPTARG = "a" ] || [ $OPTARG = "all" ] ; then
                emacs_client=1
@@ -156,7 +162,7 @@ while getopts ":hitlbcd6n:m:e:g:p:E:I:N:P:R:S:T:UBVX" opt; do
            fi
            title_dbg="-DEBUG"
            vpp_dir=$vpp_debug_dir
-           lib64_dir=$lib64_debug_dir
+           lib_dir=$lib_debug_dir
            ;;
         n) vpp_eth_name="$OPTARG"
            ;;
@@ -183,9 +189,6 @@ while getopts ":hitlbcd6n:m:e:g:p:E:I:N:P:R:S:T:UBVX" opt; do
                echo "ERROR: Option -g unknown argument \'$OPTARG\'" >&2
                usage
            fi
-           title_dbg="-DEBUG"
-           vpp_dir=$vpp_debug_dir
-           lib64_dir=$lib64_debug_dir
            ;;
         p) if [ $OPTARG = "a" ] || [ $OPTARG = "all" ] ; then
                perf_client=1
@@ -206,6 +209,9 @@ while getopts ":hitlbcd6n:m:e:g:p:E:I:N:P:R:S:T:UBVX" opt; do
         S) sock_srvr_addr="$OPTARG"
            ;;
         P) sock_srvr_port="$OPTARG"
+           ;;
+        D) sock_clnt_options="$sock_clnt_options -$opt"
+           sock_srvr_options="$sock_srvr_options -$opt"
            ;;
 E|I|N|R|T) sock_clnt_options="$sock_clnt_options -$opt \"$OPTARG\""
            ;;
@@ -248,27 +254,40 @@ while ! [[ $run_test ]] && (( $# > 0 )) ; do
     shift
 done
 
+if [ -z "$VCL_DEBUG" ] ; then
+    if [ "$title_dbg" = "-DEBUG" ] ; then
+        VCL_DEBUG=1
+    else
+        VCL_DEBUG=0
+    fi
+fi
+
+VCL_LDPRELOAD_LIB_DIR="${VCL_LDPRELOAD_LIB_DIR:-$lib_dir}"
+
 if [ -z "$WS_ROOT" ] ; then
     echo "ERROR: WS_ROOT environment variable not set!" >&2
     echo "       Please set WS_ROOT to VPP workspace root directory." >&2
     exit 1
 fi
 
-if [[ "$(grep bin_PROGRAMS $WS_ROOT/src/uri.am)" = "" ]] ; then
-    $WS_ROOT/extras/vagrant/vcl_test.sh $WS_ROOT $USER
-    (cd $WS_ROOT; make build)
+if [ ! -d $vpp_dir ] ; then
+    if [ -z "$title_dbg" ] ; then
+        (cd $WS_ROOT; make build-release)
+    else
+        (cd $WS_ROOT; make build)
+    fi
 fi
 
 if [ ! -d $vpp_dir ] ; then
-    echo "ERROR: Missing VPP$DEBUG bin directory!" >&2
+    echo "ERROR: Missing VPP$title_dbg bin directory!" >&2
     echo "       $vpp_dir" >&2
     env_test_failed="true"
 fi
 
 if [[ $run_test =~ .*"_preload" ]] ; then
-   if [ ! -d $lib64_dir ] ; then
-       echo "ERROR: Missing VPP$DEBUG lib64 directory!" >&2
-       echo "       $lib64_dir" >&2
+   if [ ! -d $lib_dir ] ; then
+       echo "ERROR: Missing VPP$title_dbg lib directory!" >&2
+       echo "       $lib_dir" >&2
    elif [ ! -d $VCL_LDPRELOAD_LIB_DIR ] ; then
        echo "ERROR: Missing VCL LD_PRELOAD Library directory!" >&2
        echo "       $VCL_LDPRELOAD_LIB_DIR" >&2
@@ -281,19 +300,19 @@ if [[ $run_test =~ .*"_preload" ]] ; then
 fi
 
 if [ ! -f $vpp_dir$vpp_app ] ; then
-    echo "ERROR: Missing VPP$DEBUG Application!" >&2
+    echo "ERROR: Missing VPP$title_dbg Application!" >&2
     echo "       $vpp_dir$vpp_app" >&2
     env_test_failed="true"
 fi
 
 if [ ! -f $vpp_dir$sock_srvr_app ] && [ ! $iperf3 -eq 1 ] ; then
-    echo "ERROR: Missing$DEBUG Socket Server Application!" >&2
+    echo "ERROR: Missing SERVER$title_dbg Socket Server Application!" >&2
     echo "       $vpp_dir$sock_srvr_app" >&2
     env_test_failed="true"
 fi
 
 if [ ! -f $vpp_dir$sock_clnt_app ] && [ ! $iperf3 -eq 1 ] ; then
-    echo "ERROR: Missing$DEBUG Socket Client Application!" >&2
+    echo "ERROR: Missing CLIENT$title_dbg Socket Client Application!" >&2
     echo "       $vpp_dir$sock_clnt_app" >&2
     env_test_failed="true"
 fi
@@ -316,9 +335,15 @@ if [[ $run_test =~ .*"_vcl" ]] && [ $iperf3 -eq 1 ] ; then
     env_test_failed="true"
 fi
 
-if [ -n "$mult_host"] && [ ! -f "$dpdk_devbind" ] ; then
+if [ -n "$multi_host"] && [ ! -f "$dpdk_devbind" ] ; then
     echo "ERROR: Can't find dpdk-devbind.py!"
-    echo "       Run \"cd \$WS_ROOT; make dpdk-install-dev\" to install it."
+    echo "       Run \"cd \$WS_ROOT; make install-ext-deps\" to install it."
+    echo
+    env_test_failed="true"
+fi
+
+if [ -n "$full_thru_host_stack_vpp_cfg" ] && [ -n "$multi_host" ] ; then
+    echo "ERROR: Invalid options, cannot specify both \"-f\" and \"-m $multi_host\"!"
     echo
     env_test_failed="true"
 fi
@@ -327,23 +352,23 @@ if [ -n "$env_test_failed" ] ; then
     exit 1
 fi
 
-if [ -f "$VPPCOM_CONF" ] ; then
-    vppcom_conf="$(basename $VPPCOM_CONF)"
-    vppcom_conf_dir="$(dirname $VPPCOM_CONF)/"
-    api_prefix="$(egrep -s '^\s*api-prefix \w+' $VPPCOM_CONF | awk -e '{print $2}')"
+if [ -f "$VCL_CONFIG" ] ; then
+    vcl_config="$(basename $VCL_CONFIG)"
+    vcl_config_dir="$(dirname $VCL_CONFIG)/"
+    api_prefix="$(egrep -s '^\s*api-prefix \w+' $VCL_CONFIG | tail -1 | awk -e '{print $2}')"
     if [ -n "$api_prefix" ] ; then
         api_segment=" api-segment { gid $user_gid prefix $api_prefix }"
     fi
 fi
+if [ -n "$VCL_APP_NAMESPACE_ID" ] && [ -n "$VCL_APP_NAMESPACE_SECRET" ] ; then
+    namespace_id="$VCL_APP_NAMESPACE_ID"
+    namespace_secret="$VCL_APP_NAMESPACE_SECRET"
+fi
+    
 if [ -z "$api_segment" ] ; then
     api_segment=" api-segment { gid $user_gid }"
 fi
-if [ -n "$multi_host" ] ; then
-    sudo modprobe uio_pci_generic
-    vpp_args="unix { interactive exec $tmp_vpp_exec_file}${api_segment}"
-else
-    vpp_args="unix { interactive }${api_segment}"
-fi
+vpp_args="unix { interactive full-coredump coredump-size unlimited exec $tmp_vpp_exec_file}${api_segment}"
 
 if [ $iperf3 -eq 1 ] ; then
     app_dir="$(dirname $(which iperf3))/"
@@ -357,9 +382,10 @@ if [ $iperf3 -eq 1 ] ; then
     fi
 else
     app_dir="$vpp_dir"
-    srvr_app="$sock_srvr_app $sock_srvr_port"
+    srvr_app="$sock_srvr_app${sock_srvr_options} $sock_srvr_port"
     clnt_app="$sock_clnt_app${sock_clnt_options} \$srvr_addr $sock_srvr_port"
 fi
+
 
 verify_no_vpp() {
     local grep_for_vpp="ps -eaf|grep -v grep|grep \"bin/vpp\""
@@ -389,7 +415,55 @@ verify_no_vpp() {
         sudo mkdir $vpp_run_dir
         sudo chown root:$USER $vpp_run_dir
     fi
-    if [ -n "$multi_host" ] ; then
+    if [ $use_ipv6 -eq 0 ] && [ -n "$full_thru_host_stack_vpp_cfg" ] ; then
+        sock_srvr_table=0
+        sock_srvr_addr=172.16.1.1
+        sock_client_table=1
+        sock_client_addr=172.16.2.1
+        client_namespace_id="1"
+        client_namespace_secret="5678"
+        server_namespace_id="0"
+        server_namespace_secret="1234"
+        cat <<EOF >> $tmp_vpp_exec_file
+session enable
+create loop inter
+create loop inter
+set inter state loop0 up 
+set inter ip table loop0 $sock_srvr_table
+set inter ip address loop0 $sock_srvr_addr/24
+set inter state loop1 up
+set inter ip table loop1 $sock_client_table
+set inter ip address loop1 $sock_client_addr/24
+app ns add id 0 secret 1234 sw_if_index 1
+app ns add id 1 secret 5678 sw_if_index 2
+ip route add $sock_srvr_addr/32 table $sock_client_table via lookup in table $sock_srvr_table
+ip route add $sock_client_addr/32 table $sock_srvr_table via lookup in table $sock_client_table
+EOF
+    elif [ $use_ipv6 -eq 1 ] && [ -n "$full_thru_host_stack_vpp_cfg" ] ; then
+        sock_srvr_table=1
+        sock_srvr_addr=fd01:1::1
+        sock_client_table=2
+        sock_client_addr=fd01:2::1
+        client_namespace_id="1"
+        client_namespace_secret="5678"
+        server_namespace_id="0"
+        server_namespace_secret="1234"
+        cat <<EOF >> $tmp_vpp_exec_file
+session enable
+create loop inter
+create loop inter
+set inter state loop0 up 
+set inter ip6 table loop0 $sock_srvr_table
+set inter ip address loop0 $sock_srvr_addr/64
+set inter state loop1 up
+set inter ip6 table loop1 $sock_client_table
+set inter ip address loop1 $sock_client_addr/64
+app ns add id 0 secret 1234 sw_if_index 1
+app ns add id 1 secret 5678 sw_if_index 2
+ip route add $sock_srvr_addr/128 table $sock_client_table via lookup in table $sock_srvr_table
+ip route add $sock_client_addr/128 table $sock_srvr_table via lookup in table $sock_client_table
+EOF
+    elif [ -n "$multi_host" ] ; then
         vpp_eth_pci_id="$(ls -ld /sys/class/net/$vpp_eth_name/device | awk '{print $11}' | cut -d/ -f4)"
         if [ -z "$vpp_eth_pci_id" ] ; then
             echo "ERROR: Missing ethernet interface $vpp_eth_name!"
@@ -428,7 +502,7 @@ verify_no_vpp() {
             echo "ERROR: No inet6 address configured for $vpp_eth_name!"
             usage
         fi
-        vpp_args="$vpp_args plugins { path ${lib64_dir}vpp_plugins } dpdk { dev $vpp_eth_pci_id }"
+        vpp_args="$vpp_args plugins { path ${lib_dir}vpp_plugins } dpdk { dev $vpp_eth_pci_id }"
                 
         sudo ifconfig $vpp_eth_name down 2> /dev/null
         echo "Configuring VPP to use $vpp_eth_name ($vpp_eth_pci_id), inet addr $vpp_eth_ip4_addr"
@@ -439,6 +513,22 @@ set int ip addr $vpp_eth_ifname $vpp_eth_ip4_addr
 EOF
 
     fi
+
+    if [ -z "$full_thru_host_stack_vpp_cfg" ] && [ -n "$namespace_id" ] ; then
+        cat <<EOF >> $tmp_vpp_exec_file
+session enable
+app ns add id $namespace_id secret $namespace_secret sw_if_index 0
+EOF
+    fi
+    
+    cat <<EOF >> $tmp_vpp_exec_file
+create tap id 0
+set int ip addr tap0 172.17.0.2/24
+show version
+show version verbose
+show cpu
+show int
+EOF
 }
 
 verify_no_docker_containers() {
@@ -470,7 +560,7 @@ set_pre_cmd() {
         pre_cmd="$gdb_in_emacs "
     elif [ $gdb -eq 1 ] ; then
         write_gdb_cmdfile $tmp_gdb_cmdfile $gdb_cmdfile $emacs $3
-        pre_cmd="gdb -x $tmp_gdb_cmdfile -i=mi --args "
+        pre_cmd="gdb -x $tmp_gdb_cmdfile --args "
     elif [ -z $3 ] ; then
         unset -v pre_cmd
     else
@@ -494,7 +584,42 @@ write_script_header() {
             echo "trap \"rm -f $1 $2 $tmp_vpp_exec_file\" $trap_signals" >> $1
         fi
     fi
-    echo "export VPPCOM_CONF=${vppcom_conf_dir}${vppcom_conf}" >> $1
+    if [ -n "$VCL_CONFIG" ] ; then
+        echo "export VCL_CONFIG=${vcl_config_dir}${vcl_config}" >> $1
+    fi
+    if [ -n "$VCL_API_PREFIX" ] ; then
+        echo "export VCL_API_PREFIX=$VCL_API_PREFIX" >> $1
+    fi
+    if [ -n "$VCL_DEBUG" ] ; then
+        echo "export VCL_DEBUG=$VCL_DEBUG" >> $1
+    fi
+    if [ -n "$LDP_DEBUG" ] ; then
+        echo "export LDP_DEBUG=$LDP_DEBUG" >> $1
+    fi
+    if [ -n "$VCOM_APP_NAME" ] ; then
+        echo "export VCOM_APP_NAME=$VCOM_APP_NAME" >> $1
+    fi
+    if [ -n "$VCOM_SID_BIT" ] ; then
+        echo "export VCOM_SID_BIT=$VCOM_SID_BIT" >> $1
+    fi
+    if [ -n "$namespace_id" ] ; then
+        echo "export VCL_APP_NAMESPACE_ID=\"$namespace_id\"" >> $1
+        echo "export VCL_APP_NAMESPACE_SECRET=\"$namespace_secret\"" >> $1
+    fi
+    if [ -n "$VCL_APP_SCOPE_LOCAL" ] || [ -z "$multi_host" ] &&
+           [ -z "$full_thru_host_stack_vpp_cfg" ] ; then
+        echo "export VCL_APP_SCOPE_LOCAL=true" >> $1
+    fi
+    if [ -n "$VCL_APP_SCOPE_GLOBAL" ] || [ -n "$multi_host" ] ||
+           [ -n "$full_thru_host_stack_vpp_cfg" ] ; then
+        echo "export VCL_APP_SCOPE_GLOBAL=true" >> $1
+    fi
+    if [ -n "$VCL_APP_PROXY_TRANSPORT_TCP" ] ; then
+        echo "export VCL_APP_PROXY_TRANSPORT_TCP=true" >> $1
+    fi
+    if [ -n "$VCL_APP_PROXY_TRANSPORT_UDP" ] ; then
+        echo "export VCL_APP_PROXY_TRANSPORT_UDP=true" >> $1
+    fi
     if [ "$pre_cmd" = "$gdb_in_emacs " ] ; then
         if [ -n "$multi_host" ] && [[ $3 =~ "VPP".* ]] ; then
             cat <<EOF >> $1
@@ -538,7 +663,7 @@ write_gdb_cmdfile() {
     echo "set confirm off" >> $1
     if [ -n "$4" ] ; then
         echo "set exec-wrapper env LD_PRELOAD=$4" >> $1
-        echo "start" >> $1
+        # echo "start" >> $1
     fi
 
     if [ ! -f $2 ] ; then
@@ -599,8 +724,12 @@ native_preload() {
         tmp_gdb_cmdfile=$tmp_gdb_cmdfile_server
         gdb_cmdfile=$VPPCOM_SERVER_GDB_CMDFILE
         set_pre_cmd $emacs_server $gdb_server $ld_preload
-        write_script_header $cmd2_file $tmp_gdb_cmdfile "$title2" "sleep 2"
-        echo "export LD_LIBRARY_PATH=\"$lib64_dir:$VCL_LDPRELOAD_LIB_DIR:$LD_LIBRARY_PATH\"" >> $cmd2_file
+        if [ -n "$full_thru_host_stack_vpp_cfg" ] ; then
+            namespace_id="$server_namespace_id"
+            namespace_secret="$server_namespace_secret"
+        fi
+        write_script_header $cmd2_file $tmp_gdb_cmdfile "$title2" "sleep 3"
+        echo "export LD_LIBRARY_PATH=\"$lib_dir:$VCL_LDPRELOAD_LIB_DIR:$LD_LIBRARY_PATH\"" >> $cmd2_file
         echo "${pre_cmd}${app_dir}${srvr_app}" >> $cmd2_file
         write_script_footer $cmd2_file $perf_server
         chmod +x $cmd2_file
@@ -611,8 +740,12 @@ native_preload() {
         tmp_gdb_cmdfile=$tmp_gdb_cmdfile_client
         gdb_cmdfile=$VPPCOM_CLIENT_GDB_CMDFILE
         set_pre_cmd $emacs_client $gdb_client $ld_preload
-        write_script_header $cmd3_file $tmp_gdb_cmdfile "$title3" "sleep 3"
-        echo "export LD_LIBRARY_PATH=\"$lib64_dir:$VCL_LDPRELOAD_LIB_DIR:$LD_LIBRARY_PATH\"" >> $cmd3_file
+        if [ -n "$full_thru_host_stack_vpp_cfg" ] ; then
+            namespace_id="$client_namespace_id"
+            namespace_secret="$client_namespace_secret"
+        fi
+        write_script_header $cmd3_file $tmp_gdb_cmdfile "$title3" "sleep 4"
+        echo "export LD_LIBRARY_PATH=\"$lib_dir:$VCL_LDPRELOAD_LIB_DIR:$LD_LIBRARY_PATH\"" >> $cmd3_file
         echo "srvr_addr=\"$sock_srvr_addr\"" >> $cmd3_file
         echo "${pre_cmd}${app_dir}${clnt_app}" >> $cmd3_file
         write_script_footer $cmd3_file $perf_client
@@ -646,8 +779,12 @@ native_vcl() {
         else
             delay="sleep 3"
         fi
+        if [ -n "$full_thru_host_stack_vpp_cfg" ] ; then
+            namespace_id="$server_namespace_id"
+            namespace_secret="$server_namespace_secret"
+        fi
         write_script_header $cmd2_file $tmp_gdb_cmdfile "$title2" "$delay"
-        echo "export LD_LIBRARY_PATH=\"$lib64_dir:$LD_LIBRARY_PATH\"" >> $cmd2_file
+        echo "export LD_LIBRARY_PATH=\"$lib_dir:$LD_LIBRARY_PATH\"" >> $cmd2_file
         echo "${pre_cmd}${app_dir}${srvr_app}" >> $cmd2_file
         write_script_footer $cmd2_file $perf_server
         chmod +x $cmd2_file
@@ -661,10 +798,14 @@ native_vcl() {
         if [ "$multi_host" = "client" ] ; then
             delay="sleep 10"
         else
-            delay="sleep 3"
+            delay="sleep 4"
+        fi
+        if [ -n "$full_thru_host_stack_vpp_cfg" ] ; then
+            namespace_id="$client_namespace_id"
+            namespace_secret="$client_namespace_secret"
         fi
         write_script_header $cmd3_file $tmp_gdb_cmdfile "$title3" "$delay"
-        echo "export LD_LIBRARY_PATH=\"$lib64_dir:$LD_LIBRARY_PATH\"" >> $cmd3_file
+        echo "export LD_LIBRARY_PATH=\"$lib_dir:$LD_LIBRARY_PATH\"" >> $cmd3_file
         echo "srvr_addr=\"$sock_srvr_addr\"" >> $cmd3_file
         echo "${pre_cmd}${app_dir}${clnt_app}" >> $cmd3_file
         write_script_footer $cmd3_file $perf_client
@@ -726,8 +867,12 @@ docker_preload() {
         tmp_gdb_cmdfile=$tmp_gdb_cmdfile_server
         gdb_cmdfile=$VPPCOM_SERVER_GDB_CMDFILE
         set_pre_cmd $emacs_server $gdb_server $docker_ld_preload_lib
+        if [ -n "$full_thru_host_stack_vpp_cfg" ] ; then
+            namespace_id="$server_namespace_id"
+            namespace_secret="$server_namespace_secret"
+        fi
         write_script_header $cmd2_file $tmp_gdb_cmdfile "$title2" "sleep 2"
-        echo "docker run -it -v $vpp_shm_dir:$vpp_shm_dir -v $vpp_dir:$docker_vpp_dir -v $lib64_dir:$docker_lib64_dir -v $ld_preload_dir:$docker_ld_preload_dir -v $vppcom_conf_dir:$docker_vppcom_conf_dir -p $sock_srvr_port:$sock_srvr_port -e VPPCOM_CONF=${docker_vppcom_conf_dir}$vppcom_conf -e LD_LIBRARY_PATH=$docker_lib64_dir:$docker_ld_preload_dir ${docker_ld_preload}$docker_os ${docker_app_dir}${srvr_app}" >> $cmd2_file
+        echo "docker run -it -v $vpp_shm_dir:$vpp_shm_dir -v $vpp_dir:$docker_vpp_dir -v $lib_dir:$docker_lib_dir -v $ld_preload_dir:$docker_ld_preload_dir -v $vcl_config_dir:$docker_vcl_config_dir -p $sock_srvr_port:$sock_srvr_port -e VCL_DEBUG=$VCL_DEBUG -e VCL_CONFIG=${docker_vcl_config_dir}$vcl_config -e LD_LIBRARY_PATH=$docker_lib_dir:$docker_ld_preload_dir ${docker_ld_preload}$docker_os ${docker_app_dir}${srvr_app}" >> $cmd2_file
         write_script_footer $cmd2_file $perf_server
         chmod +x $cmd2_file
     fi
@@ -737,9 +882,13 @@ docker_preload() {
         tmp_gdb_cmdfile=$tmp_gdb_cmdfile_client
         gdb_cmdfile=$VPPCOM_CLIENT_GDB_CMDFILE
         set_pre_cmd $emacs_client $gdb_client $docker_ld_preload_lib
-        write_script_header $cmd3_file $tmp_gdb_cmdfile "$title3" "sleep 3"
+        if [ -n "$full_thru_host_stack_vpp_cfg" ] ; then
+            namespace_id="$client_namespace_id"
+            namespace_secret="$client_namespace_secret"
+        fi
+        write_script_header $cmd3_file $tmp_gdb_cmdfile "$title3" "sleep 4"
         echo "$get_docker_server_ip4addr" >> $cmd3_file
-        echo "docker run -it --cpuset-cpus='4-7' -v $vpp_shm_dir:$vpp_shm_dir -v $vpp_dir:$docker_vpp_dir -v $lib64_dir:$docker_lib64_dir  -v $ld_preload_dir:$docker_ld_preload_dir -v $vppcom_conf_dir:$docker_vppcom_conf_dir -e VPPCOM_CONF=${docker_vppcom_conf_dir}$vppcom_conf -e LD_LIBRARY_PATH=$docker_lib64_dir ${docker_ld_preload}$docker_os ${docker_app_dir}${clnt_app}" >> $cmd3_file
+        echo "docker run -it --cpuset-cpus='4-7' -v $vpp_shm_dir:$vpp_shm_dir -v $vpp_dir:$docker_vpp_dir -v $lib_dir:$docker_lib_dir  -v $ld_preload_dir:$docker_ld_preload_dir -v $vcl_config_dir:$docker_vcl_config_dir -e VCL_DEBUG=$VCL_DEBUG -e VCL_CONFIG=${docker_vcl_config_dir}$vcl_config -e LD_LIBRARY_PATH=$docker_lib_dir ${docker_ld_preload}$docker_os ${docker_app_dir}${clnt_app}" >> $cmd3_file
         write_script_footer $cmd3_file $perf_client
         chmod +x $cmd3_file
     fi
@@ -767,8 +916,12 @@ docker_vcl() {
         tmp_gdb_cmdfile=$tmp_gdb_cmdfile_server
         gdb_cmdfile=$VPPCOM_SERVER_GDB_CMDFILE
         set_pre_cmd $emacs_server $gdb_server
+        if [ -n "$full_thru_host_stack_vpp_cfg" ] ; then
+            namespace_id="$server_namespace_id"
+            namespace_secret="$server_namespace_secret"
+        fi
         write_script_header $cmd2_file $tmp_gdb_cmdfile "$title2" "sleep 2"
-        echo "docker run -it --cpuset-cpus='4-7' -v $vpp_shm_dir:$vpp_shm_dir -v $vpp_dir:$docker_vpp_dir -v $lib64_dir:$docker_lib64_dir -v $vppcom_conf_dir:$docker_vppcom_conf_dir -p $sock_srvr_port:$sock_srvr_port -e VPPCOM_CONF=${docker_vppcom_conf_dir}/$vppcom_conf -e LD_LIBRARY_PATH=$docker_lib64_dir $docker_os ${docker_app_dir}${srvr_app}" >> $cmd2_file
+        echo "docker run -it --cpuset-cpus='4-7' -v $vpp_shm_dir:$vpp_shm_dir -v $vpp_dir:$docker_vpp_dir -v $lib_dir:$docker_lib_dir -v $vcl_config_dir:$docker_vcl_config_dir -p $sock_srvr_port:$sock_srvr_port -e VCL_CONFIG=${docker_vcl_config_dir}/$vcl_config -e LD_LIBRARY_PATH=$docker_lib_dir $docker_os ${docker_app_dir}${srvr_app}" >> $cmd2_file
         write_script_footer $cmd2_file $perf_server
         chmod +x $cmd2_file
     fi
@@ -778,9 +931,13 @@ docker_vcl() {
         tmp_gdb_cmdfile=$tmp_gdb_cmdfile_client
         gdb_cmdfile=$VPPCOM_CLIENT_GDB_CMDFILE
         set_pre_cmd $emacs_client $gdb_client
+        if [ -n "$full_thru_host_stack_vpp_cfg" ] ; then
+            namespace_id="$client_namespace_id"
+            namespace_secret="$client_namespace_secret"
+        fi
         write_script_header $cmd3_file $tmp_gdb_cmdfile "$title3" "sleep 3"
         echo "$get_docker_server_ip4addr" >> $cmd3_file
-        echo "docker run -it --cpuset-cpus='4-7' -v $vpp_shm_dir:$vpp_shm_dir -v $vpp_dir:$docker_vpp_dir -v $lib64_dir:$docker_lib64_dir -v $vppcom_conf_dir:$docker_vppcom_conf_dir -e VPPCOM_CONF=${docker_vppcom_conf_dir}/$vppcom_conf -e LD_LIBRARY_PATH=$docker_lib64_dir $docker_os ${docker_app_dir}${clnt_app}" >> $cmd3_file
+        echo "docker run -it --cpuset-cpus='4-7' -v $vpp_shm_dir:$vpp_shm_dir -v $vpp_dir:$docker_vpp_dir -v $lib_dir:$docker_lib_dir -v $vcl_config_dir:$docker_vcl_config_dir -e VCL_CONFIG=${docker_vcl_config_dir}/$vcl_config -e LD_LIBRARY_PATH=$docker_lib_dir $docker_os ${docker_app_dir}${clnt_app}" >> $cmd3_file
         write_script_footer $cmd3_file $perf_client
         chmod +x $cmd3_file
     fi

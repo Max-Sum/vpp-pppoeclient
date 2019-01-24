@@ -60,14 +60,10 @@ extern adj_index_t adj_mcast_add_or_lock(fib_protocol_t proto,
  * @param
  *  The offset in the rewrite a which to write in packet's
  *  IP Address
- *
- * @param
- *  The mask to apply to the packet berfore the rewrite.
  */
 extern void adj_mcast_update_rewrite(adj_index_t adj_index,
                                      u8 *rewrite,
-                                     u8 offset,
-                                     u32 mask);
+                                     u8 offset);
 
 /**
  * @brief
@@ -77,11 +73,22 @@ extern void adj_mcast_update_rewrite(adj_index_t adj_index,
  * @param
  *  The index of the adj to update
  *
+ * @param fixup
+ *  The function that will be invoked at paket switch time to 'fixup'
+ *  the rewrite applied with necessary per-packet info (i.e. length, checksums).
+ * @param fixup_data
+ *  Context data set by the caller that is provided as an argument in the
+ *  fixup function.
+ *
+ * @param flags
+ *  Flags controlling the adjacency behaviour
+ *
  * @param
  *  The new rewrite
  */
 extern void adj_mcast_midchain_update_rewrite(adj_index_t adj_index,
                                               adj_midchain_fixup_t fixup,
+                                              const void *fixup_data,
                                               adj_flags_t flags,
                                               u8 *rewrite,
                                               u8 offset,

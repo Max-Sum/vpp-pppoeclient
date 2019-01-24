@@ -15,19 +15,19 @@
  *------------------------------------------------------------------
  */
 
-/** @file */
+/** @file
+ *  @defgroup libmemif
+ */
 
 #ifndef _LIBMEMIF_H_
 #define _LIBMEMIF_H_
 
 /** Libmemif version. */
-#define LIBMEMIF_VERSION "1.0"
+#define LIBMEMIF_VERSION "2.0"
 /** Default name of application using libmemif. */
 #define MEMIF_DEFAULT_APP_NAME "libmemif-app"
 
 #include <inttypes.h>
-
-#include <memif.h>
 
 /*! Error codes */
 typedef enum
@@ -35,6 +35,7 @@ typedef enum
   MEMIF_ERR_SUCCESS = 0,	/*!< success */
 /* SYSCALL ERRORS */
   MEMIF_ERR_SYSCALL,		/*!< other syscall error */
+  MEMIF_ERR_CONNREFUSED,	/*!< connection refused */
   MEMIF_ERR_ACCES,		/*!< permission denied */
   MEMIF_ERR_NO_FILE,		/*!< file does not exist */
   MEMIF_ERR_FILE_LIMIT,		/*!< system open file limit */
@@ -72,11 +73,14 @@ typedef enum
   MEMIF_ERR_DISCONNECT,		/*!< disconenct received */
   MEMIF_ERR_DISCONNECTED,	/*!< peer interface disconnected */
   MEMIF_ERR_UNKNOWN_MSG,	/*!< unknown message type */
+  MEMIF_ERR_POLL_CANCEL,	/*!< memif_poll_event() was cancelled */
+  MEMIF_ERR_MAX_RING,		/*!< too large ring size */
+  MEMIF_ERR_PRIVHDR,		/*!< private hdrs not supported */
 } memif_err_t;
 
 /**
  * @defgroup MEMIF_FD_EVENT Types of events that need to be watched for specific fd.
- *
+ * @ingroup libmemif
  * @{
  */
 
@@ -91,12 +95,37 @@ typedef enum
 #define MEMIF_FD_EVENT_MOD   (1 << 4)
 /** @} */
 
-/** *brief Memif connection handle
+/** \brief Memif connection handle
     pointer of type void, pointing to internal structure
 */
 typedef void *memif_conn_handle_t;
+
+/** \brief Memif allocator alloc
+    @param size - requested allocation size
+
+    custom memory allocator: alloc function template
+*/
+typedef void *(memif_alloc_t) (size_t size);
+
+
+/** \brief Memif realloc
+    @param ptr - pointer to memory block
+    @param size - requested allocation size
+
+    custom memory reallocation
+*/
+typedef void *(memif_realloc_t) (void *ptr, size_t size);
+
+/** \brief Memif allocator free
+    @param size - requested allocation size
+
+    custom memory allocator: free function template
+*/
+typedef void (memif_free_t) (void *ptr);
+
 /**
  * @defgroup CALLBACKS Callback functions definitions
+ * @ingroup libmemif
  *
  * @{
  */
@@ -129,13 +158,85 @@ typedef int (memif_connection_update_t) (memif_conn_handle_t conn,
 */
 typedef int (memif_interrupt_t) (memif_conn_handle_t conn, void *private_ctx,
 				 uint16_t qid);
+
+/** @} */
+
+/**
+ * @defgroup EXTERNAL_REGION External region APIs
+ * @ingroup libmemif
+ *
+ * @{
+ */
+
+/** \brief Get external buffer offset (optional)
+    @param private_ctx - private context
+
+    Find unallocated external buffer and return its offset.
+*/
+typedef uint32_t (memif_get_external_buffer_offset_t) (void *private_ctx);
+
+/** \brief Add external region
+    @param[out] addr - region address
+    @param size - requested region size
+    @param fd[out] - file descriptor
+    @param private_ctx - private context
+
+    Called by slave. Add external region created by client.
+*/
+typedef int (memif_add_external_region_t) (void * *addr, uint32_t size,
+					   int *fd, void *private_ctx);
+
+/** \brief Get external region address
+    @param size - requested region size
+    @param fd - file descriptor
+    @param private_ctx - private context
+
+    Called by master. Get region address from client.
+
+   \return region address
+*/
+typedef void *(memif_get_external_region_addr_t) (uint32_t size, int fd,
+						  void *private_ctx);
+
+/** \brief Delete external region
+    @param addr - region address
+    @param size - region size
+    @param fd - file descriptor
+    @param private_ctx - private context
+
+    Delete external region.
+*/
+typedef int (memif_del_external_region_t) (void *addr, uint32_t size, int fd,
+					   void *private_ctx);
+
+/** \brief Register external region
+    @param ar - add external region callback
+    @param gr - get external region addr callback
+    @param dr - delete external region callback
+    @param go - get external buffer offset callback (optional)
+*/
+void memif_register_external_region (memif_add_external_region_t * ar,
+				     memif_get_external_region_addr_t * gr,
+				     memif_del_external_region_t * dr,
+				     memif_get_external_buffer_offset_t * go);
+
 /** @} */
 
 /**
  * @defgroup ARGS_N_BUFS Connection arguments and buffers
+ * @ingroup libmemif
  *
  * @{
  */
+
+#ifndef _MEMIF_H_
+typedef enum
+{
+  MEMIF_INTERFACE_MODE_ETHERNET = 0,
+  MEMIF_INTERFACE_MODE_IP = 1,
+  MEMIF_INTERFACE_MODE_PUNT_INJECT = 2,
+} memif_interface_mode_t;
+#endif /* _MEMIF_H_ */
 
 /** \brief Memif connection arguments
     @param socket_filename - socket filename
@@ -147,7 +248,6 @@ typedef int (memif_interrupt_t) (memif_conn_handle_t conn, void *private_ctx,
     @param is_master - 0 == master, 1 == slave
     @param interface_id - id used to identify peer connection
     @param interface_name - interface name
-    @param instance_name - application name
     @param mode - 0 == ethernet, 1 == ip , 2 == punt/inject
 */
 typedef struct
@@ -158,12 +258,11 @@ typedef struct
   uint8_t num_s2m_rings;	/*!< default = 1 */
   uint8_t num_m2s_rings;	/*!< default = 1 */
   uint16_t buffer_size;		/*!< default = 2048 */
-  memif_log2_ring_size_t log2_ring_size;	/*!< default = 10 (1024) */
+  uint8_t log2_ring_size;	/*!< default = 10 (1024) */
   uint8_t is_master;
 
-  memif_interface_id_t interface_id;
+  uint32_t interface_id;
   uint8_t interface_name[32];
-  uint8_t instance_name[32];
   memif_interface_mode_t mode:8;
 } memif_conn_args_t;
 
@@ -176,37 +275,69 @@ typedef enum
 
 /** \brief Memif buffer
     @param desc_index - ring descriptor index
-    @param buffer_len - shared meory buffer length
-    @param data_len - data length
+    @param ring - pointer to ring containing descriptor for this buffer
+    @param len - available length
+    @param flags - memif buffer flags
     @param data - pointer to shared memory data
 */
 typedef struct
 {
   uint16_t desc_index;
-  uint32_t buffer_len;
-  uint32_t data_len;
+  void *ring;
+  uint32_t len;
+/** next buffer present (chained buffers) */
+#define MEMIF_BUFFER_FLAG_NEXT (1 << 0)
+/** states that buffer is from rx ring */
+#define MEMIF_BUFFER_FLAG_RX (1 << 1)
+  uint8_t flags;
   void *data;
 } memif_buffer_t;
 /** @} */
 
 /**
  * @defgroup MEMIF_DETAILS Memif details structs
+ * @ingroup libmemif
  *
  * @{
  */
 
 /** \brief Memif queue details
+    @param region - region index
     @param qid - queue id
     @param ring_size - size of ring buffer in sharem memory
+    @param flags - ring flags
+    @param head - ring head pointer
+    @param tail - ring tail pointer
     @param buffer_size - buffer size on sharem memory
 */
 typedef struct
 {
+  uint8_t region;
   uint8_t qid;
   uint32_t ring_size;
+/** if set queue is in polling mode, else in interrupt mode */
+#define MEMIF_QUEUE_FLAG_POLLING 1
+  uint16_t flags;
+  uint16_t head;
+  uint16_t tail;
   uint16_t buffer_size;
-  /* add ring information */
 } memif_queue_details_t;
+
+/** \brief Memif region details
+    @param index - region index
+    @param addr - region address
+    @param size - region size
+    @param fd - file descriptor
+    @param is_external - if not zero then region is defined by client
+*/
+typedef struct
+{
+  uint8_t index;
+  void *addr;
+  uint32_t size;
+  int fd;
+  uint8_t is_external;
+} memif_region_details_t;
 
 /** \brief Memif details
     @param if_name - interface name
@@ -217,11 +348,14 @@ typedef struct
     @param secret - secret
     @param role - 0 = master, 1 = slave
     @param mode - 0 = ethernet, 1 = ip , 2 = punt/inject
-    @param socket_filename = socket filename
+    @param socket_filename - socket filename
+    @param regions_num - number of regions
+    @param regions - struct containing region details
     @param rx_queues_num - number of receive queues
     @param tx_queues_num - number of transmit queues
     @param rx_queues - struct containing receive queue details
     @param tx_queues - struct containing transmit queue details
+    @param error - error string
     @param link_up_down - 1 = up (connected), 2 = down (disconnected)
 */
 typedef struct
@@ -236,20 +370,30 @@ typedef struct
   uint8_t role;			/* 0 = master, 1 = slave */
   uint8_t mode;			/* 0 = ethernet, 1 = ip, 2 = punt/inject */
   uint8_t *socket_filename;
+  uint8_t regions_num;
+  memif_region_details_t *regions;
   uint8_t rx_queues_num;
   uint8_t tx_queues_num;
   memif_queue_details_t *rx_queues;
   memif_queue_details_t *tx_queues;
 
+  uint8_t *error;
   uint8_t link_up_down;		/* 1 = up, 0 = down */
 } memif_details_t;
 /** @} */
 
 /**
  * @defgroup API_CALLS Api calls
+ * @ingroup libmemif
  *
  * @{
  */
+
+/** \brief Memif get version
+
+    \return ((MEMIF_VERSION_MAJOR << 8) | MEMIF_VERSION_MINOR)
+*/
+uint16_t memif_get_version ();
 
 /** \biref Memif get queue event file descriptor
     @param conn - memif connection handle
@@ -293,7 +437,10 @@ int memif_get_details (memif_conn_handle_t conn, memif_details_t * md,
 
 /** \brief Memif initialization
     @param on_control_fd_update - if control fd updates inform user to watch new fd
-    @param app_name - application name
+    @param app_name - application name (will be truncated to 32 chars)
+    @param memif_alloc - cutom memory allocator, NULL = default
+    @param memif_realloc - custom memory reallocation, NULL = default
+    @param memif_free - custom memory free, NULL = default
 
     if param on_control_fd_update is set to NULL,
     libmemif will handle file descriptor event polling
@@ -308,7 +455,8 @@ int memif_get_details (memif_conn_handle_t conn, memif_details_t * md,
     \return memif_err_t
 */
 int memif_init (memif_control_fd_update_t * on_control_fd_update,
-		char *app_name);
+		char *app_name, memif_alloc_t * memif_alloc,
+		memif_realloc_t * memif_realloc, memif_free_t * memif_free);
 
 /** \brief Memif cleanup
 
@@ -377,13 +525,29 @@ int memif_control_fd_handler (int fd, uint8_t events);
 */
 int memif_delete (memif_conn_handle_t * conn);
 
+/** \brief Memif buffer enq tx
+    @param conn - memif conenction handle
+    @param qid - number indentifying queue
+    @param bufs - memif buffers
+    @param count - number of memif buffers to enque
+    @param count_out - returns number of allocated buffers
+
+    Slave is producer of buffers.
+    If connection handle points to master returns MEMIF_ERR_INVAL_ARG.
+
+    \return memif_err_t
+*/
+int memif_buffer_enq_tx (memif_conn_handle_t conn, uint16_t qid,
+			 memif_buffer_t * bufs, uint16_t count,
+			 uint16_t * count_out);
+
 /** \brief Memif buffer alloc
     @param conn - memif conenction handle
     @param qid - number indentifying queue
     @param bufs - memif buffers
     @param count - number of memif buffers to allocate
     @param count_out - returns number of allocated buffers
-    @param size - minimal buffer size, 0 = standard buffer size
+    @param size - buffer size, may return chained buffers if size > buffer_size
 
     \return memif_err_t
 */
@@ -391,18 +555,16 @@ int memif_buffer_alloc (memif_conn_handle_t conn, uint16_t qid,
 			memif_buffer_t * bufs, uint16_t count,
 			uint16_t * count_out, uint16_t size);
 
-/** \brief Memif buffer free
+/** \brief Memif refill ring
     @param conn - memif conenction handle
     @param qid - number indentifying queue
-    @param bufs - memif buffers
-    @param count - number of memif buffers to free
-    @param count_out - returns number of freed buffers
+    @param count - number of buffers to be placed on ring
+    @param headroom - offset the buffer by headroom
 
     \return memif_err_t
 */
-int memif_buffer_free (memif_conn_handle_t conn, uint16_t qid,
-		       memif_buffer_t * bufs, uint16_t count,
-		       uint16_t * count_out);
+int memif_refill_queue (memif_conn_handle_t conn, uint16_t qid,
+			uint16_t count, uint16_t headroom);
 
 /** \brief Memif transmit buffer burst
     @param conn - memif conenction handle
@@ -438,6 +600,21 @@ int memif_rx_burst (memif_conn_handle_t conn, uint16_t qid,
     \return memif_err_t
 */
 int memif_poll_event (int timeout);
+
+/** \brief Send signal to stop concurrently running memif_poll_event().
+
+    The function, however, does not wait for memif_poll_event() to stop.
+    memif_poll_event() may still return simply because an event has occured
+    or the timeout has elapsed, but if called repeatedly in an infinite loop,
+    a canceled memif_poll_event() is guaranted to return MEMIF_ERR_POLL_CANCEL
+    in the shortest possible time.
+    This feature was not available in the first release.
+    Use macro MEMIF_HAVE_CANCEL_POLL_EVENT to check if the feature is present.
+
+    \return memif_err_t
+*/
+#define MEMIF_HAVE_CANCEL_POLL_EVENT 1
+int memif_cancel_poll_event ();
 /** @} */
 
 #endif /* _LIBMEMIF_H_ */

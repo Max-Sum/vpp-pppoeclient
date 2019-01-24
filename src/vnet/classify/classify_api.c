@@ -24,9 +24,10 @@
 #include <vnet/api_errno.h>
 
 #include <vnet/classify/vnet_classify.h>
-#include <vnet/classify/input_acl.h>
+#include <vnet/classify/in_out_acl.h>
 #include <vnet/classify/policer_classify.h>
 #include <vnet/classify/flow_classify.h>
+#include <vnet/l2/l2_classify.h>
 
 #include <vnet/vnet_msg_enum.h>
 
@@ -56,7 +57,11 @@ _(CLASSIFY_SESSION_DUMP,classify_session_dump)                          \
 _(POLICER_CLASSIFY_SET_INTERFACE, policer_classify_set_interface)       \
 _(POLICER_CLASSIFY_DUMP, policer_classify_dump)                         \
 _(FLOW_CLASSIFY_SET_INTERFACE, flow_classify_set_interface)             \
-_(FLOW_CLASSIFY_DUMP, flow_classify_dump)
+_(FLOW_CLASSIFY_DUMP, flow_classify_dump)                               \
+_(INPUT_ACL_SET_INTERFACE, input_acl_set_interface)                     \
+_(CLASSIFY_SET_INTERFACE_IP_TABLE, classify_set_interface_ip_table)     \
+_(CLASSIFY_SET_INTERFACE_L2_TABLES, classify_set_interface_l2_tables)   \
+_(OUTPUT_ACL_SET_INTERFACE, output_acl_set_interface)
 
 #define foreach_classify_add_del_table_field    \
 _(table_index)                                  \
@@ -67,7 +72,8 @@ _(match_n_vectors)                              \
 _(next_table_index)                             \
 _(miss_next_index)                              \
 _(current_data_flag)                            \
-_(current_data_offset)
+_(current_data_offset)                          \
+_(mask_len)
 
 static void vl_api_classify_add_del_table_t_handler
   (vl_api_classify_add_del_table_t * mp)
@@ -84,6 +90,12 @@ static void vl_api_classify_add_del_table_t_handler
 #define _(a) a = ntohl(mp->a);
   foreach_classify_add_del_table_field;
 #undef _
+
+  if (mask_len != match_n_vectors * sizeof (u32x4))
+    {
+      rv = VNET_API_ERROR_INVALID_VALUE;
+      goto out;
+    }
 
   /* The underlying API fails silently, on purpose, so check here */
   if (mp->is_add == 0)		/* delete */
@@ -133,9 +145,10 @@ static void vl_api_classify_add_del_session_t_handler
   vnet_classify_main_t *cm = &vnet_classify_main;
   vl_api_classify_add_del_session_reply_t *rmp;
   int rv;
-  u32 table_index, hit_next_index, opaque_index, metadata;
+  u32 table_index, hit_next_index, opaque_index, metadata, match_len;
   i32 advance;
   u8 action;
+  vnet_classify_table_t *t;
 
   table_index = ntohl (mp->table_index);
   hit_next_index = ntohl (mp->hit_next_index);
@@ -143,11 +156,27 @@ static void vl_api_classify_add_del_session_t_handler
   advance = ntohl (mp->advance);
   action = mp->action;
   metadata = ntohl (mp->metadata);
+  match_len = ntohl (mp->match_len);
+
+  if (pool_is_free_index (cm->tables, table_index))
+    {
+      rv = VNET_API_ERROR_NO_SUCH_TABLE;
+      goto out;
+    }
+
+  t = pool_elt_at_index (cm->tables, table_index);
+
+  if (match_len != (t->skip_n_vectors + t->match_n_vectors) * sizeof (u32x4))
+    {
+      rv = VNET_API_ERROR_INVALID_VALUE;
+      goto out;
+    }
 
   rv = vnet_classify_add_del_session
     (cm, table_index, mp->match, hit_next_index, opaque_index,
      advance, action, metadata, mp->is_add);
 
+out:
   REPLY_MACRO (VL_API_CLASSIFY_ADD_DEL_SESSION_REPLY);
 }
 
@@ -178,31 +207,31 @@ static void
 
 static void
 send_policer_classify_details (u32 sw_if_index,
-			       u32 table_index,
-			       unix_shared_memory_queue_t * q, u32 context)
+			       u32 table_index, vl_api_registration_t * reg,
+			       u32 context)
 {
   vl_api_policer_classify_details_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_POLICER_CLASSIFY_DETAILS);
   mp->context = context;
   mp->sw_if_index = htonl (sw_if_index);
   mp->table_index = htonl (table_index);
 
-  vl_msg_api_send_shmem (q, (u8 *) & mp);
+  vl_api_send_msg (reg, (u8 *) mp);
 }
 
 static void
 vl_api_policer_classify_dump_t_handler (vl_api_policer_classify_dump_t * mp)
 {
-  unix_shared_memory_queue_t *q;
+  vl_api_registration_t *reg;
   policer_classify_main_t *pcm = &policer_classify_main;
   u32 *vec_tbl;
   int i;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
     return;
 
   vec_tbl = pcm->classify_table_index_by_sw_if_index[mp->type];
@@ -214,7 +243,7 @@ vl_api_policer_classify_dump_t_handler (vl_api_policer_classify_dump_t * mp)
 	  if (vec_elt (vec_tbl, i) == ~0)
 	    continue;
 
-	  send_policer_classify_details (i, vec_elt (vec_tbl, i), q,
+	  send_policer_classify_details (i, vec_elt (vec_tbl, i), reg,
 					 mp->context);
 	}
     }
@@ -223,10 +252,10 @@ vl_api_policer_classify_dump_t_handler (vl_api_policer_classify_dump_t * mp)
 static void
 vl_api_classify_table_ids_t_handler (vl_api_classify_table_ids_t * mp)
 {
-  unix_shared_memory_queue_t *q;
+  vl_api_registration_t *reg;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
     return;
 
   vnet_classify_main_t *cm = &vnet_classify_main;
@@ -250,7 +279,7 @@ vl_api_classify_table_ids_t_handler (vl_api_classify_table_ids_t * mp)
   clib_memcpy (rmp->ids, table_ids, count * sizeof (u32));
   rmp->retval = 0;
 
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 
   vec_free (table_ids);
 }
@@ -265,19 +294,21 @@ static void
   u32 sw_if_index = ntohl (mp->sw_if_index);
   u32 *acl = 0;
 
-  vec_validate (acl, INPUT_ACL_N_TABLES - 1);
+  vec_validate (acl, IN_OUT_ACL_N_TABLES - 1);
   vec_set (acl, ~0);
 
   VALIDATE_SW_IF_INDEX (mp);
 
-  input_acl_main_t *am = &input_acl_main;
+  in_out_acl_main_t *am = &in_out_acl_main;
 
   int if_idx;
   u32 type;
 
-  for (type = 0; type < INPUT_ACL_N_TABLES; type++)
+  for (type = 0; type < IN_OUT_ACL_N_TABLES; type++)
     {
-      u32 *vec_tbl = am->classify_table_index_by_sw_if_index[type];
+      u32 *vec_tbl =
+	am->classify_table_index_by_sw_if_index[IN_OUT_ACL_INPUT_TABLE_GROUP]
+	[type];
       if (vec_len (vec_tbl))
 	{
 	  for (if_idx = 0; if_idx < vec_len (vec_tbl); if_idx++)
@@ -297,9 +328,9 @@ static void
    REPLY_MACRO2(VL_API_CLASSIFY_TABLE_BY_INTERFACE_REPLY,
    ({
      rmp->sw_if_index = ntohl(sw_if_index);
-     rmp->l2_table_id = ntohl(acl[INPUT_ACL_TABLE_L2]);
-     rmp->ip4_table_id = ntohl(acl[INPUT_ACL_TABLE_IP4]);
-     rmp->ip6_table_id = ntohl(acl[INPUT_ACL_TABLE_IP6]);
+     rmp->l2_table_id = ntohl(acl[IN_OUT_ACL_TABLE_L2]);
+     rmp->ip4_table_id = ntohl(acl[IN_OUT_ACL_TABLE_IP4]);
+     rmp->ip6_table_id = ntohl(acl[IN_OUT_ACL_TABLE_IP6]);
    }));
    /* *INDENT-ON* */
   vec_free (acl);
@@ -308,10 +339,10 @@ static void
 static void
 vl_api_classify_table_info_t_handler (vl_api_classify_table_info_t * mp)
 {
-  unix_shared_memory_queue_t *q;
+  vl_api_registration_t *reg;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
     return;
 
   vl_api_classify_table_info_reply_t *rmp = 0;
@@ -352,11 +383,11 @@ vl_api_classify_table_info_t_handler (vl_api_classify_table_info_t * mp)
       rmp->retval = ntohl (VNET_API_ERROR_CLASSIFY_TABLE_NOT_FOUND);
     }
 
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void
-send_classify_session_details (unix_shared_memory_queue_t * q,
+send_classify_session_details (vl_api_registration_t * reg,
 			       u32 table_id,
 			       u32 match_length,
 			       vnet_classify_entry_t * e, u32 context)
@@ -364,7 +395,7 @@ send_classify_session_details (unix_shared_memory_queue_t * q,
   vl_api_classify_session_details_t *rmp;
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  memset (rmp, 0, sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
   rmp->_vl_msg_id = ntohs (VL_API_CLASSIFY_SESSION_DETAILS);
   rmp->context = context;
   rmp->table_id = ntohl (table_id);
@@ -374,20 +405,20 @@ send_classify_session_details (unix_shared_memory_queue_t * q,
   rmp->match_length = ntohl (match_length);
   clib_memcpy (rmp->match, e->key, match_length);
 
-  vl_msg_api_send_shmem (q, (u8 *) & rmp);
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void
 vl_api_classify_session_dump_t_handler (vl_api_classify_session_dump_t * mp)
 {
   vnet_classify_main_t *cm = &vnet_classify_main;
-  unix_shared_memory_queue_t *q;
+  vl_api_registration_t *reg;
 
   u32 table_id = ntohl (mp->table_id);
   vnet_classify_table_t *t;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (!q)
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
     return;
 
   /* *INDENT-OFF* */
@@ -416,7 +447,7 @@ vl_api_classify_session_dump_t_handler (vl_api_classify_session_dump_t * mp)
                       continue;
 
                     send_classify_session_details
-                      (q, table_id, t->match_n_vectors * sizeof (u32x4),
+                      (reg, table_id, t->match_n_vectors * sizeof (u32x4),
                        v, mp->context);
                   }
               }
@@ -452,31 +483,31 @@ static void
 
 static void
 send_flow_classify_details (u32 sw_if_index,
-			    u32 table_index,
-			    unix_shared_memory_queue_t * q, u32 context)
+			    u32 table_index, vl_api_registration_t * reg,
+			    u32 context)
 {
   vl_api_flow_classify_details_t *mp;
 
   mp = vl_msg_api_alloc (sizeof (*mp));
-  memset (mp, 0, sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
   mp->_vl_msg_id = ntohs (VL_API_FLOW_CLASSIFY_DETAILS);
   mp->context = context;
   mp->sw_if_index = htonl (sw_if_index);
   mp->table_index = htonl (table_index);
 
-  vl_msg_api_send_shmem (q, (u8 *) & mp);
+  vl_api_send_msg (reg, (u8 *) mp);
 }
 
 static void
 vl_api_flow_classify_dump_t_handler (vl_api_flow_classify_dump_t * mp)
 {
-  unix_shared_memory_queue_t *q;
+  vl_api_registration_t *reg;
   flow_classify_main_t *pcm = &flow_classify_main;
   u32 *vec_tbl;
   int i;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (q == 0)
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
     return;
 
   vec_tbl = pcm->classify_table_index_by_sw_if_index[mp->type];
@@ -488,10 +519,120 @@ vl_api_flow_classify_dump_t_handler (vl_api_flow_classify_dump_t * mp)
 	  if (vec_elt (vec_tbl, i) == ~0)
 	    continue;
 
-	  send_flow_classify_details (i, vec_elt (vec_tbl, i), q,
+	  send_flow_classify_details (i, vec_elt (vec_tbl, i), reg,
 				      mp->context);
 	}
     }
+}
+
+static void vl_api_classify_set_interface_ip_table_t_handler
+  (vl_api_classify_set_interface_ip_table_t * mp)
+{
+  vlib_main_t *vm = vlib_get_main ();
+  vl_api_classify_set_interface_ip_table_reply_t *rmp;
+  int rv;
+
+  VALIDATE_SW_IF_INDEX (mp);
+
+  u32 table_index = ntohl (mp->table_index);
+  u32 sw_if_index = ntohl (mp->sw_if_index);
+
+  if (mp->is_ipv6)
+    rv = vnet_set_ip6_classify_intfc (vm, sw_if_index, table_index);
+  else
+    rv = vnet_set_ip4_classify_intfc (vm, sw_if_index, table_index);
+
+  BAD_SW_IF_INDEX_LABEL;
+
+  REPLY_MACRO (VL_API_CLASSIFY_SET_INTERFACE_IP_TABLE_REPLY);
+}
+
+static void vl_api_classify_set_interface_l2_tables_t_handler
+  (vl_api_classify_set_interface_l2_tables_t * mp)
+{
+  vl_api_classify_set_interface_l2_tables_reply_t *rmp;
+  int rv;
+  u32 sw_if_index, ip4_table_index, ip6_table_index, other_table_index;
+  int enable;
+
+  ip4_table_index = ntohl (mp->ip4_table_index);
+  ip6_table_index = ntohl (mp->ip6_table_index);
+  other_table_index = ntohl (mp->other_table_index);
+  sw_if_index = ntohl (mp->sw_if_index);
+
+  VALIDATE_SW_IF_INDEX (mp);
+
+  if (mp->is_input)
+    rv = vnet_l2_input_classify_set_tables (sw_if_index, ip4_table_index,
+					    ip6_table_index,
+					    other_table_index);
+  else
+    rv = vnet_l2_output_classify_set_tables (sw_if_index, ip4_table_index,
+					     ip6_table_index,
+					     other_table_index);
+
+  if (rv == 0)
+    {
+      if (ip4_table_index != ~0 || ip6_table_index != ~0
+	  || other_table_index != ~0)
+	enable = 1;
+      else
+	enable = 0;
+
+      if (mp->is_input)
+	vnet_l2_input_classify_enable_disable (sw_if_index, enable);
+      else
+	vnet_l2_output_classify_enable_disable (sw_if_index, enable);
+    }
+
+  BAD_SW_IF_INDEX_LABEL;
+
+  REPLY_MACRO (VL_API_CLASSIFY_SET_INTERFACE_L2_TABLES_REPLY);
+}
+
+static void vl_api_input_acl_set_interface_t_handler
+  (vl_api_input_acl_set_interface_t * mp)
+{
+  vlib_main_t *vm = vlib_get_main ();
+  vl_api_input_acl_set_interface_reply_t *rmp;
+  int rv;
+
+  VALIDATE_SW_IF_INDEX (mp);
+
+  u32 ip4_table_index = ntohl (mp->ip4_table_index);
+  u32 ip6_table_index = ntohl (mp->ip6_table_index);
+  u32 l2_table_index = ntohl (mp->l2_table_index);
+  u32 sw_if_index = ntohl (mp->sw_if_index);
+
+  rv = vnet_set_input_acl_intfc (vm, sw_if_index, ip4_table_index,
+				 ip6_table_index, l2_table_index, mp->is_add);
+
+  BAD_SW_IF_INDEX_LABEL;
+
+  REPLY_MACRO (VL_API_INPUT_ACL_SET_INTERFACE_REPLY);
+}
+
+static void vl_api_output_acl_set_interface_t_handler
+  (vl_api_output_acl_set_interface_t * mp)
+{
+  vlib_main_t *vm = vlib_get_main ();
+  vl_api_output_acl_set_interface_reply_t *rmp;
+  int rv;
+
+  VALIDATE_SW_IF_INDEX (mp);
+
+  u32 ip4_table_index = ntohl (mp->ip4_table_index);
+  u32 ip6_table_index = ntohl (mp->ip6_table_index);
+  u32 l2_table_index = ntohl (mp->l2_table_index);
+  u32 sw_if_index = ntohl (mp->sw_if_index);
+
+  rv = vnet_set_output_acl_intfc (vm, sw_if_index, ip4_table_index,
+				  ip6_table_index, l2_table_index,
+				  mp->is_add);
+
+  BAD_SW_IF_INDEX_LABEL;
+
+  REPLY_MACRO (VL_API_OUTPUT_ACL_SET_INTERFACE_REPLY);
 }
 
 /*

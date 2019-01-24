@@ -41,21 +41,13 @@
 #include <vppinfra/error_bootstrap.h>
 
 /*
- * Allow CFLAGS to override the arch-specific cache line size
+ * Allow CFLAGS to override the configured / deduced cache line size
  */
 #ifndef CLIB_LOG2_CACHE_LINE_BYTES
 
-#if defined(__x86_64__) || defined(__ARM_ARCH_7A__) || defined(__i386__)
-#define CLIB_LOG2_CACHE_LINE_BYTES 6
-#endif
-
-#ifdef __aarch64__
-#define CLIB_LOG2_CACHE_LINE_BYTES 7
-#endif
-
-/* Default cache line size of 32 bytes. */
+/* Default cache line size of 64 bytes. */
 #ifndef CLIB_LOG2_CACHE_LINE_BYTES
-#define CLIB_LOG2_CACHE_LINE_BYTES 5
+#define CLIB_LOG2_CACHE_LINE_BYTES 6
 #endif
 
 #endif /* CLIB_LOG2_CACHE_LINE_BYTES defined */
@@ -66,6 +58,12 @@
 
 #define CLIB_CACHE_LINE_BYTES (1 << CLIB_LOG2_CACHE_LINE_BYTES)
 #define CLIB_CACHE_LINE_ALIGN_MARK(mark) u8 mark[0] __attribute__((aligned(CLIB_CACHE_LINE_BYTES)))
+#define CLIB_CACHE_LINE_ROUND(x) ((x + CLIB_CACHE_LINE_BYTES - 1) & ~(CLIB_CACHE_LINE_BYTES - 1))
+
+/* Default cache line fill buffers. */
+#ifndef CLIB_N_PREFETCHES
+#define CLIB_N_PREFETCHES 16
+#endif
 
 /* Read/write arguments to __builtin_prefetch. */
 #define CLIB_PREFETCH_READ 0

@@ -24,6 +24,7 @@ vnet_feature_init (vlib_main_t * vm)
   vnet_feature_main_t *fm = &feature_main;
   vnet_feature_registration_t *freg;
   vnet_feature_arc_registration_t *areg;
+  vnet_feature_constraint_registration_t *creg;
   u32 arc_index = 0;
 
   fm->arc_index_by_name = hash_create_string (0, sizeof (uword));
@@ -58,6 +59,7 @@ vnet_feature_init (vlib_main_t * vm)
   vec_validate (fm->next_feature_by_name, arc_index - 1);
   vec_validate (fm->sw_if_index_has_features, arc_index - 1);
   vec_validate (fm->feature_count_by_sw_if_index, arc_index - 1);
+  vec_validate (fm->next_constraint_by_arc, arc_index - 1);
 
   freg = fm->next_feature;
   while (freg)
@@ -75,12 +77,37 @@ vnet_feature_init (vlib_main_t * vm)
       arc_index = areg->feature_arc_index;
 
       next = freg->next;
-      freg->next = fm->next_feature_by_arc[arc_index];
+      freg->next_in_arc = fm->next_feature_by_arc[arc_index];
       fm->next_feature_by_arc[arc_index] = freg;
 
       /* next */
       freg = next;
     }
+
+  /* Move bulk constraints to the constraint by arc lists */
+  creg = fm->next_constraint;
+  while (creg)
+    {
+      vnet_feature_constraint_registration_t *next;
+      uword *p = hash_get_mem (fm->arc_index_by_name, creg->arc_name);
+      if (p == 0)
+	{
+	  /* Don't start vpp with broken features arcs */
+	  clib_warning ("Unknown feature arc '%s'", creg->arc_name);
+	  os_exit (1);
+	}
+
+      areg = uword_to_pointer (p[0], vnet_feature_arc_registration_t *);
+      arc_index = areg->feature_arc_index;
+
+      next = creg->next;
+      creg->next_in_arc = fm->next_constraint_by_arc[arc_index];
+      fm->next_constraint_by_arc[arc_index] = creg;
+
+      /* next */
+      creg = next;
+    }
+
 
   areg = fm->next_arc;
   while (areg)
@@ -88,18 +115,32 @@ vnet_feature_init (vlib_main_t * vm)
       clib_error_t *error;
       vnet_feature_config_main_t *cm;
       vnet_config_main_t *vcm;
+      char **features_in_order, *last_feature;
 
       arc_index = areg->feature_arc_index;
       cm = &fm->feature_config_mains[arc_index];
       vcm = &cm->config_main;
-      if ((error = vnet_feature_arc_init (vm, vcm,
-					  areg->start_nodes,
-					  areg->n_start_nodes,
-					  fm->next_feature_by_arc[arc_index],
-					  &fm->feature_nodes[arc_index])))
+      if ((error = vnet_feature_arc_init
+	   (vm, vcm, areg->start_nodes, areg->n_start_nodes,
+	    fm->next_feature_by_arc[arc_index],
+	    fm->next_constraint_by_arc[arc_index],
+	    &fm->feature_nodes[arc_index])))
 	{
 	  clib_error_report (error);
 	  os_exit (1);
+	}
+
+      features_in_order = fm->feature_nodes[arc_index];
+
+      /* If specificed, verify that the last node in the arc is actually last */
+      if (areg->last_in_arc && vec_len (features_in_order) > 0)
+	{
+	  last_feature = features_in_order[vec_len (features_in_order) - 1];
+	  if (strncmp (areg->last_in_arc, last_feature,
+		       strlen (areg->last_in_arc)))
+	    clib_warning
+	      ("WARNING: %s arc: last node is %s, but expected %s!",
+	       areg->arc_name, last_feature, areg->last_in_arc);
 	}
 
       fm->next_feature_by_name[arc_index] =
@@ -110,7 +151,7 @@ vnet_feature_init (vlib_main_t * vm)
 	{
 	  hash_set_mem (fm->next_feature_by_name[arc_index],
 			freg->node_name, pointer_to_uword (freg));
-	  freg = freg->next;
+	  freg = freg->next_in_arc;
 	}
 
       /* next */
@@ -209,6 +250,10 @@ vnet_feature_enable_disable_with_index (u8 arc_index, u32 feature_index,
 	: vnet_config_del_feature)
     (vlib_get_main (), &cm->config_main, ci, feature_index, feature_config,
      n_feature_config_bytes);
+  if (ci == ~0)
+    {
+      return 0;
+    }
   cm->config_index_by_sw_if_index[sw_if_index] = ci;
 
   /* update feature count */
@@ -246,6 +291,14 @@ vnet_feature_enable_disable (const char *arc_name, const char *node_name,
 						 n_feature_config_bytes);
 }
 
+static int
+feature_cmp (void *a1, void *a2)
+{
+  vnet_feature_registration_t *reg1 = a1;
+  vnet_feature_registration_t *reg2 = a2;
+
+  return (int) reg1->feature_index - reg2->feature_index;
+}
 
 /** Display the set of available driver features.
     Useful for verifying that expected features are present
@@ -258,24 +311,45 @@ show_features_command_fn (vlib_main_t * vm,
   vnet_feature_main_t *fm = &feature_main;
   vnet_feature_arc_registration_t *areg;
   vnet_feature_registration_t *freg;
+  vnet_feature_registration_t *feature_regs = 0;
+  int verbose = 0;
+
+  if (unformat (input, "verbose"))
+    verbose = 1;
 
   vlib_cli_output (vm, "Available feature paths");
 
   areg = fm->next_arc;
   while (areg)
     {
-      vlib_cli_output (vm, "%s:", areg->arc_name);
+      if (verbose)
+	vlib_cli_output (vm, "[%2d] %s:", areg->feature_arc_index,
+			 areg->arc_name);
+      else
+	vlib_cli_output (vm, "%s:", areg->arc_name);
+
       freg = fm->next_feature_by_arc[areg->feature_arc_index];
       while (freg)
 	{
-	  vlib_cli_output (vm, "  %s\n", freg->node_name);
-	  freg = freg->next;
+	  vec_add1 (feature_regs, freg[0]);
+	  freg = freg->next_in_arc;
 	}
 
+      vec_sort_with_function (feature_regs, feature_cmp);
 
+      vec_foreach (freg, feature_regs)
+      {
+	if (verbose)
+	  vlib_cli_output (vm, "  [%2d]: %s\n", freg->feature_index,
+			   freg->node_name);
+	else
+	  vlib_cli_output (vm, "  %s\n", freg->node_name);
+      }
+      vec_reset_length (feature_regs);
       /* next */
       areg = areg->next;
     }
+  vec_free (feature_regs);
 
   return 0;
 }
@@ -285,7 +359,7 @@ show_features_command_fn (vlib_main_t * vm,
  *
  * @cliexpar
  * Example:
- * @cliexcmd{show ip features}
+ * @cliexcmd{show features [verbose]}
  * @cliexend
  * @endparblock
 ?*/
@@ -302,7 +376,7 @@ VLIB_CLI_COMMAND (show_features_command, static) = {
  */
 
 void
-vnet_interface_features_show (vlib_main_t * vm, u32 sw_if_index)
+vnet_interface_features_show (vlib_main_t * vm, u32 sw_if_index, int verbose)
 {
   vnet_feature_main_t *fm = &feature_main;
   u32 node_index, current_config_index;
@@ -316,7 +390,7 @@ vnet_interface_features_show (vlib_main_t * vm, u32 sw_if_index)
   vlib_node_t *n;
   int i;
 
-  vlib_cli_output (vm, "Driver feature paths configured on %U...",
+  vlib_cli_output (vm, "Feature paths configured on %U...",
 		   format_vnet_sw_if_index_name,
 		   vnet_get_main (), sw_if_index);
 
@@ -357,7 +431,10 @@ vnet_interface_features_show (vlib_main_t * vm, u32 sw_if_index)
 	  feat = cfg->features + i;
 	  node_index = feat->node_index;
 	  n = vlib_get_node (vm, node_index);
-	  vlib_cli_output (vm, "  %v", n->name);
+	  if (verbose)
+	    vlib_cli_output (vm, "  [%2d] %v", feat->feature_index, n->name);
+	  else
+	    vlib_cli_output (vm, "  %v", n->name);
 	}
     }
 }
@@ -378,7 +455,7 @@ set_interface_features_command_fn (vlib_main_t * vm,
 
   /* Get a line of input. */
   if (!unformat_user (input, unformat_line_input, line_input))
-    goto done;
+    return 0;
 
   while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
@@ -392,6 +469,8 @@ set_interface_features_command_fn (vlib_main_t * vm,
 	enable = 0;
       else
 	{
+	  if (feature_name && arc_name)
+	    break;
 	  error = unformat_parse_error (line_input);
 	  goto done;
 	}

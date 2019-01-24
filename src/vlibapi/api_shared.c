@@ -104,7 +104,7 @@ vl_msg_api_trace (api_main_t * am, vl_api_trace_t * tp, void *msg)
   length = clib_net_to_host_u32 (header->data_len);
 
   vec_validate (msg_copy, length - 1);
-  clib_memcpy (msg_copy, msg, length);
+  clib_memcpy_fast (msg_copy, msg, length);
   *this_trace = msg_copy;
 }
 
@@ -360,7 +360,7 @@ vl_msg_api_trace_configure (api_main_t * am, vl_api_trace_which_t which,
       vl_msg_api_trace_free (am, which);
     }
 
-  memset (tp, 0, sizeof (*tp));
+  clib_memset (tp, 0, sizeof (*tp));
 
   if (clib_arch_is_big_endian)
     {
@@ -436,12 +436,8 @@ msg_handler_internal (api_main_t * am,
     vl_msg_api_free (the_msg);
 }
 
-/* set to 1 if you want before/after message handler event logging */
-#define ELOG_API_MESSAGE_HANDLERS 0
-
-#if ELOG_API_MESSAGE_HANDLERS > 0
 static u32
-elog_id_for_msg_name (vlib_main_t * vm, char *msg_name)
+elog_id_for_msg_name (vlib_main_t * vm, const char *msg_name)
 {
   uword *p, r;
   static uword *h;
@@ -461,7 +457,6 @@ elog_id_for_msg_name (vlib_main_t * vm, char *msg_name)
 
   return r;
 }
-#endif
 
 /* This is only to be called from a vlib/vnet app */
 void
@@ -472,26 +467,25 @@ vl_msg_api_handler_with_vm_node (api_main_t * am,
   u16 id = ntohs (*((u16 *) the_msg));
   u8 *(*handler) (void *, void *, void *);
 
-#if ELOG_API_MESSAGE_HANDLERS > 0
-  {
-    /* *INDENT-OFF* */
-    ELOG_TYPE_DECLARE (e) =
-      {
-        .format = "api-msg: %s",
-        .format_args = "T4",
-      };
-    /* *INDENT-ON* */
-    struct
+  if (PREDICT_FALSE (vm->elog_trace_api_messages))
     {
-      u32 c;
-    } *ed;
-    ed = ELOG_DATA (&vm->elog_main, e);
-    if (id < vec_len (am->msg_names))
-      ed->c = elog_id_for_msg_name (vm, am->msg_names[id]);
-    else
-      ed->c = elog_id_for_msg_name (vm, "BOGUS");
-  }
-#endif
+      /* *INDENT-OFF* */
+      ELOG_TYPE_DECLARE (e) =
+        {
+          .format = "api-msg: %s",
+          .format_args = "T4",
+        };
+      /* *INDENT-ON* */
+      struct
+      {
+	u32 c;
+      } *ed;
+      ed = ELOG_DATA (&vm->elog_main, e);
+      if (id < vec_len (am->msg_names))
+	ed->c = elog_id_for_msg_name (vm, (const char *) am->msg_names[id]);
+      else
+	ed->c = elog_id_for_msg_name (vm, "BOGUS");
+    }
 
   if (id < vec_len (am->msg_handlers) && am->msg_handlers[id])
     {
@@ -521,26 +515,25 @@ vl_msg_api_handler_with_vm_node (api_main_t * am,
   if (!(am->message_bounce[id]))
     vl_msg_api_free (the_msg);
 
-#if ELOG_API_MESSAGE_HANDLERS > 0
-  {
-  /* *INDENT-OFF* */
-  ELOG_TYPE_DECLARE (e) = {
-    .format = "api-msg-done: %s",
-    .format_args = "T4",
-  };
-  /* *INDENT-ON* */
-
-    struct
+  if (PREDICT_FALSE (vm->elog_trace_api_messages))
     {
-      u32 c;
-    } *ed;
-    ed = ELOG_DATA (&vm->elog_main, e);
-    if (id < vec_len (am->msg_names))
-      ed->c = elog_id_for_msg_name (vm, am->msg_names[id]);
-    else
-      ed->c = elog_id_for_msg_name (vm, "BOGUS");
-  }
-#endif
+      /* *INDENT-OFF* */
+      ELOG_TYPE_DECLARE (e) = {
+        .format = "api-msg-done: %s",
+        .format_args = "T4",
+      };
+      /* *INDENT-ON* */
+
+      struct
+      {
+	u32 c;
+      } *ed;
+      ed = ELOG_DATA (&vm->elog_main, e);
+      if (id < vec_len (am->msg_names))
+	ed->c = elog_id_for_msg_name (vm, (const char *) am->msg_names[id]);
+      else
+	ed->c = elog_id_for_msg_name (vm, "BOGUS");
+    }
 }
 
 void
@@ -665,7 +658,22 @@ vl_msg_api_config (vl_msg_api_msg_config_t * c)
 {
   api_main_t *am = &api_main;
 
-  ASSERT (c->id > 0);
+  /*
+   * This happens during the java core tests if the message
+   * dictionary is missing newly added xxx_reply_t messages.
+   * Should never happen, but since I shot myself in the foot once
+   * this way, I thought I'd make it easy to debug if I ever do
+   * it again... (;-)...
+   */
+  if (c->id == 0)
+    {
+      if (c->name)
+	clib_warning ("Trying to register %s with a NULL msg id!", c->name);
+      else
+	clib_warning ("Trying to register a NULL msg with a NULL msg id!");
+      clib_warning ("Did you forget to call setup_message_id_table?");
+      return;
+    }
 
 #define _(a) vec_validate (am->a, c->id);
   foreach_msg_api_vector;
@@ -701,7 +709,7 @@ vl_msg_api_set_handlers (int id, char *name, void *handler, void *cleanup,
   vl_msg_api_msg_config_t cfg;
   vl_msg_api_msg_config_t *c = &cfg;
 
-  memset (c, 0, sizeof (*c));
+  clib_memset (c, 0, sizeof (*c));
 
   c->id = id;
   c->name = name;
@@ -722,7 +730,7 @@ vl_msg_api_clean_handlers (int msg_id)
   vl_msg_api_msg_config_t cfg;
   vl_msg_api_msg_config_t *c = &cfg;
 
-  memset (c, 0, sizeof (*c));
+  clib_memset (c, 0, sizeof (*c));
 
   c->id = msg_id;
   vl_msg_api_config (c);
@@ -739,11 +747,11 @@ vl_msg_api_set_cleanup_handler (int msg_id, void *fp)
 }
 
 void
-vl_msg_api_queue_handler (unix_shared_memory_queue_t * q)
+vl_msg_api_queue_handler (svm_queue_t * q)
 {
   uword msg;
 
-  while (!unix_shared_memory_queue_sub (q, (u8 *) & msg, 0))
+  while (!svm_queue_sub (q, (u8 *) & msg, SVM_Q_WAIT, 0))
     vl_msg_api_handler ((void *) msg);
 }
 
@@ -913,6 +921,47 @@ vl_msg_api_add_msg_name_crc (api_main_t * am, const char *string, u32 id)
     }
 
   hash_set_mem (am->msg_index_by_name_and_crc, string, id);
+}
+
+void
+vl_msg_api_add_version (api_main_t * am, const char *string,
+			u32 major, u32 minor, u32 patch)
+{
+  api_version_t version = {.major = major,.minor = minor,.patch = patch };
+  ASSERT (strlen (string) < 64);
+  strncpy (version.name, string, 64 - 1);
+  vec_add1 (am->api_version_list, version);
+}
+
+u32
+vl_msg_api_get_msg_index (u8 * name_and_crc)
+{
+  api_main_t *am = &api_main;
+  uword *p;
+
+  if (am->msg_index_by_name_and_crc)
+    {
+      p = hash_get_mem (am->msg_index_by_name_and_crc, name_and_crc);
+      if (p)
+	return p[0];
+    }
+  return ~0;
+}
+
+void *
+vl_msg_push_heap (void)
+{
+  api_main_t *am = &api_main;
+  pthread_mutex_lock (&am->vlib_rp->mutex);
+  return svm_push_data_heap (am->vlib_rp);
+}
+
+void
+vl_msg_pop_heap (void *oldheap)
+{
+  api_main_t *am = &api_main;
+  svm_pop_heap (oldheap);
+  pthread_mutex_unlock (&am->vlib_rp->mutex);
 }
 
 

@@ -51,7 +51,7 @@ static char *af_packet_tx_func_error_strings[] = {
 };
 
 
-static u8 *
+u8 *
 format_af_packet_device_name (u8 * s, va_list * args)
 {
   u32 i = va_arg (*args, u32);
@@ -81,12 +81,13 @@ af_packet_interface_tx (vlib_main_t * vm,
 			vlib_node_runtime_t * node, vlib_frame_t * frame)
 {
   af_packet_main_t *apm = &af_packet_main;
-  u32 *buffers = vlib_frame_args (frame);
+  u32 *buffers = vlib_frame_vector_args (frame);
   u32 n_left = frame->n_vectors;
   u32 n_sent = 0;
   vnet_interface_output_runtime_t *rd = (void *) node->runtime_data;
   af_packet_if_t *apif =
     pool_elt_at_index (apm->interfaces, rd->dev_instance);
+  clib_spinlock_lock_if_init (&apif->lockp);
   int block = 0;
   u32 block_size = apif->tx_req->tp_block_size;
   u32 frame_size = apif->tx_req->tp_frame_size;
@@ -95,8 +96,6 @@ af_packet_interface_tx (vlib_main_t * vm,
   u32 tx_frame = apif->next_tx_frame;
   struct tpacket2_hdr *tph;
   u32 frame_not_ready = 0;
-
-  clib_spinlock_lock_if_init (&apif->lockp);
 
   while (n_left > 0)
     {
@@ -120,9 +119,9 @@ af_packet_interface_tx (vlib_main_t * vm,
 	{
 	  b0 = vlib_get_buffer (vm, bi);
 	  len = b0->current_length;
-	  clib_memcpy ((u8 *) tph +
-		       TPACKET_ALIGN (sizeof (struct tpacket2_hdr)) + offset,
-		       vlib_buffer_get_current (b0), len);
+	  clib_memcpy_fast ((u8 *) tph +
+			    TPACKET_ALIGN (sizeof (struct tpacket2_hdr)) +
+			    offset, vlib_buffer_get_current (b0), len);
 	  offset += len;
 	}
       while ((bi =
@@ -132,11 +131,11 @@ af_packet_interface_tx (vlib_main_t * vm,
       tph->tp_status = TP_STATUS_SEND_REQUEST;
       n_sent++;
     next:
+      tx_frame = (tx_frame + 1) % frame_num;
+
       /* check if we've exhausted the ring */
       if (PREDICT_FALSE (frame_not_ready + n_sent == frame_num))
 	break;
-
-      tx_frame = (tx_frame + 1) % frame_num;
     }
 
   CLIB_MEMORY_BARRIER ();
@@ -169,7 +168,7 @@ af_packet_interface_tx (vlib_main_t * vm,
     vlib_error_count (vm, node->node_index, AF_PACKET_TX_ERROR_TXRING_OVERRUN,
 		      n_left);
 
-  vlib_buffer_free (vm, vlib_frame_args (frame), frame->n_vectors);
+  vlib_buffer_free (vm, vlib_frame_vector_args (frame), frame->n_vectors);
   return frame->n_vectors;
 }
 
@@ -214,8 +213,8 @@ af_packet_interface_admin_up_down (vnet_main_t * vnm, u32 hw_if_index,
 
   if (0 > fd)
     {
-      clib_unix_warning ("af_packet_%s could not open socket",
-			 apif->host_if_name);
+      vlib_log_warn (apm->log_class, "af_packet_%s could not open socket",
+		     apif->host_if_name);
       return 0;
     }
 
@@ -227,8 +226,9 @@ af_packet_interface_admin_up_down (vnet_main_t * vnm, u32 hw_if_index,
   ifr.ifr_ifindex = apif->host_if_index;
   if ((rv = ioctl (fd, SIOCGIFNAME, &ifr)) < 0)
     {
-      clib_unix_warning ("af_packet_%s ioctl could not retrieve eth name",
-			 apif->host_if_name);
+      vlib_log_warn (apm->log_class,
+		     "af_packet_%s ioctl could not retrieve eth name",
+		     apif->host_if_name);
       goto error;
     }
 
@@ -236,8 +236,8 @@ af_packet_interface_admin_up_down (vnet_main_t * vnm, u32 hw_if_index,
 
   if ((rv = ioctl (fd, SIOCGIFFLAGS, &ifr)) < 0)
     {
-      clib_unix_warning ("af_packet_%s error: %d",
-			 apif->is_admin_up ? "up" : "down", rv);
+      vlib_log_warn (apm->log_class, "af_packet_%s error: %d",
+		     apif->is_admin_up ? "up" : "down", rv);
       goto error;
     }
 
@@ -254,8 +254,8 @@ af_packet_interface_admin_up_down (vnet_main_t * vnm, u32 hw_if_index,
 
   if ((rv = ioctl (fd, SIOCSIFFLAGS, &ifr)) < 0)
     {
-      clib_unix_warning ("af_packet_%s error: %d",
-			 apif->is_admin_up ? "up" : "down", rv);
+      vlib_log_warn (apm->log_class, "af_packet_%s error: %d",
+		     apif->is_admin_up ? "up" : "down", rv);
       goto error;
     }
 
@@ -278,7 +278,7 @@ af_packet_subif_add_del_function (vnet_main_t * vnm,
 }
 
 static clib_error_t *af_packet_set_mac_address_function
-  (struct vnet_hw_interface_t *hi, char *address)
+  (struct vnet_hw_interface_t *hi, const u8 * old_address, const u8 * address)
 {
   af_packet_main_t *apm = &af_packet_main;
   af_packet_if_t *apif =
@@ -288,8 +288,8 @@ static clib_error_t *af_packet_set_mac_address_function
 
   if (0 > fd)
     {
-      clib_unix_warning ("af_packet_%s could not open socket",
-			 apif->host_if_name);
+      vlib_log_warn (apm->log_class, "af_packet_%s could not open socket",
+		     apif->host_if_name);
       return 0;
     }
 
@@ -301,8 +301,9 @@ static clib_error_t *af_packet_set_mac_address_function
   ifr.ifr_ifindex = apif->host_if_index;
   if ((rv = ioctl (fd, SIOCGIFNAME, &ifr)) < 0)
     {
-      clib_unix_warning
-	("af_packet_%s ioctl could not retrieve eth name, error: %d",
+      vlib_log_warn
+	(apm->log_class,
+	 "af_packet_%s ioctl could not retrieve eth name, error: %d",
 	 apif->host_if_name, rv);
       goto error;
     }
@@ -312,8 +313,9 @@ static clib_error_t *af_packet_set_mac_address_function
 
   if ((rv = ioctl (fd, SIOCSIFHWADDR, &ifr)) < 0)
     {
-      clib_unix_warning ("af_packet_%s ioctl could not set mac, error: %d",
-			 apif->host_if_name, rv);
+      vlib_log_warn (apm->log_class,
+		     "af_packet_%s ioctl could not set mac, error: %d",
+		     apif->host_if_name, rv);
       goto error;
     }
 

@@ -66,13 +66,13 @@ static void
 vl_api_sw_interface_span_dump_t_handler (vl_api_sw_interface_span_dump_t * mp)
 {
 
-  unix_shared_memory_queue_t *q;
+  vl_api_registration_t *reg;
   span_interface_t *si;
   vl_api_sw_interface_span_details_t *rmp;
   span_main_t *sm = &span_main;
 
-  q = vl_api_client_index_to_input_queue (mp->client_index);
-  if (!q)
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
     return;
 
   span_feat_t sf = mp->is_l2 ? SPAN_FEAT_L2 : SPAN_FEAT_DEVICE;
@@ -89,7 +89,7 @@ vl_api_sw_interface_span_dump_t_handler (vl_api_sw_interface_span_dump_t * mp)
       clib_bitmap_foreach (i, b, (
         {
           rmp = vl_msg_api_alloc (sizeof (*rmp));
-          memset (rmp, 0, sizeof (*rmp));
+          clib_memset (rmp, 0, sizeof (*rmp));
           rmp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_SPAN_DETAILS);
           rmp->context = mp->context;
 
@@ -97,8 +97,9 @@ vl_api_sw_interface_span_dump_t_handler (vl_api_sw_interface_span_dump_t * mp)
           rmp->sw_if_index_to = htonl (i);
           rmp->state = (u8) (clib_bitmap_get (rxm->mirror_ports, i) +
                              clib_bitmap_get (txm->mirror_ports, i) * 2);
+	  rmp->is_l2 = mp->is_l2;
 
-          vl_msg_api_send_shmem (q, (u8 *) & rmp);
+          vl_api_send_msg (reg, (u8 *) rmp);
         }));
       clib_bitmap_free (b);
     }
@@ -109,7 +110,7 @@ vl_api_sw_interface_span_dump_t_handler (vl_api_sw_interface_span_dump_t * mp)
 /*
  * vpe_api_hookup
  * Add vpe's API message handlers to the table.
- * vlib has alread mapped shared memory and
+ * vlib has already mapped shared memory and
  * added the client registration handlers.
  * See .../vlib-api/vlibmemory/memclnt_vlib.c:memclnt_process()
  */

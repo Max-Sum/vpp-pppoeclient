@@ -167,7 +167,7 @@ vnet_config_init (vlib_main_t * vm,
   vlib_node_t *n;
   u32 i;
 
-  memset (cm, 0, sizeof (cm[0]));
+  clib_memset (cm, 0, sizeof (cm[0]));
 
   cm->config_string_hash =
     hash_create_vec (0,
@@ -247,7 +247,7 @@ vnet_config_add_feature (vlib_main_t * vm,
   u32 node_index = vec_elt (cm->node_index_by_feature_index, feature_index);
 
   if (node_index == ~0)		// feature node does not exist
-    return config_string_heap_index;	// return original config index
+    return ~0;
 
   if (config_string_heap_index == ~0)
     {
@@ -330,7 +330,7 @@ vnet_config_del_feature (vlib_main_t * vm,
 
   /* Feature not found. */
   if (f >= vec_end (old->features))
-    return config_string_heap_index;	// return original config index
+    return ~0;
 
   new_features = duplicate_feature_vector (old->features);
   f = new_features + (f - old->features);

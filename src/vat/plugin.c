@@ -40,14 +40,19 @@ load_one_plugin (plugin_main_t * pm, plugin_info_t * pi)
   if (handle == 0)
     {
       clib_warning ("%s", dlerror ());
-      return -1;
+      return 0;
     }
 
   pi->handle = handle;
 
   register_handle = dlsym (pi->handle, "vat_plugin_register");
   if (register_handle == 0)
-    return 0;
+    {
+      clib_warning ("%s: symbol vat_plugin_register not found", pi->name);
+      dlclose (handle);
+      return 0;
+    }
+
 
   fp = register_handle;
 
@@ -152,7 +157,7 @@ vat_load_new_plugins (plugin_main_t * pm)
 		  _vec_len (pm->plugin_info) = vec_len (pm->plugin_info) - 1;
 		  continue;
 		}
-	      memset (pi, 0, sizeof (*pi));
+	      clib_memset (pi, 0, sizeof (*pi));
 	      hash_set_mem (pm->plugin_by_name_hash, plugin_name,
 			    pi - pm->plugin_info);
 	    }

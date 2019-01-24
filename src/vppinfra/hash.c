@@ -43,13 +43,13 @@
 always_inline void
 zero_pair (hash_t * h, hash_pair_t * p)
 {
-  memset (p, 0, hash_pair_bytes (h));
+  clib_memset (p, 0, hash_pair_bytes (h));
 }
 
 always_inline void
 init_pair (hash_t * h, hash_pair_t * p)
 {
-  memset (p->value, ~0, hash_value_bytes (h));
+  clib_memset (p->value, ~0, hash_value_bytes (h));
 }
 
 always_inline hash_pair_union_t *
@@ -96,7 +96,17 @@ zap64 (u64 x, word n)
     return x & masks_little_endian[n];
 }
 
-static inline u64
+/**
+ * make address-sanitizer skip this:
+ * clib_mem_unaligned + zap64 casts its input as u64, computes a mask
+ * according to the input length, and returns the casted maked value.
+ * Therefore all the 8 Bytes of the u64 are systematically read, which
+ * rightfully causes address-sanitizer to raise an error on smaller inputs.
+ *
+ * However the invalid Bytes are discarded within zap64(), whicj is why
+ * this can be silenced safely.
+ */
+static inline u64 __attribute__ ((no_sanitize_address))
 hash_memory64 (void *p, word n_bytes, u64 state)
 {
   u64 *q = p;
@@ -272,6 +282,10 @@ key_sum (hash_t * h, uword key)
       sum = string_key_sum (h, key);
       break;
 
+    case KEY_FUNC_MEM:
+      sum = mem_key_sum (h, key);
+      break;
+
     default:
       sum = h->key_sum (h, key);
       break;
@@ -300,6 +314,10 @@ key_equal1 (hash_t * h, uword key1, uword key2, uword e)
 
     case KEY_FUNC_STRING:
       e = string_key_equal (h, key1, key2);
+      break;
+
+    case KEY_FUNC_MEM:
+      e = mem_key_equal (h, key1, key2);
       break;
 
     default:
@@ -358,7 +376,7 @@ set_indirect_is_user (void *v, uword i, hash_pair_union_t * p, uword key)
       log2_bytes = 1 + hash_pair_log2_bytes (h);
       q = clib_mem_alloc (1ULL << log2_bytes);
     }
-  clib_memcpy (q, &p->direct, hash_pair_bytes (h));
+  clib_memcpy_fast (q, &p->direct, hash_pair_bytes (h));
 
   pi->pairs = q;
   if (h->log2_pair_size > 0)
@@ -439,8 +457,8 @@ unset_indirect (void *v, uword i, hash_pair_t * q)
 
       if (len == 2)
 	{
-	  clib_memcpy (p, q == r ? hash_forward1 (h, r) : r,
-		       hash_pair_bytes (h));
+	  clib_memcpy_fast (p, q == r ? hash_forward1 (h, r) : r,
+			    hash_pair_bytes (h));
 	  set_is_user (v, i, 1);
 	}
       else
@@ -455,7 +473,7 @@ unset_indirect (void *v, uword i, hash_pair_t * q)
     {
       /* If deleting a pair we need to keep non-null pairs together. */
       if (q < e)
-	clib_memcpy (q, e, hash_pair_bytes (h));
+	clib_memcpy_fast (q, e, hash_pair_bytes (h));
       else
 	zero_pair (h, q);
       if (is_vec)
@@ -496,8 +514,8 @@ lookup (void *v, uword key, enum lookup_opcode op,
 	    {
 	      set_is_user (v, i, 0);
 	      if (old_value)
-		clib_memcpy (old_value, p->direct.value,
-			     hash_value_bytes (h));
+		clib_memcpy_fast (old_value, p->direct.value,
+				  hash_value_bytes (h));
 	      zero_pair (h, &p->direct);
 	    }
 	}
@@ -530,8 +548,8 @@ lookup (void *v, uword key, enum lookup_opcode op,
 	  if (found_key && op == UNSET)
 	    {
 	      if (old_value)
-		clib_memcpy (old_value, &p->direct.value,
-			     hash_value_bytes (h));
+		clib_memcpy_fast (old_value, &p->direct.value,
+				  hash_value_bytes (h));
 
 	      unset_indirect (v, i, &p->direct);
 
@@ -546,8 +564,8 @@ lookup (void *v, uword key, enum lookup_opcode op,
     {
       /* Save away old value for caller. */
       if (old_value && found_key)
-	clib_memcpy (old_value, &p->direct.value, hash_value_bytes (h));
-      clib_memcpy (&p->direct.value, new_value, hash_value_bytes (h));
+	clib_memcpy_fast (old_value, &p->direct.value, hash_value_bytes (h));
+      clib_memcpy_fast (&p->direct.value, new_value, hash_value_bytes (h));
     }
 
   if (op == SET)
@@ -606,7 +624,7 @@ hash_next (void *v, hash_next_t * hn)
 	{
 	  /* Restore flags. */
 	  h->flags = hn->f;
-	  memset (hn, 0, sizeof (hn[0]));
+	  clib_memset (hn, 0, sizeof (hn[0]));
 	  return 0;
 	}
 
@@ -675,7 +693,7 @@ _hash_create (uword elts, hash_t * h_user)
   if (h_user)
     log2_pair_size = h_user->log2_pair_size;
 
-  v = _vec_resize (0,
+  v = _vec_resize ((void *) 0,
 		   /* vec len: */ elts,
 		   /* data bytes: */
 		   (elts << log2_pair_size) * sizeof (hash_pair_t),

@@ -18,6 +18,8 @@
 #include <vnet/ethernet/arp_packet.h>
 #include <vnet/fib/fib_walk.h>
 
+#include <vppinfra/bihash_24_8.h>
+
 /*
  * Vector Hash tables of neighbour (traditional) adjacencies
  *  Key: interface(for the vector index), address (and its proto),
@@ -59,7 +61,7 @@ adj_nbr_insert (fib_protocol_t nh_proto,
 	adj_nbr_tables[nh_proto][sw_if_index] =
 	    clib_mem_alloc_aligned(sizeof(BVT(clib_bihash)),
 				   CLIB_CACHE_LINE_BYTES);
-	memset(adj_nbr_tables[nh_proto][sw_if_index],
+	clib_memset(adj_nbr_tables[nh_proto][sw_if_index],
 	       0,
 	       sizeof(BVT(clib_bihash)));
 
@@ -93,7 +95,7 @@ adj_nbr_remove (adj_index_t ai,
     BV(clib_bihash_add_del) (adj_nbr_tables[nh_proto][sw_if_index], &kv, 0);
 }
 
-static adj_index_t
+adj_index_t
 adj_nbr_find (fib_protocol_t nh_proto,
 	      vnet_link_t link_type,
 	      const ip46_address_t *nh_addr,
@@ -195,6 +197,8 @@ adj_nbr_alloc (fib_protocol_t nh_proto,
     adj->ia_link = link_type;
     adj->ia_nh_proto = nh_proto;
     adj->rewrite_header.sw_if_index = sw_if_index;
+    vnet_rewrite_update_mtu(vnet_get_main(), adj->ia_link,
+                            &adj->rewrite_header);
 
     adj_nbr_evaluate_feature (adj_get_index(adj));
     return (adj);
@@ -230,7 +234,12 @@ adj_nbr_add_or_lock (fib_protocol_t nh_proto,
 	adj_index = adj_get_index(adj);
 	adj_lock(adj_index);
 
-	vnet_rewrite_init(vnm, sw_if_index,
+        if (ip46_address_is_equal(&ADJ_BCAST_ADDR, nh_addr))
+        {
+            adj->lookup_next_index = IP_LOOKUP_NEXT_BCAST;
+        }
+
+	vnet_rewrite_init(vnm, sw_if_index, link_type,
 			  adj_get_nd_node(nh_proto),
 			  vnet_tx_node_index_for_sw_interface(vnm, sw_if_index),
 			  &adj->rewrite_header);
@@ -258,26 +267,24 @@ adj_nbr_add_or_lock_w_rewrite (fib_protocol_t nh_proto,
 			       u8 *rewrite)
 {
     adj_index_t adj_index;
-    ip_adjacency_t *adj;
 
     adj_index = adj_nbr_find(nh_proto, link_type, nh_addr, sw_if_index);
 
     if (ADJ_INDEX_INVALID == adj_index)
     {
-	adj = adj_nbr_alloc(nh_proto, link_type, nh_addr, sw_if_index);
+        ip_adjacency_t *adj;
+
+        adj = adj_nbr_alloc(nh_proto, link_type, nh_addr, sw_if_index);
 	adj->rewrite_header.sw_if_index = sw_if_index;
-    }
-    else
-    {
-        adj = adj_get(adj_index);
+        adj_index = adj_get_index(adj);
     }
 
-    adj_lock(adj_get_index(adj));
-    adj_nbr_update_rewrite(adj_get_index(adj),
+    adj_lock(adj_index);
+    adj_nbr_update_rewrite(adj_index,
 			   ADJ_NBR_REWRITE_FLAG_COMPLETE,
 			   rewrite);
 
-    return (adj_get_index(adj));
+    return (adj_index);
 }
 
 /**
@@ -584,29 +591,6 @@ adj_nbr_walk (u32 sw_if_index,
 }
 
 /**
- * @brief Context for a walk of the adjacency neighbour DB
- */
-typedef struct adj_walk_nh_ctx_t_
-{
-    adj_walk_cb_t awc_cb;
-    void *awc_ctx;
-    const ip46_address_t *awc_nh;
-} adj_walk_nh_ctx_t;
-
-static void
-adj_nbr_walk_nh_cb (BVT(clib_bihash_kv) * kvp,
-		    void *arg)
-{
-    ip_adjacency_t *adj;
-    adj_walk_nh_ctx_t *ctx = arg;
-
-    adj = adj_get(kvp->value);
-
-    if (!ip46_address_cmp(&adj->sub_type.nbr.next_hop, ctx->awc_nh)) 
-	ctx->awc_cb(kvp->value, ctx->awc_ctx);
-}
-
-/**
  * @brief Walk adjacencies on a link with a given v4 next-hop.
  * that is visit the adjacencies with different link types.
  */
@@ -622,17 +606,16 @@ adj_nbr_walk_nh4 (u32 sw_if_index,
     ip46_address_t nh = {
 	.ip4 = *addr,
     };
+    vnet_link_t linkt;
+    adj_index_t ai;
 
-    adj_walk_nh_ctx_t awc = {
-	.awc_ctx = ctx,
-	.awc_cb = cb,
-	.awc_nh = &nh,
-    };
+    FOR_EACH_VNET_LINK(linkt)
+    {
+        ai = adj_nbr_find (FIB_PROTOCOL_IP4, linkt, &nh, sw_if_index);
 
-    BV(clib_bihash_foreach_key_value_pair) (
-	adj_nbr_tables[FIB_PROTOCOL_IP4][sw_if_index],
-	adj_nbr_walk_nh_cb,
-	&awc);
+        if (INDEX_INVALID != ai)
+            cb(ai, ctx);
+    }
 }
 
 /**
@@ -651,17 +634,16 @@ adj_nbr_walk_nh6 (u32 sw_if_index,
     ip46_address_t nh = {
 	.ip6 = *addr,
     };
+    vnet_link_t linkt;
+    adj_index_t ai;
 
-    adj_walk_nh_ctx_t awc = {
-	.awc_ctx = ctx,
-	.awc_cb = cb,
-	.awc_nh = &nh,
-    };
+    FOR_EACH_VNET_LINK(linkt)
+    {
+        ai = adj_nbr_find (FIB_PROTOCOL_IP6, linkt, &nh, sw_if_index);
 
-    BV(clib_bihash_foreach_key_value_pair) (
-	adj_nbr_tables[FIB_PROTOCOL_IP6][sw_if_index],
-	adj_nbr_walk_nh_cb,
-	&awc);
+        if (INDEX_INVALID != ai)
+            cb(ai, ctx);
+    }
 }
 
 /**
@@ -678,16 +660,16 @@ adj_nbr_walk_nh (u32 sw_if_index,
     if (!ADJ_NBR_ITF_OK(adj_nh_proto, sw_if_index))
 	return;
 
-    adj_walk_nh_ctx_t awc = {
-	.awc_ctx = ctx,
-	.awc_cb = cb,
-	.awc_nh = nh,
-    };
+    vnet_link_t linkt;
+    adj_index_t ai;
 
-    BV(clib_bihash_foreach_key_value_pair) (
-	adj_nbr_tables[adj_nh_proto][sw_if_index],
-	adj_nbr_walk_nh_cb,
-	&awc);
+    FOR_EACH_VNET_LINK(linkt)
+    {
+        ai = adj_nbr_find (FIB_PROTOCOL_IP4, linkt, nh, sw_if_index);
+
+        if (INDEX_INVALID != ai)
+            cb(ai, ctx);
+    }
 }
 
 /**
@@ -719,7 +701,6 @@ adj_nbr_interface_state_change_one (adj_index_t ai,
      * since this is the walk that provides convergence
      */
     adj_nbr_interface_state_change_ctx_t *ctx = arg;
-
     fib_node_back_walk_ctx_t bw_ctx = {
 	.fnbw_reason = ((ctx->flags & ADJ_NBR_INTERFACE_UP) ?
                         FIB_NODE_BW_REASON_FLAG_INTERFACE_UP :
@@ -731,10 +712,15 @@ adj_nbr_interface_state_change_one (adj_index_t ai,
          */
         .fnbw_flags = (!(ctx->flags & ADJ_NBR_INTERFACE_UP) ?
                        FIB_NODE_BW_FLAG_FORCE_SYNC :
-                       0),
+                       FIB_NODE_BW_FLAG_NONE),
     };
+    ip_adjacency_t *adj;
 
+    adj = adj_get(ai);
+
+    adj->ia_flags |= ADJ_FLAG_SYNC_WALK_ACTIVE;
     fib_walk_sync(FIB_NODE_TYPE_ADJ, ai, &bw_ctx);
+    adj->ia_flags &= ~ADJ_FLAG_SYNC_WALK_ACTIVE;
 
     return (ADJ_WALK_RC_CONTINUE);
 }
@@ -776,7 +762,7 @@ VNET_SW_INTERFACE_ADMIN_UP_DOWN_FUNCTION_PRIO(
  * @brief Invoked on each SW interface of a HW interface when the
  * HW interface state changes
  */
-static void
+static walk_rc_t
 adj_nbr_hw_sw_interface_state_change (vnet_main_t * vnm,
                                       u32 sw_if_index,
                                       void *arg)
@@ -793,6 +779,7 @@ adj_nbr_hw_sw_interface_state_change (vnet_main_t * vnm,
 		     adj_nbr_interface_state_change_one,
 		     ctx);
     }
+    return (WALK_CONTINUE);
 }
 
 /**
@@ -834,8 +821,13 @@ adj_nbr_interface_delete_one (adj_index_t ai,
     fib_node_back_walk_ctx_t bw_ctx = {
 	.fnbw_reason = FIB_NODE_BW_REASON_FLAG_INTERFACE_DELETE,
     };
+    ip_adjacency_t *adj;
 
+    adj = adj_get(ai);
+
+    adj->ia_flags |= ADJ_FLAG_SYNC_WALK_ACTIVE;
     fib_walk_sync(FIB_NODE_TYPE_ADJ, ai, &bw_ctx);
+    adj->ia_flags &= ~ADJ_FLAG_SYNC_WALK_ACTIVE;
 
     return (ADJ_WALK_RC_CONTINUE);
 }
@@ -968,21 +960,6 @@ VLIB_CLI_COMMAND (ip4_show_fib_command, static) = {
     .function = adj_nbr_show,
 };
 
-static ip46_type_t
-adj_proto_to_46 (fib_protocol_t proto)
-{
-    switch (proto)
-    {
-    case FIB_PROTOCOL_IP4:
-	return (IP46_TYPE_IP4);
-    case FIB_PROTOCOL_IP6:
-	return (IP46_TYPE_IP6);
-    default:
-	return (IP46_TYPE_IP4);
-    }
-    return (IP46_TYPE_IP4);
-}
-
 u8*
 format_adj_nbr_incomplete (u8* s, va_list *ap)
 {
@@ -996,10 +973,8 @@ format_adj_nbr_incomplete (u8* s, va_list *ap)
                 format_ip46_address, &adj->sub_type.nbr.next_hop,
 		adj_proto_to_46(adj->ia_nh_proto));
     s = format (s, " %U",
-                format_vnet_sw_interface_name,
-                vnm,
-                vnet_get_sw_interface(vnm,
-                                      adj->rewrite_header.sw_if_index));
+                format_vnet_sw_if_index_name,
+                vnm, adj->rewrite_header.sw_if_index);
 
     return (s);
 }
@@ -1047,11 +1022,13 @@ const static dpo_vft_t adj_nbr_dpo_vft = {
     .dv_unlock = adj_dpo_unlock,
     .dv_format = format_adj_nbr,
     .dv_mem_show = adj_mem_show,
+    .dv_get_urpf = adj_dpo_get_urpf,
 };
 const static dpo_vft_t adj_nbr_incompl_dpo_vft = {
     .dv_lock = adj_dpo_lock,
     .dv_unlock = adj_dpo_unlock,
     .dv_format = format_adj_nbr_incomplete,
+    .dv_get_urpf = adj_dpo_get_urpf,
 };
 
 /**

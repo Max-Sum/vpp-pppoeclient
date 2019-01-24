@@ -146,7 +146,7 @@ sr_cli_localsid (char is_del, ip6_address_t * localsid_addr,
 
   /* Create a new localsid registry */
   pool_get (sm->localsids, ls);
-  memset (ls, 0, sizeof (*ls));
+  clib_memset (ls, 0, sizeof (*ls));
 
   clib_memcpy (&ls->localsid, localsid_addr, sizeof (ip6_address_t));
   ls->end_psp = end_psp;
@@ -162,7 +162,7 @@ sr_cli_localsid (char is_del, ip6_address_t * localsid_addr,
       clib_memcpy (&ls->next_hop.ip6, &nh_addr->ip6, sizeof (ip6_address_t));
       break;
     case SR_BEHAVIOR_T:
-      ls->vrf_index = sw_if_index;
+      ls->vrf_index = fib_table_find (FIB_PROTOCOL_IP6, sw_if_index);
       break;
     case SR_BEHAVIOR_DX4:
       ls->sw_if_index = sw_if_index;
@@ -173,10 +173,10 @@ sr_cli_localsid (char is_del, ip6_address_t * localsid_addr,
       clib_memcpy (&ls->next_hop.ip6, &nh_addr->ip6, sizeof (ip6_address_t));
       break;
     case SR_BEHAVIOR_DT6:
-      ls->vrf_index = sw_if_index;
+      ls->vrf_index = fib_table_find (FIB_PROTOCOL_IP6, sw_if_index);
       break;
     case SR_BEHAVIOR_DT4:
-      ls->vrf_index = sw_if_index;
+      ls->vrf_index = fib_table_find (FIB_PROTOCOL_IP4, sw_if_index);
       break;
     case SR_BEHAVIOR_DX2:
       ls->sw_if_index = sw_if_index;
@@ -276,7 +276,7 @@ sr_cli_localsid_command_fn (vlib_main_t * vm, unformat_input_t * input,
 
   int rv;
 
-  memset (&resulting_address, 0, sizeof (ip6_address_t));
+  clib_memset (&resulting_address, 0, sizeof (ip6_address_t));
   ip46_address_reset (&next_hop);
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
@@ -473,8 +473,7 @@ show_sr_localsid_command_fn (vlib_main_t * vm, unformat_input_t * input,
 	  vlib_cli_output (vm,
 			   "\tAddress: \t%U\n\tBehavior: \tT (Endpoint with specific IPv6 table lookup)"
 			   "\n\tTable:  \t%u",
-			   format_ip6_address, &ls->localsid,
-			   format_vnet_sw_if_index_name, vnm, ls->vrf_index);
+			   format_ip6_address, &ls->localsid, ls->vrf_index);
 	  break;
 	case SR_BEHAVIOR_DX4:
 	  vlib_cli_output (vm,
@@ -575,8 +574,8 @@ clear_sr_localsid_counters_command_fn (vlib_main_t * vm,
 
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (clear_sr_localsid_counters_command, static) = {
-  .path = "clear sr localsid counters",
-  .short_help = "clear sr localsid counters",
+  .path = "clear sr localsid-counters",
+  .short_help = "clear sr localsid-counters",
   .function = clear_sr_localsid_counters_command_fn,
 };
 /* *INDENT-ON* */
@@ -888,7 +887,7 @@ sr_localsid_d_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
   from = vlib_frame_vector_args (from_frame);
   n_left_from = from_frame->n_vectors;
   next_index = node->cached_next_index;
-  u32 thread_index = vlib_get_thread_index ();
+  u32 thread_index = vm->thread_index;
 
   while (n_left_from > 0)
     {
@@ -947,13 +946,13 @@ sr_localsid_d_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 			       vnet_buffer (b0)->ip.adj_index[VLIB_TX]);
 	  ls1 =
 	    pool_elt_at_index (sm->localsids,
-			       vnet_buffer (b0)->ip.adj_index[VLIB_TX]);
+			       vnet_buffer (b1)->ip.adj_index[VLIB_TX]);
 	  ls2 =
 	    pool_elt_at_index (sm->localsids,
-			       vnet_buffer (b0)->ip.adj_index[VLIB_TX]);
+			       vnet_buffer (b2)->ip.adj_index[VLIB_TX]);
 	  ls3 =
 	    pool_elt_at_index (sm->localsids,
-			       vnet_buffer (b0)->ip.adj_index[VLIB_TX]);
+			       vnet_buffer (b3)->ip.adj_index[VLIB_TX]);
 
 	  ip0 = vlib_buffer_get_current (b0);
 	  ip1 = vlib_buffer_get_current (b1);
@@ -1191,7 +1190,7 @@ sr_localsid_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
   from = vlib_frame_vector_args (from_frame);
   n_left_from = from_frame->n_vectors;
   next_index = node->cached_next_index;
-  u32 thread_index = vlib_get_thread_index ();
+  u32 thread_index = vm->thread_index;
 
   while (n_left_from > 0)
     {
@@ -1260,13 +1259,13 @@ sr_localsid_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 			       vnet_buffer (b0)->ip.adj_index[VLIB_TX]);
 	  ls1 =
 	    pool_elt_at_index (sm->localsids,
-			       vnet_buffer (b0)->ip.adj_index[VLIB_TX]);
+			       vnet_buffer (b1)->ip.adj_index[VLIB_TX]);
 	  ls2 =
 	    pool_elt_at_index (sm->localsids,
-			       vnet_buffer (b0)->ip.adj_index[VLIB_TX]);
+			       vnet_buffer (b2)->ip.adj_index[VLIB_TX]);
 	  ls3 =
 	    pool_elt_at_index (sm->localsids,
-			       vnet_buffer (b0)->ip.adj_index[VLIB_TX]);
+			       vnet_buffer (b3)->ip.adj_index[VLIB_TX]);
 
 	  end_srh_processing (node, b0, ip0, sr0, ls0, &next0, ls0->end_psp,
 			      prev0);
@@ -1550,7 +1549,7 @@ sr_localsid_register_function (vlib_main_t * vm, u8 * fn_name,
 		    plugin - sm->plugin_functions);
     }
 
-  memset (plugin, 0, sizeof (*plugin));
+  clib_memset (plugin, 0, sizeof (*plugin));
 
   plugin->sr_localsid_function_number = (plugin - sm->plugin_functions);
   plugin->sr_localsid_function_number += SR_BEHAVIOR_LAST;

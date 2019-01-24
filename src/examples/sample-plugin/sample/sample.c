@@ -23,7 +23,6 @@
 
 #include <vlibapi/api.h>
 #include <vlibmemory/api.h>
-#include <vlibsocket/api.h>
 
 /* define message IDs */
 #include <sample/sample_msg_enum.h>
@@ -63,6 +62,8 @@ VLIB_PLUGIN_REGISTER () = {
     .description = "Sample of VPP Plugin",
 };
 /* *INDENT-ON* */
+
+sample_main_t sample_main;
 
 /**
  * @brief Enable/disable the macswap plugin. 

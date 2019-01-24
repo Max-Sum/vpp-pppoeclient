@@ -30,7 +30,6 @@
 
 #include <vlibapi/api.h>
 #include <vlibmemory/api.h>
-#include <vlibsocket/api.h>
 
 /* define message IDs */
 #include <flowprobe/flowprobe_msg_enum.h>
@@ -334,7 +333,9 @@ flowprobe_template_rewrite_ip6 (flow_report_main_t * frm,
 				flow_report_t * fr,
 				ip4_address_t * collector_address,
 				ip4_address_t * src_address,
-				u16 collector_port)
+				u16 collector_port,
+				ipfix_report_element_t * elts,
+				u32 n_elts, u32 * stream_index)
 {
   return flowprobe_template_rewrite_inline
     (frm, fr, collector_address, src_address, collector_port,
@@ -346,7 +347,9 @@ flowprobe_template_rewrite_ip4 (flow_report_main_t * frm,
 				flow_report_t * fr,
 				ip4_address_t * collector_address,
 				ip4_address_t * src_address,
-				u16 collector_port)
+				u16 collector_port,
+				ipfix_report_element_t * elts,
+				u32 n_elts, u32 * stream_index)
 {
   return flowprobe_template_rewrite_inline
     (frm, fr, collector_address, src_address, collector_port,
@@ -358,7 +361,9 @@ flowprobe_template_rewrite_l2 (flow_report_main_t * frm,
 			       flow_report_t * fr,
 			       ip4_address_t * collector_address,
 			       ip4_address_t * src_address,
-			       u16 collector_port)
+			       u16 collector_port,
+			       ipfix_report_element_t * elts,
+			       u32 n_elts, u32 * stream_index)
 {
   return flowprobe_template_rewrite_inline
     (frm, fr, collector_address, src_address, collector_port,
@@ -370,7 +375,9 @@ flowprobe_template_rewrite_l2_ip4 (flow_report_main_t * frm,
 				   flow_report_t * fr,
 				   ip4_address_t * collector_address,
 				   ip4_address_t * src_address,
-				   u16 collector_port)
+				   u16 collector_port,
+				   ipfix_report_element_t * elts,
+				   u32 n_elts, u32 * stream_index)
 {
   return flowprobe_template_rewrite_inline
     (frm, fr, collector_address, src_address, collector_port,
@@ -382,7 +389,9 @@ flowprobe_template_rewrite_l2_ip6 (flow_report_main_t * frm,
 				   flow_report_t * fr,
 				   ip4_address_t * collector_address,
 				   ip4_address_t * src_address,
-				   u16 collector_port)
+				   u16 collector_port,
+				   ipfix_report_element_t * elts,
+				   u32 n_elts, u32 * stream_index)
 {
   return flowprobe_template_rewrite_inline
     (frm, fr, collector_address, src_address, collector_port,
@@ -1104,9 +1113,9 @@ flowprobe_init (vlib_main_t * vm)
   fm->vlib_time_0 = vlib_time_now (vm);
   fm->nanosecond_time_0 = unix_time_now_nsec ();
 
-  memset (fm->template_reports, 0, sizeof (fm->template_reports));
-  memset (fm->template_size, 0, sizeof (fm->template_size));
-  memset (fm->template_per_flow, 0, sizeof (fm->template_per_flow));
+  clib_memset (fm->template_reports, 0, sizeof (fm->template_reports));
+  clib_memset (fm->template_size, 0, sizeof (fm->template_size));
+  clib_memset (fm->template_per_flow, 0, sizeof (fm->template_per_flow));
 
   /* Decide how many worker threads we have */
   num_threads = 1 /* main thread */  + tm->n_threads;

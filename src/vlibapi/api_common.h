@@ -25,8 +25,9 @@
  */
 
 #include <vppinfra/clib_error.h>
+#include <vlibapi/api_types.h>
 #include <svm/svm_common.h>
-#include <vlibmemory/unix_shared_memory_queue.h>
+#include <svm/queue.h>
 
 /** API registration types
  */
@@ -50,20 +51,29 @@ typedef struct vl_api_registration_
 
   u8 *name;			/**< Client name */
 
+  /* Zombie apocalypse checking */
+  f64 last_heard;
+  int last_queue_head;
+  int unanswered_pings;
+
   /** shared memory only: pointer to client input queue */
-  unix_shared_memory_queue_t *vl_input_queue;
+  svm_queue_t *vl_input_queue;
+  svm_region_t *vlib_rp;
+  void *shmem_hdr;
 
   /* socket server and client */
   u32 clib_file_index;		/**< Socket only: file index */
   i8 *unprocessed_input;	/**< Socket only: pending input */
   u32 unprocessed_msg_length;	/**< Socket only: unprocssed length */
-  u8 *output_vector;		/**< Socket only: output vecto  */
+  u8 *output_vector;		/**< Socket only: output vector */
+  int *additional_fds_to_close;
 
   /* socket client only */
   u32 server_handle;		/**< Socket client only: server handle */
   u32 server_index;		/**< Socket client only: server index */
 } vl_api_registration_t;
 
+#define VL_API_INVALID_FI ((u32)~0)
 
 /** Trace configuration for a single message */
 typedef struct
@@ -125,7 +135,7 @@ typedef struct
 /** Message header structure */
 typedef struct msgbuf_
 {
-  unix_shared_memory_queue_t *q; /**< message allocated in this shmem ring  */
+  svm_queue_t *q; /**< message allocated in this shmem ring  */
   u32 data_len;			 /**< message length not including header  */
   u32 gc_mark_timestamp;	 /**< message garbage collector mark TS  */
   u8 data[0];			 /**< actual message begins here  */
@@ -147,7 +157,7 @@ void vl_msg_api_set_handlers (int msg_id, char *msg_name,
 void vl_msg_api_clean_handlers (int msg_id);
 void vl_msg_api_config (vl_msg_api_msg_config_t *);
 void vl_msg_api_set_cleanup_handler (int msg_id, void *fp);
-void vl_msg_api_queue_handler (unix_shared_memory_queue_t * q);
+void vl_msg_api_queue_handler (svm_queue_t * q);
 
 void vl_msg_api_barrier_sync (void) __attribute__ ((weak));
 void vl_msg_api_barrier_release (void) __attribute__ ((weak));
@@ -168,7 +178,9 @@ int vl_msg_api_pd_handler (void *mp, int rv);
 
 void vl_msg_api_set_first_available_msg_id (u16 first_avail);
 u16 vl_msg_api_get_msg_ids (const char *name, int n);
-u32 vl_api_get_msg_index (u8 * name_and_crc);
+u32 vl_msg_api_get_msg_index (u8 * name_and_crc);
+void *vl_msg_push_heap (void);
+void vl_msg_pop_heap (void *oldheap);
 
 typedef clib_error_t *(vl_msg_api_init_function_t) (u32 client_index);
 
@@ -177,6 +189,14 @@ typedef struct _vl_msg_api_init_function_list_elt
   struct _vl_msg_api_init_function_list_elt *next_init_function;
   vl_msg_api_init_function_t *f;
 } _vl_msg_api_function_list_elt_t;
+
+typedef struct
+{
+  u32 major;
+  u32 minor;
+  u32 patch;
+  char name[64];
+} api_version_t;
 
 /** API main structure, used by both vpp and binary API clients */
 typedef struct
@@ -231,10 +251,14 @@ typedef struct
   /** Current process PID */
   int our_pid;
 
-  /** Binary api segment descriptor */
+  /** Current binary api segment descriptor */
   svm_region_t *vlib_rp;
 
+  /** Primary api segment descriptor */
+  svm_region_t *vlib_primary_rp;
+
   /** Vector of all mapped shared-VM segments */
+  svm_region_t **vlib_private_rps;
   svm_region_t **mapped_shmem_regions;
 
   /** Binary API shared-memory segment header pointer */
@@ -277,7 +301,7 @@ typedef struct
   u64 api_pvt_heap_size;
 
   /** Peer input queue pointer */
-  unix_shared_memory_queue_t *vl_input_queue;
+  svm_queue_t *vl_input_queue;
 
   /**
    * All VLIB-side message handlers use my_client_index to identify
@@ -291,14 +315,14 @@ typedef struct
    */
   vl_api_registration_t *my_registration;
 
-  /** (Historical) signal-based queue non-empty signal, to be removed */
-  i32 vlib_signal;
-
   /** vpp/vlib input queue length */
   u32 vlib_input_queue_length;
 
   /** client message index hash table */
   uword *msg_index_by_name_and_crc;
+
+  /** api version list */
+  api_version_t *api_version_list;
 
   /** Shared VM binary API region name */
   const char *region_name;
