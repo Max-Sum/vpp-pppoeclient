@@ -13,7 +13,7 @@
 
 #include <vppinfra/byte_order.h>
 #include <vlibmemory/api.h>
-#include <vlibsocket/api.h>
+#include <vlibmemory/socket_api.h>
 
 #include <pppoeclient/pppoeclient.h>
 
